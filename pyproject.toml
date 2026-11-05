@@ -1,0 +1,26 @@
+[project]
+name = "musikbotmatrix"
+version = "0.1.0"
+description = "Matrix-Musikbot: spielt YouTube-Titel in klassischen Matrix-Calls ab"
+requires-python = ">=3.11"
+dependencies = [
+    "matrix-nio[e2e]>=0.26,<0.27",
+    "aiortc>=1.15,<2",
+    "av>=16,<18",
+    "numpy>=1.26",
+    "yt-dlp>=2025.1.1",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["musikbot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

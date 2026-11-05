@@ -1,0 +1,11 @@
+services:
+  musikbot:
+    build: .
+    image: musikbotmatrix:latest
+    # WebRTC braucht volle UDP-Freiheit (aiortc hat keine konfigurierbaren
+    # Portbereiche). Host-Network ist der einfachste Weg; alternativ TURN nutzen.
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
