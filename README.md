@@ -27,6 +27,40 @@ eintragen (`TURN_URIS`/`TURN_USERNAME`/`TURN_PASSWORD`) oder
 `TURN_DISCOVERY=true`, wenn der Homeserver (Synapse)
 `/voip/turnServer` anbietet.
 
+## Daten: was überlebt und was weg ist
+
+Der Bot schreibt alles (Downloads, Datenbank, Matrix-Gerätedaten) in den
+Container-Pfad `/data`, und der liegt in einem **Docker-Volume** namens
+`musikbot_data` – bewusst kein Bind-Mount in den Projektordner.
+
+| Aktion | Cache + Bibliothek |
+|---|---|
+| `docker compose restart`, Reboot, `up -d`, Image-Neubau | **bleiben erhalten** |
+| `docker compose stop` / `down` | **bleiben erhalten** (Volume bleibt) |
+| `docker compose down -v` | **alles weg** (Cache, Bibliothek, DB, Gerät) |
+| UI „Delete/Down“ + Häkchen **Remove volumes** | **alles weg** |
+| `./clean.sh` | **alles weg** inkl. Image, prüft danach nach |
+
+Empfohlen zum vollständigen Entfernen:
+
+```bash
+./clean.sh            # Container + Netzwerk + Volume + Image
+cd .. && rm -rf musikbotmatrix   # zuletzt Projektordner inkl. .env
+```
+
+Nach dem Löschen ist der Bot ein **neues Matrix-Gerät**: alte, verschlüsselte
+Chat-Verläufe kann er nicht mehr lesen, und du meldest ihn mit Token/Passwort
+neu an. Das ist gewollt so.
+
+In Portainer o. Ä. beim Löschen des Stacks **„Remove volumes“** anhaken – ohne
+dieses Häkchen bleibt das Volume `musikbot_data` als Einzelstück stehen
+(sieht man mit `docker volume ls`). Aufräumen: `docker volume rm musikbot_data`
+oder `docker volume prune`.
+
+(Hinweis: der Schlüssel `name:` in der Compose-Datei braucht Docker Compose
+v2.18 oder neuer; er sorgt dafür, dass das Volume immer `musikbot_data` heisst,
+unabhängig vom Ordnernamen.)
+
 ## Kommandos
 
 | Befehl | Wirkung |
@@ -47,9 +81,9 @@ Deutsche Aliase funktionieren auch (`/abspielen`, `/pausieren`, `/fortsetzen`,
 
 ## Speicher-Regeln (genau so, wie gewuenscht)
 
-- Ein Titel wird ab **3 Anforderungen** (Default) dauerhaft in `data/library/`
-  gespeichert und nie automatisch geloescht.
-- Sonst liegt er in `data/cache/` mit maximal **10 Titeln**.
+- Ein Titel wird ab **3 Anforderungen** (Default) dauerhaft in `library/`
+  (im Volume `/data`) gespeichert und nie automatisch geloescht.
+- Sonst liegt er in `cache/` mit maximal **10 Titeln**.
 - Ein frischer Cache-Titel fliegt raus, wenn er **2 weitere Anforderungen**
   braucht, bevor **9 andere Titel** angefordert wurden.
 - Alles per `.env` einstellbar: `SAVE_AFTER_REQUESTS`, `CACHE_MAX_ENTRIES`,

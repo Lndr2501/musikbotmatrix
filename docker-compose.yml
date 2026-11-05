@@ -1,3 +1,5 @@
+name: musikbot
+
 services:
   musikbot:
     build: .
@@ -8,4 +10,10 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./data:/data
+      # Docker-Volume (kein Bind-Mount): ueberlebt Neustarts und "compose down",
+      # wird aber mit "compose down -v" bzw. "Delete + Remove volumes" in der UI
+      # zuverlaessig mit geloescht – es liegen keine Dateien im Projektordner.
+      - data:/data
+
+volumes:
+  data:
