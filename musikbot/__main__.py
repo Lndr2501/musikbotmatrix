@@ -42,13 +42,7 @@ async def amain() -> int:
             loop.add_signal_handler(sig, stop.set)
 
     try:
-        await bot.matrix.login()
-        rooms = await bot.matrix.prepare_rooms()
-        for rid in rooms:
-            await bot.matrix.ensure_room_state(rid)
-        turn = await bot.matrix.fetch_turn()
-        if turn:
-            bot.calls.set_turn(turn)
+        rooms = await bot.startup()
         if check:
             from .selfcheck import run_check
             await run_check(bot)

@@ -38,7 +38,6 @@ def parse_local_candidates(sdp: str) -> list[dict]:
     # Abschnitts-Mids bestimmen (aiortc nutzt mid == Abschnittsindex)
     out: list[dict] = []
     seen = set()
-    section = -1
     mline_index: dict[int, int] = {}
     idx = -1
     for line in sdp.splitlines():
@@ -372,9 +371,11 @@ class CallManager:
                          conf_id, content) -> None:
         if not self.cfg.auto_answer:
             return
-        if not self.cfg.mesh_invite == "auto":
-            if self.cfg.mesh_invite == "off" and conf_id != self.active_conf:
-                return
+        # Gruppenanruf erkennbar an conf_id (v1); 1:1-Calls haben keinen.
+        is_group = bool(content.get("conf_id") or content.get("confId"))
+        mode = self.cfg.mesh_invite
+        if mode == "off" and is_group and self.active_conf and conf_id != self.active_conf:
+            return
         peer = self._find(call_id, party_id)
         if peer:
             return
@@ -394,7 +395,7 @@ class CallManager:
         except Exception:
             log.exception("Invite beantworten fehlgeschlagen")
             await peer.close("bad-invite")
-        if self.cfg.mesh_invite == "auto":
+        if mode == "all" or (mode == "auto" and is_group):
             await self._mesh_join(room_id, conf_id, {p.user_id for p in self.peers
                                                      if p.conf_id == conf_id})
 

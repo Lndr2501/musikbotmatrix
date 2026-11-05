@@ -39,10 +39,9 @@ async def run_check(bot) -> None:
 
     # 4) Codecs
     try:
-        import aiortc  # noqa: F401
-        from aiortc.codecs import opus as _opus  # noqa: F401
-        from aiortc.codecs import vp8  # noqa: F401
-        line("Codecs", True, "Opus + VP8/VPX veruegbar (libopus/libvpx)")
+        from aiortc.codecs import opus, vp8
+        assert opus and vp8
+        line("Codecs", True, "Opus + VP8/VPX verfuegbar (libopus/libvpx)")
     except Exception as exc:
         line("Codecs", False, str(exc))
 

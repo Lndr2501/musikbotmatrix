@@ -12,7 +12,6 @@ import logging
 from fractions import Fraction
 from typing import Awaitable, Callable, Optional
 
-import av
 import numpy as np
 from aiortc import MediaStreamTrack
 from av import AudioFrame, VideoFrame

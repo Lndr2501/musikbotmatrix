@@ -6,10 +6,8 @@ ueber das Telefon-Icon (Peer-zu-Peer/mesh, klassisches m.call-Signaling).
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import random
-from typing import Optional
 
 from .calls import CallManager
 from .commands import HELP, parse
@@ -52,7 +50,7 @@ class Bot:
         self.calls.devices_of_room = m.devices_of_room
 
     # ------------------------------------------------------------------ Start
-    async def run(self) -> None:
+    async def startup(self) -> list[str]:
         await self.matrix.login()
         rooms = await self.matrix.prepare_rooms()
         for rid in rooms:
@@ -60,6 +58,10 @@ class Bot:
         turn = await self.matrix.fetch_turn()
         if turn:
             self.calls.set_turn(turn)
+        return rooms
+
+    async def run(self) -> None:
+        rooms = await self.startup()
         log.info("Bot bereit. Raeume: %s", ", ".join(rooms) or "(keine konfiguriert)")
         await self.matrix.run()
 

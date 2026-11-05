@@ -1,7 +1,5 @@
 """Regel-Tests: 3x anfordern -> Library, Cache-Größe, Fenster-Regel."""
 
-import pytest
-
 from musikbot.policy import CACHE, LIBRARY, Policy, register_request
 
 P = Policy(save_after=3, cache_max=10, window_self=2, window_others=9)
@@ -13,9 +11,9 @@ def req(entries, key):
 
 def test_drei_anforderungen_machen_library():
     entries = {}
-    _, o1 = None, req(entries, "a")
+    o1 = req(entries, "a")
     assert o1.first_request and entries["a"].state == CACHE
-    o2 = req(entries, "a")
+    req(entries, "a")
     assert entries["a"].state == CACHE
     o3 = req(entries, "a")
     assert o3.promoted

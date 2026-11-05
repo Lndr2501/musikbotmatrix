@@ -67,7 +67,6 @@ def test_rtc_loopback():
 
         frames = _video_frames()
         t0 = time.monotonic()
-        n = 0
         feed = asyncio.ensure_future(_feed(hub, frames, t0, done))
         await asyncio.wait_for(done.wait(), 30)
         feed.cancel()

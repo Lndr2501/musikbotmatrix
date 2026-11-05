@@ -1,6 +1,4 @@
 """MediaSource: dekodiert einen mit PyAV erzeugten Clip (Audio + Video)."""
-import math
-
 import numpy as np
 import pytest
 
