@@ -166,7 +166,7 @@ class Matrix:
         if not self.cfg.auto_join_invites:
             return
         for room in list(self.client.rooms.values()):
-            if isinstance(room, nio.InvitedRoom):
+            if isinstance(room, nio.MatrixInvitedRoom):
                 log.info("Einladung erkannt: %s", room.room_id)
                 await self._join(room.room_id)
 
