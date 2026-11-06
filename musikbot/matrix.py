@@ -165,10 +165,10 @@ class Matrix:
         """
         if not self.cfg.auto_join_invites:
             return
-        for room in list(self.client.rooms.values()):
-            if isinstance(room, nio.MatrixInvitedRoom):
-                log.info("Einladung erkannt: %s", room.room_id)
-                await self._join(room.room_id)
+        # nio pflegt offene Einladungen separat in client.invited_rooms.
+        for room in list(self.client.invited_rooms.values()):
+            log.info("Einladung erkannt: %s", room.room_id)
+            await self._join(room.room_id)
 
     # ------------------------------------------------------------------ Start
     async def prepare_rooms(self) -> list[str]:
