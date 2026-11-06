@@ -37,6 +37,7 @@ class Matrix:
             store_path=cfg.store_path, config=config)
         self._room_ids: list[str] = []
         self._devices: dict[str, dict[str, list[str]]] = {}  # room -> user -> devs
+        self._key_req: set[str] = set()  # Session-IDs, fuer die Keys schon angefragt wurden
         self._stop = asyncio.Event()
 
         # Callbacks (von bot.py gesetzt):
@@ -109,12 +110,15 @@ class Matrix:
                      (event.body or "")[:80])
             if self.on_text:
                 await self.on_text(room.room_id, event.sender, event.body or "")
+        elif isinstance(event, nio.MegolmEvent):
+            # Verschluesseltes Event, dessen Raum-Key fehlt. nio fragt dafuer
+            # NICHT automatisch nach (nur bei gezw-Session-Faellen) -> selbst
+            # beim Absender anfragen. Element teilt Keys aber nur, wenn das
+            # Bot-Geraet verifiziert ist oder Schluesselteilung aktiviert wurde.
+            await self._request_room_key(event)
         elif isinstance(event, nio.UnknownEncryptedEvent):
-            # Raum-Key fehlt noch: nio hat automatisch danach gefragt. Wenn das
-            # Oeffentlichbleibt, hilft Verifizieren oder erneutes Senden.
             log.warning("Verschluesseltes Event in %s nicht entschluesselbar "
-                        "(Room-Key fehlt, Schluesselanfrage rausgelassen?).",
-                        room.room_id)
+                        "(Room-Key fehlt).", room.room_id)
         elif isinstance(event, (nio.CallInviteEvent, nio.CallAnswerEvent,
                                 nio.CallCandidatesEvent, nio.CallHangupEvent,
                                 nio.UnknownEvent, nio.UnknownEncryptedEvent)):
@@ -127,6 +131,25 @@ class Matrix:
             if self.on_call:
                 await self.on_call(room.room_id, event.sender, None, content)
         await self._membership_cb(room, event)
+
+    async def _request_room_key(self, event: nio.MegolmEvent) -> None:
+        """Raum-Key beim Absender anfragen (m.room_key_request als To-Device)."""
+        session_id = getattr(event, "session_id", None)
+        if not session_id or session_id in self._key_req:
+            return
+        self._key_req.add(session_id)
+        try:
+            msg = event.as_key_request(event.sender, self.cfg.device_id)
+        except Exception:
+            log.exception("Key-Request bauen fehlgeschlagen")
+            return
+        resp = await self.client.to_device(msg)
+        if isinstance(resp, nio.ToDeviceResponse):
+            log.info("Raum-Key angefragt bei %s (Session %s).",
+                     event.sender, session_id[:12])
+        else:
+            self._key_req.discard(session_id)
+            log.warning("Key-Request an %s fehlgeschlagen: %s", event.sender, resp)
 
     async def _membership_cb(self, room: nio.MatrixRoom, event) -> None:
         source = getattr(event, "source", {}) or {}
