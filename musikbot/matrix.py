@@ -89,6 +89,7 @@ class Matrix:
                 resp = None
             if isinstance(resp, nio.SyncResponse):
                 backoff = 1
+                await self._accept_invites()
             elif resp is not None:
                 log.warning("Sync-Fehler: %s", resp)
                 await asyncio.sleep(backoff)
@@ -156,6 +157,19 @@ class Matrix:
         else:
             log.warning("Raum-Beitritt %s fehlgeschlagen: %s", room_id, resp)
 
+    async def _accept_invites(self) -> None:
+        """Offene Einladungen annehmen.
+
+        nio behandelt Einladungen im /sync separat als 'invited room' und feuert
+        dafuer KEINE Event-Callbacks -- daher explizit nach jedem Sync pruefen.
+        """
+        if not self.cfg.auto_join_invites:
+            return
+        for room in list(self.client.rooms.values()):
+            if isinstance(room, nio.InvitedRoom):
+                log.info("Einladung erkannt: %s", room.room_id)
+                await self._join(room.room_id)
+
     # ------------------------------------------------------------------ Start
     async def prepare_rooms(self) -> list[str]:
         """Konfigurierte Raeume aufloesen und betreten; liefert Raum-IDs."""
@@ -172,6 +186,7 @@ class Matrix:
             for rid in ids:
                 if rid not in have:
                     await self._join(rid)
+        await self._accept_invites()
         self._room_ids = ids
         return ids
 
