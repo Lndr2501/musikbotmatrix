@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Awaitable, Callable, Optional
 
 import nio
@@ -24,6 +25,9 @@ SYNC_TIMEOUT_MS = 30_000
 class Matrix:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        # nio nutzt store_path als VERZEICHNIS und legt dort die E2EE-DBs ab;
+        # das Verzeichnis wird von nio nicht selbst angelegt.
+        os.makedirs(cfg.store_path, exist_ok=True)
         config = nio.AsyncClientConfig(
             encryption_enabled=cfg.encryption_enabled,
             store_sync_tokens=True,
