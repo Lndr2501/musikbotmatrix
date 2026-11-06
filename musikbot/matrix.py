@@ -105,8 +105,16 @@ class Matrix:
         if isinstance(event, nio.RoomMessageText):
             if event.sender == self.cfg.user or event.sender == self.cfg.matrix_user_id:
                 return
+            log.info("Text von %s in %s: %s", event.sender, room.room_id,
+                     (event.body or "")[:80])
             if self.on_text:
                 await self.on_text(room.room_id, event.sender, event.body or "")
+        elif isinstance(event, nio.UnknownEncryptedEvent):
+            # Raum-Key fehlt noch: nio hat automatisch danach gefragt. Wenn das
+            # Oeffentlichbleibt, hilft Verifizieren oder erneutes Senden.
+            log.warning("Verschluesseltes Event in %s nicht entschluesselbar "
+                        "(Room-Key fehlt, Schluesselanfrage rausgelassen?).",
+                        room.room_id)
         elif isinstance(event, (nio.CallInviteEvent, nio.CallAnswerEvent,
                                 nio.CallCandidatesEvent, nio.CallHangupEvent,
                                 nio.UnknownEvent, nio.UnknownEncryptedEvent)):
