@@ -11,6 +11,7 @@ import random
 
 from .calls import CallManager
 from .commands import HELP, parse
+from .elementcall import ElementCall
 from .config import Config
 from .hub import Hub
 from .matrix import Matrix
@@ -33,6 +34,7 @@ class Bot:
                              on_event=self._player_event)
         self.calls = CallManager(cfg, self.player)
         self.matrix = Matrix(cfg)
+        self.ecall = ElementCall(cfg, self.matrix, self.player)
         self.resolver = MediaResolver(cfg)
         # Buchhaltung, welcher Raum welche Liste zuletzt gesehen hat:
         self._listing: dict[str, list[str]] = {}
@@ -45,6 +47,7 @@ class Bot:
         m.on_call = self.calls.handle_event
         m.on_member_join = self.calls.on_member_joined
         m.on_room_left = self.calls.on_room_left
+        m.on_rtc_member = self.ecall.on_member_event
         self.calls.send_room_event = m.send_room_event
         self.calls.send_to_device = m.send_to_device
         self.calls.devices_of_room = m.devices_of_room
@@ -66,6 +69,10 @@ class Bot:
         await self.matrix.run()
 
     async def shutdown(self) -> None:
+        try:
+            await self.ecall.leave()
+        except Exception:
+            log.exception("Element Call verlassen beim Shutdown")
         await self.calls.hangup_all("shutdown")
         await self.player.shutdown()
         self.matrix.stop()
@@ -125,7 +132,7 @@ class Bot:
         p = self.player
         if name == "play":
             if not arg:
-                await m.send_notice(room_id, "Benutzung: /play <Link oder Suchbegriff>")
+                await m.send_notice(room_id, "Benutzung: !play <Link oder Suchbegriff>")
                 return
             if room_id in self._busy:
                 await m.send_notice(room_id, "Ich lade gerade schon etwas herunter …")
@@ -166,7 +173,7 @@ class Bot:
         elif name == "seek":
             seconds = parse_time(arg)
             if seconds is None:
-                await m.send_notice(room_id, "Benutzung: /seek <mm:ss oder Sekunden>")
+                await m.send_notice(room_id, "Benutzung: !seek <mm:ss oder Sekunden>")
                 return
             ok = await p.seek(seconds)
             await m.send_notice(room_id, f"⏩ {fmt_time(p.position)}" if ok else "Kann gerade nicht gespult werden.")
@@ -174,7 +181,7 @@ class Bot:
             try:
                 value = int(arg.strip())
             except ValueError:
-                await m.send_notice(room_id, f"Lautstaerke ist {p.volume}/100. Benutzung: /volume 0-100")
+                await m.send_notice(room_id, f"Lautstaerke ist {p.volume}/100. Benutzung: !volume 0-100")
                 return
             v = p.set_volume(value)
             await m.send_notice(room_id, f"🔊 Lautstaerke: {v}")
@@ -190,12 +197,12 @@ class Bot:
             self._loop_on = True if mode == "on" else False if mode == "off" else not self._loop_on
             await m.send_notice(room_id, f"Schleife: {'an' if self._loop_on else 'aus'}")
         elif name == "joincall":
-            await self.matrix.ensure_room_state(room_id)
-            await self.calls.start_call_in_room(room_id)
-            await m.send_notice(room_id, "Ich rufe die Mitglieder des Raums an (Mesh).")
+            if await self._join_element_call(room_id, force=True):
+                await m.send_notice(room_id, "📞 Bin im Element Call.")
         elif name == "leavecall":
+            await self.ecall.leave()
             await self.calls.hangup_all("user")
-            await m.send_notice(room_id, "Anruf beendet.")
+            await m.send_notice(room_id, "Call verlassen.")
         elif name == "cache":
             await self._show_cache(room_id)
         elif name == "library":
@@ -205,7 +212,7 @@ class Bot:
         elif name == "help":
             await m.send_notice(room_id, HELP)
         else:  # pragma: no cover
-            await m.send_notice(room_id, "Unbekanntes Kommando. /help")
+            await m.send_notice(room_id, "Unbekanntes Kommando. !help")
 
     # ------------------------------------------------------------------ Play
     async def _play(self, room_id: str, sender: str, query: str) -> None:
@@ -257,14 +264,27 @@ class Bot:
         if track is None or not track.playable:
             await self.matrix.send_notice(room_id, f"Titel {(key)} ist nicht (mehr) verfuegbar.")
             return
-        # Call aufbauen, falls noch keiner laeuft.
-        if self.calls.active_room != room_id:
-            await self.matrix.ensure_room_state(room_id)
-            await self.calls.start_call_in_room(room_id)
-            self.calls.active_room = room_id
+        # Laufendem Element Call im Raum beitreten (kein Durchklingeln).
+        if self.ecall.room_id != room_id:
+            await self._join_element_call(room_id, force=False)
         await self.player.play(track, sender)
         if announce:
             await self._announce(track)
+
+    async def _join_element_call(self, room_id: str, *, force: bool) -> bool:
+        m = self.matrix
+        try:
+            await self.ecall.load_members(room_id)
+            if not force and not self.ecall.others_in_call(room_id):
+                await m.send_notice(room_id, "Kein Call aktiv – starte den Anruf, "
+                                             "dann !joincall (ich spiele trotzdem schon).")
+                return False
+            await self.ecall.join(room_id)
+            return True
+        except Exception as exc:
+            log.exception("Element Call beitreten fehlgeschlagen")
+            await m.send_notice(room_id, f"Call beitreten fehlgeschlagen: {exc}")
+            return False
 
     # ------------------------------------------------------------------ Listen
     async def _show_queue(self, room_id: str) -> None:
@@ -332,10 +352,10 @@ class Bot:
         try:
             idx = int(arg.strip())
         except ValueError:
-            await self.matrix.send_notice(room_id, "Benutzung: /unsave <Nummer> (zuvor /library oder /cache)")
+            await self.matrix.send_notice(room_id, "Benutzung: !unsave <Nummer> (zuvor !library oder !cache)")
             return
         if not (1 <= idx <= len(keys)):
-            await self.matrix.send_notice(room_id, "Diese Nummer kenne ich nicht – bitte erst /library.")
+            await self.matrix.send_notice(room_id, "Diese Nummer kenne ich nicht – bitte erst !library.")
             return
         key = keys[idx - 1]
         ok = self.store.forget(key)

@@ -37,16 +37,16 @@ for _canon, _names in ALIASES.items():
 COMMANDS: tuple[str, ...] = tuple(sorted(ALIASES))
 
 HELP = """Kommandos:
-/play <Link oder Suchbegriff> – Titel abspielen (Suche, wenn keine URL)
-/pause – pausieren · /resume – weiter
-/stop – stoppen · /skip – nächster Titel · /previous – vorheriger
-/queue – Warteschlange · /clear – Warteschlange leeren
-/status – was läuft gerade? · /seek <mm:ss oder ±s> – spulen
-/volume <0-100> – Lautstärke · /video on|off – Video im Call
-/shuffle – mischen · /loop on|off – aktuelle Titel wiederholen
-/joincall – Bot ruft alle im Raum an (Mesh) · /leavecall – auflegen
-/cache – Cache-Status · /library – gespeicherte Titel · /unsave <Nr.> – aus Bibliothek entfernen
-/hilfe – diese Liste
+!play <Link oder Suchbegriff> – Titel abspielen (Suche, wenn keine URL)
+!pause – pausieren · !resume – weiter
+!stop – stoppen · !skip – nächster Titel · !previous – vorheriger
+!queue – Warteschlange · !clear – Warteschlange leeren
+!status – was läuft gerade? · !seek <mm:ss oder ±s> – spulen
+!volume <0-100> – Lautstärke · !video on|off – Video im Call
+!shuffle – mischen · !loop on|off – aktuelle Titel wiederholen
+!joincall – Bot kommt in den Call · !leavecall – Bot verlässt den Call
+!cache – Cache-Status · !library – gespeicherte Titel · !unsave <Nr.> – aus Bibliothek entfernen
+!hilfe – diese Liste
 Regel: Titel ab 3 Anforderungen dauerhaft gespeichert, sonst Cache
 (max. 10; ein Titel fällt raus, wenn er 2 Anforderungen braucht, bevor
 9 andere liefen). Alles über .env konfigurierbar."""

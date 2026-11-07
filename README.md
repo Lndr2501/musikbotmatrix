@@ -2,7 +2,7 @@
 
 # MusikBotMatrix
 
-Ein Musikbot fuer **klassische Matrix-Calls**: du schreibst `/play <Link oder
+Ein Musikbot fuer **klassische Matrix-Calls**: du schreibst `!play <Link oder
 Suchbegriff>` in den Chat, der Bot laedt den Titel mit yt-dlp herunter und
 spielt ihn als Audio+Video in einen normalen Anruf (das Telefon-Icon in
 Element Web / Element Phone). Gruppen-Calls laufen als Mesh – jedes Geraet
@@ -19,7 +19,7 @@ docker compose exec musikbot python -m musikbot --check   # Selbsttest
 
 Der Bot braucht einen Matrix-Account auf deinem Homeserver. Einladung in
 einen Raum senden (er joined automatisch) oder `MATRIX_ROOMS` setzen.
-Dann im Raum: `/play rick astley never gonna give you up`.
+Dann im Raum: `!play rick astley never gonna give you up`.
 
 **Wichtig fuer Anrufe:** aiortc kann beliebige UDP-Ports verwenden, deshalb
 laeuft der Container mit `network_mode: host`. Alternativ statisches TURN
@@ -65,19 +65,19 @@ unabhängig vom Ordnernamen.)
 
 | Befehl | Wirkung |
 |---|---|
-| `/play <Link oder Suche>` | erstes Suchergebnis laden & abspielen |
-| `/pause` · `/resume` | pausieren / weiter |
-| `/stop` · `/skip` · `/previous` | stoppen / naechster / vorheriger |
-| `/queue` · `/clear` | Warteschlange anzeigen / leeren |
-| `/status` | was laeuft, wie weit, wie viele Peers |
-| `/seek <mm:ss>` · `/volume <0-100>` · `/video on|off` | spulen / lauter / Bild an aus |
-| `/shuffle` · `/loop on|off` | mischen / aktueller Titel in Dauerschleife |
-| `/joincall` · `/leavecall` | Bot ruft alle im Raum an / haengt auf |
-| `/cache` · `/library` · `/unsave <Nr.>` | Speicher-Status ansehen / verwalten |
-| `/help` | Kommandoliste |
+| `!play <Link oder Suche>` | erstes Suchergebnis laden & abspielen |
+| `!pause` · `!resume` | pausieren / weiter |
+| `!stop` · `!skip` · `!previous` | stoppen / naechster / vorheriger |
+| `!queue` · `!clear` | Warteschlange anzeigen / leeren |
+| `!status` | was laeuft, wie weit, wie viele Peers |
+| `!seek <mm:ss>` · `!volume <0-100>` · `!video on|off` | spulen / lauter / Bild an aus |
+| `!shuffle` · `!loop on|off` | mischen / aktueller Titel in Dauerschleife |
+| `!joincall` · `!leavecall` | Bot ruft alle im Raum an / haengt auf |
+| `!cache` · `!library` · `!unsave <Nr.>` | Speicher-Status ansehen / verwalten |
+| `!help` | Kommandoliste |
 
-Deutsche Aliase funktionieren auch (`/abspielen`, `/pausieren`, `/fortsetzen`,
-`/hilfe`, …). Praefixe: `/`, `!` und `.` (konfigurierbar via `BOT_PREFIXES`).
+Deutsche Aliase funktionieren auch (`!abspielen`, `!pausieren`, `!fortsetzen`,
+`!hilfe`, …). Praefix: `!` (konfigurierbar via `BOT_PREFIXES`).
 
 ## Speicher-Regeln (genau so, wie gewuenscht)
 
@@ -92,6 +92,16 @@ Deutsche Aliase funktionieren auch (`/abspielen`, `/pausieren`, `/fortsetzen`,
 Beispiel: Titel A kommt rein. Laufen danach 9 andere Titel, ohne dass A nochmal
 gewaehlt wird, loescht der Bot A inkl. Datei. Kommt A zweimal wieder, ist er
 “gesetzt” und bleibt bis zur 3. Gesamtanforderung in der Bibliothek.
+
+## Element Call (MatrixRTC / LiveKit)
+
+Laeuft im Raum ein Element Call, tritt der Bot bei `!play` automatisch bei
+(oder per `!joincall`) und sendet Audio/Video ueber die LiveKit-SFU des
+Homeservers. In verschluesselten Raeumen nutzt er per-participant E2EE und
+schickt seinen Medien-Schluessel Olm-verschluesselt an alle Call-Geraete.
+Der LiveKit-Dienst kommt aus den Call-Mitgliedschaften bzw. der
+`.well-known` (`org.matrix.msc4143.rtc_foci`); Override: `LIVEKIT_SERVICE_URL`.
+Ist der Call leer, verlaesst der Bot ihn wieder.
 
 ## Calls: was “klassisch” hier heisst
 

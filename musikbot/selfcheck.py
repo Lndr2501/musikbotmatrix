@@ -39,7 +39,11 @@ async def run_check(bot) -> None:
 
     # 4) Codecs
     try:
-        from aiortc.codecs import opus, vp8
+        from aiortc.codecs import opus
+        try:
+            from aiortc.codecs import vpx as vp8  # aiortc >= 1.16
+        except ImportError:
+            from aiortc.codecs import vp8  # aelter
         assert opus and vp8
         line("Codecs", True, "Opus + VP8/VPX verfuegbar (libopus/libvpx)")
     except Exception as exc:

@@ -45,10 +45,12 @@ class Matrix:
         self.on_call: Callable[[Optional[str], str, Optional[str], dict], Awaitable[None]] | None = None  # room_id|None, sender, device, content
         self.on_member_join: Callable[[str, str], Awaitable[None]] | None = None    # room_id, user_id
         self.on_room_left: Callable[[str], Awaitable[None]] | None = None           # room_id (Bot verlassen)
+        # Element Call: room_id, sender, state_key, content
+        self.on_rtc_member: Callable[[str, str, str, dict], Awaitable[None]] | None = None
 
         self.client.add_event_callback(self._event_cb, nio.Event)
         self.client.add_to_device_callback(self._to_device_cb, nio.ToDeviceEvent)
-        self.client.add_response_callback(LoginResponse, self._login_cb)
+        self.client.add_response_callback(self._login_cb, LoginResponse)
 
     # ------------------------------------------------------------------ login
     async def login(self) -> None:
@@ -62,11 +64,33 @@ class Matrix:
             else:
                 raise RuntimeError(f"Token-Login ungueltig: {me}")
         else:
-            resp = await self.client.login(password=cfg.password)
-            if not isinstance(resp, LoginResponse):
-                raise RuntimeError(f"Login fehlgeschlagen: {resp}")
-            cfg.matrix_user_id = resp.user_id
-            log.info("Eingeloggt als %s (Geraet %s)", resp.user_id, resp.device_id)
+            # Token aus frueherem Passwort-Login wiederverwenden: kein neuer
+            # Login pro Neustart (Homeserver drosselt sonst mit HTTP 429).
+            token_file = os.path.join(cfg.store_path, "access_token")
+            restored = False
+            if os.path.exists(token_file):
+                with open(token_file) as fh:
+                    saved = fh.read().strip()
+                if saved:
+                    self.client.restore_login(cfg.user, cfg.device_id, saved)
+                    me = await self.client.whoami()
+                    if isinstance(me, nio.WhoamiResponse):
+                        cfg.matrix_user_id = me.user_id
+                        restored = True
+                        log.info("Eingeloggt als %s (gespeicherter Token, Geraet %s)",
+                                 me.user_id, cfg.device_id)
+                    else:
+                        log.warning("Gespeicherter Token ungueltig, Passwort-Login: %s", me)
+            if not restored:
+                resp = await self.client.login(password=cfg.password,
+                                               device_name="musikbot")
+                if not isinstance(resp, LoginResponse):
+                    raise RuntimeError(f"Login fehlgeschlagen: {resp}")
+                cfg.matrix_user_id = resp.user_id
+                with open(token_file, "w") as fh:
+                    fh.write(resp.access_token)
+                os.chmod(token_file, 0o600)
+                log.info("Eingeloggt als %s (Geraet %s)", resp.user_id, resp.device_id)
         if cfg.matrix_user_id != cfg.user and cfg.user.startswith("@"):
             # ggf. anderer mxid -- Gleichstand fuer Filter verwenden
             cfg.user = cfg.matrix_user_id or cfg.user
@@ -90,17 +114,44 @@ class Matrix:
                 resp = None
             if isinstance(resp, nio.SyncResponse):
                 backoff = 1
+                await self._crypto_housekeeping()
                 await self._accept_invites()
             elif resp is not None:
                 log.warning("Sync-Fehler: %s", resp)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
+    async def _crypto_housekeeping(self) -> None:
+        """Was nio.sync_forever() sonst automatisch macht: eigene Geraete-
+        schluessel hochladen, fremde Geraete abfragen, Olm-Sessions claimen,
+        ausstehende To-Device-Nachrichten senden. Ohne das kennt der Server
+        keine Bot-Schluessel und niemand kann an den Bot verschluesseln."""
+        c = self.client
+        if not self.cfg.encryption_enabled or c.olm is None:
+            return
+        try:
+            if c.should_upload_keys:
+                r = await c.keys_upload()
+                log.info("Geraeteschluessel hochgeladen: %s", type(r).__name__)
+            if c.should_query_keys:
+                await c.keys_query()
+            if c.should_claim_keys:
+                await c.keys_claim(c.get_users_for_key_claiming())
+            await c.send_to_device_messages()
+        except Exception:
+            log.exception("E2EE-Schluesselpflege fehlgeschlagen")
+
     def stop(self) -> None:
         self._stop.set()
 
     # ------------------------------------------------------------------ callbacks
     async def _event_cb(self, room: nio.MatrixRoom, event) -> None:
+        src = getattr(event, "source", {}) or {}
+        if src.get("type") == "org.matrix.msc3401.call.member" and "state_key" in src:
+            if self.on_rtc_member:
+                await self.on_rtc_member(room.room_id, src.get("sender", ""),
+                                         src["state_key"], src.get("content") or {})
+            return
         if getattr(event, "sender", None) in (self.cfg.user, self.cfg.matrix_user_id):
             return
         if isinstance(event, nio.RoomMessageText):
@@ -275,14 +326,36 @@ class Matrix:
             return {}
         users = [m.user_id for m in members.members
                  if m.user_id != self.cfg.user]
-        keys = await self.client.keys_query()
         devices: dict[str, list[str]] = {}
-        if isinstance(keys, KeysQueryResponse):
+        if self.client.olm is not None:
+            # nio wirft LocalProtocolError, wenn keine Abfrage noetig ist;
+            # die bekannten Geraete stehen dann schon im device_store.
+            if self.client.should_query_keys:
+                await self.client.keys_query()
+            store = self.client.device_store
             for uid in users:
-                per_user = keys.device_keys.get(uid) or {}
-                devices[uid] = sorted(per_user.keys())
+                devices[uid] = sorted(d.id for d in store.active_user_devices(uid))
+        else:
+            devices = await self._query_devices_raw(users)
         self._devices[room_id] = devices
         return devices
+
+    async def _query_devices_raw(self, users: list[str]) -> dict[str, list[str]]:
+        """Geraeteliste ohne E2EE (nio.keys_query braucht Olm)."""
+        if not users:
+            return {}
+        import aiohttp
+        url = f"{self.client.homeserver}/_matrix/client/v3/keys/query"
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(url, json={"device_keys": {u: [] for u in users}},
+                                  headers={"Authorization": f"Bearer {self.client.access_token}"}) as r:
+                    data = await r.json()
+        except Exception:
+            log.warning("keys/query fehlgeschlagen", exc_info=True)
+            return {}
+        dk = data.get("device_keys") or {}
+        return {u: sorted((dk.get(u) or {}).keys()) for u in users}
 
     def devices_of_room(self, room_id: str) -> dict[str, list[str]]:
         """Nicht-blockierender Zugriff auf den zuletzt geladenen Stand."""
@@ -290,6 +363,114 @@ class Matrix:
 
     async def ensure_room_state(self, room_id: str) -> None:
         await self.refresh_devices(room_id)
+
+    # ------------------------------------------------------------------ Element Call
+    async def http_json(self, method: str, url: str, body: Optional[dict] = None,
+                        *, auth: bool = True) -> dict:
+        import aiohttp
+        headers = {"Content-Type": "application/json"}
+        if auth:
+            headers["Authorization"] = f"Bearer {self.client.access_token}"
+        async with aiohttp.ClientSession() as s:
+            async with s.request(method, url, json=body, headers=headers) as r:
+                text = await r.text()
+                if r.status >= 300:
+                    raise RuntimeError(f"{method} {url} -> HTTP {r.status}: {text[:300]}")
+                import json as _json
+                return _json.loads(text) if text else {}
+
+    def _cs(self, path: str) -> str:
+        return f"{self.client.homeserver}/_matrix/client/v3{path}"
+
+    async def openid_token(self) -> dict:
+        from urllib.parse import quote
+        uid = self.cfg.matrix_user_id or self.cfg.user
+        return await self.http_json(
+            "POST", self._cs(f"/user/{quote(uid)}/openid/request_token"), {})
+
+    async def wellknown_livekit(self) -> Optional[str]:
+        try:
+            data = await self.http_json(
+                "GET", f"{self.client.homeserver}/.well-known/matrix/client", auth=False)
+        except Exception:
+            log.warning("well-known nicht ladbar", exc_info=True)
+            return None
+        for f in data.get("org.matrix.msc4143.rtc_foci") or []:
+            if f.get("type") == "livekit" and f.get("livekit_service_url"):
+                return f["livekit_service_url"]
+        return None
+
+    def room_encrypted(self, room_id: str) -> bool:
+        room = self.client.rooms.get(room_id)
+        return bool(room and room.encrypted)
+
+    async def get_state_events(self, room_id: str, evtype: str) -> dict[str, dict]:
+        """state_key -> content (+ '_sender') fuer alle State-Events eines Typs."""
+        from urllib.parse import quote
+        events = await self.http_json("GET", self._cs(f"/rooms/{quote(room_id)}/state"))
+        out: dict[str, dict] = {}
+        for e in events or []:
+            if e.get("type") != evtype:
+                continue
+            c = dict(e.get("content") or {})
+            if c:
+                c["_sender"] = e.get("sender", "")
+            out[e.get("state_key", "")] = c
+        return out
+
+    async def put_state(self, room_id: str, evtype: str, state_key: str,
+                        content: dict) -> None:
+        resp = await self.client.room_put_state(room_id, evtype, content,
+                                                state_key=state_key)
+        if not isinstance(resp, nio.RoomPutStateResponse):
+            raise RuntimeError(f"State {evtype} in {room_id}: {resp}")
+
+    async def send_encrypted_to_device(self, targets: list[tuple[str, str]],
+                                       evtype: str, content: dict) -> list[tuple[str, str]]:
+        """Olm-verschluesseltes To-Device an (user, device). Gibt Erfolge zurueck."""
+        c = self.client
+        if c.olm is None:
+            return []
+        def _dev(u: str, d: str):
+            try:
+                return c.device_store[u].get(d)
+            except KeyError:
+                return None
+
+        if c.should_query_keys:
+            await c.keys_query()
+        # Geraete, die wir noch nicht kennen, gezielt abfragen
+        unknown = [u for u, d in targets if _dev(u, d) is None]
+        if unknown:
+            c.olm.users_for_key_query.update(unknown)
+            try:
+                await c.keys_query()
+            except Exception:
+                log.debug("keys_query", exc_info=True)
+        need_claim: dict[str, list[str]] = {}
+        for u, d in targets:
+            dev = _dev(u, d)
+            if dev and not c.olm.session_store.get(dev.curve25519):
+                need_claim.setdefault(u, []).append(d)
+        if need_claim:
+            try:
+                await c.keys_claim(need_claim)
+            except Exception:
+                log.warning("Olm-Keys claimen fehlgeschlagen", exc_info=True)
+        ok: list[tuple[str, str]] = []
+        for u, d in targets:
+            dev = _dev(u, d)
+            session = c.olm.session_store.get(dev.curve25519) if dev else None
+            if dev is None or session is None:
+                log.warning("Kein Olm-Kanal zu %s/%s", u, d)
+                continue
+            payload = c.olm._olm_encrypt(session, dev, evtype, content)
+            resp = await c.to_device(nio.ToDeviceMessage("m.room.encrypted", u, d, payload))
+            if isinstance(resp, nio.ToDeviceResponse):
+                ok.append((u, d))
+            else:
+                log.warning("To-Device an %s/%s: %s", u, d, resp)
+        return ok
 
     # ------------------------------------------------------------------ TURN
     async def fetch_turn(self) -> Optional[dict]:

@@ -54,7 +54,7 @@ class Config:
     rooms: tuple[str, ...] = ()
     # Wer darf kommandieren? Leer = alle Raum-Mitglieder.
     allowed_users: tuple[str, ...] = ()
-    prefixes: tuple[str, ...] = ("/", "!", ".")
+    prefixes: tuple[str, ...] = ("!",)
     auto_join_invites: bool = True
 
     # --- Dateien -----------------------------------------------------------
@@ -92,6 +92,7 @@ class Config:
     turn_password: str = ""
     # Ephemere TURN-Credentials vom Homeserver holen (/_matrix/client/v3/voip/turnServer)
     turn_discovery: bool = True
+    livekit_service_url: str = ""  # leer -> aus Call-Mitgliedern / well-known
 
     # --- yt-dlp ------------------------------------------------------------
     yt_player_client: str = ""  # z.B. "tv" oder "android", falls YouTube zickt
@@ -107,7 +108,7 @@ class Config:
 
     # ---------------------------------------------------------------- utils
     def __post_init__(self) -> None:
-        self.prefixes = tuple(p if p else "/" for p in self.prefixes)
+        self.prefixes = tuple(p if p else "!" for p in self.prefixes)
         if self.mesh_invite not in ("auto", "all", "off"):
             raise ConfigError(f"MESH_INVITE muss auto|all|off sein, ist {self.mesh_invite!r}")
         if self.cache_max_entries < 1:
@@ -158,7 +159,7 @@ class Config:
             device_id=_str("MATRIX_DEVICE_ID", "musikbot"),
             rooms=_list("MATRIX_ROOMS"),
             allowed_users=_list("ALLOWED_USERS"),
-            prefixes=_list("BOT_PREFIXES", ("/", "!", ".")),
+            prefixes=_list("BOT_PREFIXES", ("!",)),
             auto_join_invites=_bool("AUTO_JOIN_INVITES", True),
             data_dir=_str("DATA_DIR", "/data"),
             save_after_requests=_int("SAVE_AFTER_REQUESTS", 3),
@@ -179,6 +180,7 @@ class Config:
             turn_username=_str("TURN_USERNAME"),
             turn_password=_str("TURN_PASSWORD"),
             turn_discovery=_bool("TURN_DISCOVERY", True),
+            livekit_service_url=_str("LIVEKIT_SERVICE_URL"),
             yt_player_client=_str("YTDLP_PLAYER_CLIENT"),
             yt_cookies_file=_str("YTDLP_COOKIES_FILE"),
             audio_format=_str("YTDLP_FORMAT_AUDIO", "bestaudio/best"),

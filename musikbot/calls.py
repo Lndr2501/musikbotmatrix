@@ -151,20 +151,21 @@ class Peer:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
-        self.pc = pc = aiortc.RTCPeerConnection(iceServers=self.mgr.ice_servers)
+        self.pc = pc = aiortc.RTCPeerConnection(
+            configuration=aiortc.RTCConfiguration(iceServers=self.mgr.ice_servers or None))
         self.audio_track = self.mgr.player.add_peer_audio(self)
         self.video_track = self.mgr.player.add_peer_video(self)
         pc.addTrack(self.audio_track)
         if self.video_track is not None:
             pc.addTrack(self.video_track)
 
-        @pc.addEventListener("icegatheringstatechange")
-        def _ice(_evt):
+        @pc.on("icegatheringstatechange")
+        def _ice(*_):
             if pc.iceGatheringState == "complete":
                 self._gathering.set()
 
-        @pc.addEventListener("connectionstatechange")
-        def _conn(_evt):
+        @pc.on("connectionstatechange")
+        def _conn(*_):
             state = pc.connectionState
             log.debug("RTC %s: %s (%s)", state, self.user_id, self.device_id)
             if state in ("failed", "closed") and self.live:
