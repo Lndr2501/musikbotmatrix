@@ -46,6 +46,19 @@ CREATE TABLE IF NOT EXISTS playlist_items (
     track_key   TEXT NOT NULL,
     added_at    INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS favorites (
+    user      TEXT NOT NULL,
+    track_key TEXT NOT NULL,
+    added_at  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user, track_key)
+);
+CREATE TABLE IF NOT EXISTS plays (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_key TEXT NOT NULL,
+    requester TEXT NOT NULL DEFAULT '',
+    seconds   REAL NOT NULL DEFAULT 0,
+    played_at INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -261,6 +274,61 @@ class TrackStore:
             self.db.execute("DELETE FROM playlist_items WHERE id = ?", (row["id"],))
             self.db.commit()
             return row["track_key"]
+
+    # ------------------------------------------------------------ Favoriten
+    # Pro Nutzer (Matrix-ID, klein geschrieben) eine Liste von Titel-Schluesseln.
+    def fav_add(self, user: str, key: str) -> bool:
+        """False, wenn der Titel schon in den Favoriten ist."""
+        with self._lock:
+            cur = self.db.execute(
+                "INSERT OR IGNORE INTO favorites (user, track_key, added_at) VALUES (?,?,?)",
+                (user.lower(), key, now_int()))
+            self.db.commit()
+            return cur.rowcount > 0
+
+    def fav_keys(self, user: str) -> list[str]:
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT track_key FROM favorites WHERE user = ? ORDER BY added_at ASC, rowid ASC",
+                (user.lower(),)).fetchall()
+            return [r["track_key"] for r in rows]
+
+    def fav_remove(self, user: str, index: int) -> str | None:
+        """Entfernt den index-ten Favoriten (1-basiert); gibt dessen Schluessel zurueck."""
+        keys = self.fav_keys(user)
+        if index < 1 or index > len(keys):
+            return None
+        with self._lock:
+            self.db.execute("DELETE FROM favorites WHERE user = ? AND track_key = ?",
+                            (user.lower(), keys[index - 1]))
+            self.db.commit()
+        return keys[index - 1]
+
+    # ------------------------------------------------------------ Statistik
+    def play_log(self, key: str, requester: str, seconds: float = 0.0) -> None:
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO plays (track_key, requester, seconds, played_at) VALUES (?,?,?,?)",
+                (key, requester.lower(), float(seconds or 0), now_int()))
+            self.db.commit()
+
+    def top_tracks(self, limit: int = 10, since: int = 0) -> list[tuple[str, int]]:
+        """[(Titel-Schluessel, Anzahl Wiedergaben)], haeufigste zuerst."""
+        with self._lock:
+            rows = self.db.execute(
+                """SELECT track_key, COUNT(*) AS n FROM plays WHERE played_at >= ?
+                   GROUP BY track_key ORDER BY n DESC, MAX(id) DESC LIMIT ?""",
+                (since, limit)).fetchall()
+            return [(r["track_key"], int(r["n"])) for r in rows]
+
+    def top_listeners(self, limit: int = 10, since: int = 0) -> list[tuple[str, int, float]]:
+        """[(Nutzer, Anzahl Titel, Sekunden)], meiste Musik zuerst."""
+        with self._lock:
+            rows = self.db.execute(
+                """SELECT requester, COUNT(*) AS n, SUM(seconds) AS s FROM plays
+                   WHERE played_at >= ? GROUP BY requester ORDER BY s DESC, n DESC LIMIT ?""",
+                (since, limit)).fetchall()
+            return [(r["requester"], int(r["n"]), float(r["s"] or 0)) for r in rows]
 
     def close(self) -> None:
         with self._lock:

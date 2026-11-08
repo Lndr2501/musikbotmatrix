@@ -55,6 +55,7 @@ class Bot:
         # Titelbilder: Quelle (http) und die auf den Medien-Server geladene mxc://-Adresse je Titel
         self._thumb_url: dict[str, str] = {}
         self._thumb_mxc: dict[str, str] = {}
+        self._cover_frames: dict[str, object] = {}
         self._thumb_tasks: dict[str, asyncio.Task] = {}
         # 24/7-Modus: None oder {"kind": "song"|"playlist", "keys": [...], "name": str}
         self._always: dict | None = None
@@ -165,12 +166,27 @@ class Bot:
                 return ""
             ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(ctype, "img")
             mxc = await self.matrix.upload_image(data, ctype, f"cover.{ext}")
+            self._cover_frame_for(key, data)
             if mxc:
                 self._thumb_mxc[key] = mxc
             return mxc or ""
         except Exception:
             log.debug("Titelbild nicht verfuegbar (%s)", key, exc_info=True)
             return ""
+
+    def _cover_frame_for(self, key: str, data: bytes) -> None:
+        """Titelbild als Kamerabild vorbereiten (nur fuer den laufenden Titel noetig)."""
+        from .media import cover_frame
+        try:
+            h = int(self.cfg.video_height) // 2 * 2
+            frame = cover_frame(data, (h * 16 // 9) // 2 * 2, h)
+        except Exception:                      # das Kamerabild darf die Karte nie verhindern
+            log.debug("Titelbild als Kamerabild fehlgeschlagen", exc_info=True)
+            return
+        if frame is not None:
+            self._cover_frames[key] = frame
+            while len(self._cover_frames) > 4:
+                self._cover_frames.pop(next(iter(self._cover_frames)))
 
     def _prefetch_thumb(self, key: str) -> None:
         """Titelbild schon waehrend Suche/Download laden, damit es zur Karte fertig ist."""
@@ -299,10 +315,12 @@ class Bot:
         room = self._notice_room()
         if not room or track is None:
             return
+        self._log_play(track)
         pending = self._card_pending.pop(room, None)
         if pending is None:
             await self._finish_now_card(room)       # naechster Titel aus der Warteschlange
         await self._thumb_ready(track.key)          # Titelbild gehoert in die Karte
+        self.player.set_cover(track.key, self._cover_frames.get(track.key))   # und in die Kamera
         card = cards.track_card(
             "playing", track.title or track.key, position=0.0, started_at_ms=now_ms(),
             actions=cards.CONTROLS_PLAYING, seek=cards.SEEK_COMMAND, volume=self.player.volume,
@@ -310,6 +328,85 @@ class Bot:
         eid = await self._put_track_card(room, card, pending)
         if eid:
             self._card_now[room] = (eid, track)
+
+    # ------------------------------------------------------------ Favoriten / Statistik
+    def _log_play(self, track) -> None:
+        """Wiedergabe fuer die Statistik merken (nur echte Nutzer, nicht 24/7 oder Wiederholung)."""
+        who = getattr(self.player, "requester", "") or ""
+        if who.startswith("@"):
+            try:
+                self.store.play_log(track.key, who, track.duration)
+            except Exception:
+                log.warning("Statistik schreiben fehlgeschlagen", exc_info=True)
+
+    @staticmethod
+    def _who(user: str) -> str:
+        return user[1:].split(":", 1)[0] if user.startswith("@") else user
+
+    def _fav_items(self, keys: list[str]) -> list[dict]:
+        out = []
+        for key in keys:
+            t = self.store.get(key)
+            item = {"title": (t.title if t else "") or key,
+                    "subtitle": (t.uploader if t and t.uploader else None),
+                    "duration": (t.duration if t and t.duration else None)}
+            out.append({k: v for k, v in item.items() if v is not None})
+        return out
+
+    async def _fav(self, room_id: str, sender: str, arg: str) -> None:
+        m, st = self.matrix, self.store
+        sub, _, rest = arg.strip().partition(" ")
+        sub, rest = sub.lower(), rest.strip()
+        if sub == "":
+            cur = self.player.current
+            if cur is None:
+                await self._note(room_id, "Gerade läuft nichts. Mit !fav list siehst du deine Favoriten.",
+                                 "warning", "⭐")
+                return
+            added = st.fav_add(sender, cur.key)
+            await self._note(room_id, (f"„{cur.title or cur.key}“ ist jetzt in deinen Favoriten."
+                                       if added else f"„{cur.title or cur.key}“ ist schon in deinen Favoriten."),
+                             "success" if added else "info", "⭐")
+        elif sub in ("list", "liste", "show"):
+            keys = st.fav_keys(sender)
+            items = self._fav_items(keys)
+            self._listing[room_id] = keys
+            title = f"Favoriten von {self._who(sender)}"
+            acts = (cards.action("▶ Alle abspielen", "!fav play"),
+                    cards.action("🔀 Gemischt", "!fav play shuffle")) if items else ()
+            await m.send_card(room_id, cards.card_content(
+                cards.list_body(title, items, "noch keine"),
+                cards.list_card(title, items[:MAX_SHOWN], len(items), acts,
+                                empty="Noch keine. Mit !fav merkst du dir den laufenden Titel.")))
+        elif sub in ("remove", "rm", "del", "entfernen"):
+            if not rest.isdigit() or st.fav_remove(sender, int(rest)) is None:
+                await self._note(room_id, "Benutzung: !fav remove <nr> (Nummer aus !fav list)", "warning")
+                return
+            await self._note(room_id, "Aus deinen Favoriten entfernt.", "success", "⭐")
+        elif sub in ("play", "spielen"):
+            keys = st.fav_keys(sender)
+            if not keys:
+                await self._note(room_id, "Du hast noch keine Favoriten.", "warning", "⭐")
+                return
+            if rest.lower() in ("shuffle", "mischen"):
+                random.shuffle(keys)
+            await self._play_keys(room_id, sender, keys, replace=True)
+        else:
+            await self._note(room_id, "Benutzung: !fav · !fav list · !fav remove <nr> · !fav play [shuffle]",
+                             "warning")
+
+    async def _stats(self, room_id: str) -> None:
+        st = self.store
+        tracks = [{"label": self._title(k), "value": n} for k, n in st.top_tracks(8)]
+        people = [{"label": self._who(u), "value": round(sec / 60, 1), "sub": f"{n} Titel"}
+                  for u, n, sec in st.top_listeners(8)]
+        if not tracks:
+            await self._note(room_id, "Noch keine Statistik – spiel erst ein paar Titel.", "info", "📊")
+            return
+        charts = [{"title": "Meistgespielte Titel", "unit": "×", "items": tracks},
+                  {"title": "Wer hört am meisten Musik", "unit": "min", "items": people}]
+        await self.matrix.send_card(room_id, cards.card_content(
+            cards.stats_body("Musik-Statistik", charts), cards.stats_card("Musik-Statistik", charts)))
 
     # ------------------------------------------------------------------ Text
     async def _on_text(self, room_id: str, sender: str, body: str) -> None:
@@ -464,6 +561,10 @@ class Bot:
             await m.send_notice(room_id, "Call verlassen.")
         elif name == "playlist":
             await self._playlist(room_id, sender, arg)
+        elif name == "fav":
+            await self._fav(room_id, sender, arg)
+        elif name == "stats":
+            await self._stats(room_id)
         elif name == "always":
             await self._always_cmd(room_id, sender, arg)
         elif name == "help":

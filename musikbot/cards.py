@@ -135,6 +135,33 @@ def note_body(text: str, icon: str = "") -> str:
     return f"{icon} {text}".strip()
 
 
+def list_card(title: str, items: list[dict], total: int = 0, actions=(), empty: str = "") -> dict:
+    """Allgemeine Liste (z. B. Favoriten): items = [{title, subtitle?, duration?}]."""
+    return {"kind": "list", "title": title, "items": items[:50], "total": total or len(items),
+            "empty": empty or None, "actions": list(actions)}
+
+
+def list_body(title: str, items: list[dict], empty: str = "") -> str:
+    if not items:
+        return f"{title}: {empty or 'leer'}"
+    return "\n".join([f"{title}:"] + [f"{i}. {it['title']}" for i, it in enumerate(items, 1)])
+
+
+def stats_card(title: str, charts: list[dict], actions=()) -> dict:
+    """Diagramme: charts = [{title, unit?, items: [{label, value, sub?}]}] als Balken."""
+    return {"kind": "stats", "title": title, "charts": charts, "actions": list(actions)}
+
+
+def stats_body(title: str, charts: list[dict]) -> str:
+    lines = [title]
+    for ch in charts:
+        lines.append(f"{ch['title']}:")
+        unit = ch.get("unit") or ""
+        for i, it in enumerate(ch["items"], 1):
+            lines.append(f"{i}. {it['label']} ({it['value']:g}{' ' + unit if unit else ''})")
+    return "\n".join(lines)
+
+
 def help_card(groups: list[dict], note: str = "") -> dict:
     return {"kind": "help", "groups": groups, "note": note or None}
 
@@ -167,6 +194,9 @@ HELP_GROUPS = [
        ("!playlist remove <name> <nr>", "Titel entfernen"),
        ("!playlist show <name> · list", "anzeigen · alle Listen"),
        ("!playlist play <name> [shuffle]", "abspielen · !playlist enqueue <name> einreihen"),
+       ("!fav · !fav list · !fav remove <nr>", "laufenden Titel merken · deine Favoriten · entfernen"),
+       ("!fav play [shuffle]", "deine Favoriten abspielen (Steuern: nur im Call)"),
+       ("!stats", "Diagramme: meistgespielte Titel, wer am meisten Musik hört"),
        ("!24/7 song [Link] · playlist <name> · off", "Dauerschleife, Bot bleibt im Call")),
 ]
 HELP_NOTE = ("Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue, "

@@ -102,3 +102,54 @@ def test_seek_moves_forward_and_back_without_errors(tmp_path):
             assert block.shape[-1] == 960 * 2
     finally:
         src.close()
+
+
+def _jpeg(w, h):
+    import io
+
+    import av
+    import numpy as np
+    buf = io.BytesIO()
+    with av.open(buf, "w", format="mjpeg") as out:
+        st = out.add_stream("mjpeg", rate=1)
+        st.width, st.height, st.pix_fmt = w, h, "yuvj420p"
+        frame = av.VideoFrame.from_ndarray(np.full((h, w, 3), 200, np.uint8), format="rgb24")
+        for pkt in st.encode(frame.reformat(format="yuvj420p")):
+            out.mux(pkt)
+        for pkt in st.encode(None):
+            out.mux(pkt)
+    return buf.getvalue()
+
+
+def test_cover_frame_is_centered_with_black_bars_and_never_stretched():
+    from musikbot.media import cover_frame
+    f = cover_frame(_jpeg(120, 120), 64, 36)
+    assert (f.width, f.height) == (64, 36)
+    a = f.to_ndarray(format="rgb24")
+    assert a[18, 32].min() > 150 and a[18, 2].max() == 0       # Mitte hell, linker Rand schwarz
+    assert cover_frame(b"kein bild", 64, 36) is None
+
+
+def test_player_shows_cover_only_for_tracks_without_video():
+    from types import SimpleNamespace
+    from musikbot.config import Config
+    from musikbot.player import Player
+    from musikbot.store import TrackStore
+    import tempfile
+    d = tempfile.mkdtemp()
+    cfg = Config(homeserver="http://h", user="@b:x", password="p", data_dir=d, matrix_user_id="@b:x")
+    from musikbot.hub import Hub
+    p = Player(cfg, Hub(), TrackStore(d + "/db", d + "/tmp"))
+    p.current = SimpleNamespace(key="k1")
+    p._source = SimpleNamespace(has_video=False)
+    p.video_enabled = True
+    from musikbot.media import cover_frame
+    p.set_cover("k1", cover_frame(_jpeg(64, 64), 64, 36))
+    sink = p.hub.new_sink()
+    p.set_cover("k1", cover_frame(_jpeg(64, 64), 64, 36))
+    assert sink.take_video() is not None and p.cover_frame is not None
+    p.current = SimpleNamespace(key="k2")                       # anderer Titel: altes Bild gilt nicht
+    assert p.cover_frame is None
+    p._source = SimpleNamespace(has_video=True)                 # echtes Video: kein Titelbild
+    p.set_cover("k2", cover_frame(_jpeg(64, 64), 64, 36))
+    assert sink.take_video() is None

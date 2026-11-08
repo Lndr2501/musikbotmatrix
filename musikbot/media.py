@@ -165,3 +165,24 @@ def apply_gain(block: np.ndarray, gain: float) -> np.ndarray:
 
 def silence_block(samples: int = FRAME_SAMPLES) -> np.ndarray:
     return np.zeros((1, samples * 2), dtype=np.int16)
+
+
+def cover_frame(data: bytes, width: int, height: int):
+    """Titelbild -> Videobild width x height (zentriert, schwarze Raender, nichts wird gestreckt).
+    Gibt None zurueck, wenn sich das Bild nicht lesen laesst."""
+    import io
+
+    import numpy as np
+    try:
+        with av.open(io.BytesIO(data)) as box:
+            src = next(box.decode(video=0))
+        scale = min(width / src.width, height / src.height)
+        w = max(2, int(src.width * scale) // 2 * 2)
+        h = max(2, int(src.height * scale) // 2 * 2)
+        img = src.reformat(width=w, height=h, format="rgb24").to_ndarray()
+        canvas = np.zeros((height, width, 3), dtype=np.uint8)
+        y, x = (height - h) // 2, (width - w) // 2
+        canvas[y:y + h, x:x + w] = img
+        return av.VideoFrame.from_ndarray(canvas, format="rgb24")
+    except (StopIteration, ValueError, *_AV_ERRORS):
+        return None

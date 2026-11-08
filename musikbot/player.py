@@ -118,6 +118,7 @@ class Player:
         self._source: MediaSource | None = None
         self._audio_iter = None
         self._video_iter = None
+        self.cover: tuple[str, VideoFrame] | None = None   # Titelbild als Kamerabild (ohne Video)
         self._pos = 0.0
         self._vpos = 0.0
         self._wall_base = 0.0
@@ -236,6 +237,23 @@ class Player:
         self._vpos = start
         self._wall_base = asyncio.get_running_loop().time() - start
         self.hub.clear()
+        self._push_cover()
+
+    def set_cover(self, key: str, frame: VideoFrame | None) -> None:
+        """Titelbild fuer `key` als Kamerabild merken (und zeigen, wenn der Titel kein Video hat)."""
+        self.cover = (key, frame) if frame is not None else None
+        self._push_cover()
+
+    @property
+    def cover_frame(self) -> VideoFrame | None:
+        cur = self.current
+        return self.cover[1] if self.cover and cur and self.cover[0] == cur.key else None
+
+    def _push_cover(self) -> None:
+        """Ohne eigenes Video bleibt die Kamera nicht schwarz: Titelbild (sonst ein schwarzes Bild)."""
+        if not self.video_enabled or self._source is None or self._source.has_video:
+            return
+        self.hub.push_video(self.cover_frame or _blank_frame())
 
     def pause(self) -> bool:
         if self.state != "playing":

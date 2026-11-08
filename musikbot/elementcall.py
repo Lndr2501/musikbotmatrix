@@ -296,6 +296,15 @@ class ElementCall:
                                               img.to_ndarray().tobytes())
                     except Exception:
                         log.debug("Videoframe-Konvertierung fehlgeschlagen", exc_info=True)
+                if last is None:                # Beitritt mitten im Titel: Titelbild statt Schwarz
+                    cover = getattr(self.player, "cover_frame", None)
+                    if cover is not None:
+                        try:
+                            img = cover.reformat(width=w, height=h, format="rgba")
+                            last = rtc.VideoFrame(w, h, rtc.VideoBufferType.RGBA,
+                                                  img.to_ndarray().tobytes())
+                        except Exception:
+                            log.debug("Titelbild-Konvertierung fehlgeschlagen", exc_info=True)
                 source.capture_frame(last or black)
                 anchor += 1.0 / fps
                 delay = anchor - loop.time()

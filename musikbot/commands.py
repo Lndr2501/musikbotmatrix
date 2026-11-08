@@ -26,6 +26,8 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "leavecall": ("leavecall", "leave", "auflegen", "raus"),
     "video": ("video", "bild"),
     "playlist": ("playlist", "playlists", "pl", "wiedergabeliste"),
+    "fav": ("fav", "favs", "favorit", "favoriten", "favorite", "favorites", "merken"),
+    "stats": ("stats", "statistik", "top", "charts"),
     "always": ("always", "247", "24/7", "24-7", "dauerbetrieb"),
     "help": ("help", "hilfe", "commands", "befehle"),
 }
@@ -51,6 +53,8 @@ HELP = """Kommandos:
 !playlist create|delete <name> · add <name> [Link] · remove <name> <nr>
     show <name> · list · play <name> [shuffle] · enqueue <name>
     (ohne Link bei add: der laufende Titel)
+!fav – laufenden Titel merken · !fav list · !fav remove <nr> · !fav play [shuffle] (deine Favoriten)
+!stats – meistgespielte Titel und wer am meisten Musik hört
 !24/7 song [Link] · !24/7 playlist <name> · !24/7 off – Dauerschleife, Bot bleibt im Call
 !hilfe – diese Liste
 Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue,
@@ -82,7 +86,7 @@ def parse(text: str, prefixes: tuple[str, ...] = ("/",)) -> Optional[Parsed]:
     return Parsed(name, tail.strip())
 
 
-_READ_ONLY = {"help", "status", "queue"}
+_READ_ONLY = {"help", "status", "queue", "stats"}
 
 
 def is_read_only(name: str, arg: str = "") -> bool:
@@ -92,6 +96,8 @@ def is_read_only(name: str, arg: str = "") -> bool:
     sub = arg.strip().split(" ", 1)[0].lower()
     if name == "playlist":
         return sub in ("", "list", "show", "liste", "zeige")
+    if name == "fav":                      # merken/ansehen darf jeder, abspielen steuert
+        return sub != "play"
     if name == "always":
         return sub == ""
     return False

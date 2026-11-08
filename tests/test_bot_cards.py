@@ -40,6 +40,10 @@ class FakePlayer:
         self.state = "playing"
         self.queue = []
         self.seeks = []
+        self.covers = []
+
+    def set_cover(self, key, frame):
+        self.covers.append((key, frame))
 
     def status(self):
         return {"duration": 197.0, "state": self.state, "position": self.position, "track": None,
@@ -65,6 +69,7 @@ def make_bot():
     bot._card_now = {}
     bot._thumb_url = {}
     bot._thumb_mxc = {}
+    bot._cover_frames = {}
     bot._thumb_tasks = {}
     bot._loop_on = False
     bot._always = None

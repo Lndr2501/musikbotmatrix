@@ -192,3 +192,52 @@ def test_playlist_commands(bot):
     assert "leer" in bot.sent[-1]
     say("!playlist delete mix")
     assert bot.store.playlist_keys("mix") is None
+
+
+# ---------------------------------------------------------------- Favoriten und Statistik
+def test_store_favorites_and_stats(tmp_path):
+    st = TrackStore(str(tmp_path / "db"), str(tmp_path / "tmp"))
+    assert st.fav_add("@A:x", "yt:1") and not st.fav_add("@a:x", "yt:1")   # pro Nutzer, ohne Gross/Klein
+    st.fav_add("@a:x", "yt:2")
+    st.fav_add("@b:x", "yt:2")
+    assert st.fav_keys("@a:x") == ["yt:1", "yt:2"] and st.fav_keys("@b:x") == ["yt:2"]
+    assert st.fav_remove("@a:x", 1) == "yt:1" and st.fav_remove("@a:x", 5) is None
+    for k, u, s in (("yt:1", "@a:x", 60), ("yt:1", "@b:x", 60), ("yt:2", "@a:x", 180)):
+        st.play_log(k, u, s)
+    assert st.top_tracks(5) == [("yt:1", 2), ("yt:2", 1)]
+    assert st.top_listeners(5)[0] == ("@a:x", 2, 240.0)
+
+
+def test_fav_commands_and_stats_card(bot):
+    in_call(bot, "!r", "@a:x")
+    cards_sent = []
+
+    async def send_card(room, content):
+        cards_sent.append(content)
+        bot.sent.append(content["body"])
+        return "$x"
+
+    bot.matrix.send_card = send_card
+    say = lambda t, u="@a:x": run(bot._on_text("!r", u, t))
+    say("!fav")
+    assert "läuft nichts" in bot.sent[-1]
+    bot.store.note_request("yt:1", title="Song Eins", url="u", duration=120)
+    bot.player.current = bot.store.get("yt:1")
+    say("!fav", "@b:x")                                        # Merken geht auch ausserhalb des Calls
+    assert "Favoriten" in bot.sent[-1]
+    say("!fav list", "@b:x")
+    assert cards_sent[-1]["dev.diddy.card"]["kind"] == "list"
+    assert cards_sent[-1]["dev.diddy.card"]["items"][0]["title"] == "Song Eins"
+    say("!fav list", "@a:x")                                   # a hat nichts
+    assert cards_sent[-1]["dev.diddy.card"]["items"] == [] if "items" in cards_sent[-1]["dev.diddy.card"] else True
+    say("!stats")
+    assert "Noch keine Statistik" in bot.sent[-1]
+    bot._log_play(bot.player.current)                          # ohne Nutzer: nichts
+    bot.player.requester = "@a:x"
+    bot._log_play(bot.player.current)
+    say("!stats")
+    c = cards_sent[-1]["dev.diddy.card"]
+    assert c["kind"] == "stats" and c["charts"][0]["items"][0] == {"label": "Song Eins", "value": 1}
+    assert c["charts"][1]["items"][0]["label"] == "a"
+    say("!fav play", "@b:x")                                   # abspielen steuert: nicht im Call
+    assert "Call sind" in bot.sent[-1] or "Call" in bot.sent[-1]
