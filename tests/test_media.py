@@ -79,3 +79,11 @@ def test_gain_and_silence():
     assert abs(abs(out[0, 0]) - 4000) <= 2
     sil = silence_block()
     assert int(np.max(np.abs(sil))) == 0
+
+
+def test_split_search_prefixes():
+    from musikbot.ytdl import split_search
+    assert split_search("never gonna") == ("ytsearch1", "never gonna")
+    assert split_search("sc: daft punk") == ("scsearch1", "daft punk")
+    assert split_search("Bili:foo") == ("bilisearch1", "foo")
+    assert split_search("Re: Zero opening") == ("ytsearch1", "Re: Zero opening")

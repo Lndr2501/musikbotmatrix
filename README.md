@@ -33,11 +33,11 @@ Der Bot schreibt alles (Downloads, Datenbank, Matrix-Gerätedaten) in den
 Container-Pfad `/data`, und der liegt in einem **Docker-Volume** namens
 `musikbot_data` – bewusst kein Bind-Mount in den Projektordner.
 
-| Aktion | Cache + Bibliothek |
+| Aktion | Datenbank + Geraet |
 |---|---|
 | `docker compose restart`, Reboot, `up -d`, Image-Neubau | **bleiben erhalten** |
 | `docker compose stop` / `down` | **bleiben erhalten** (Volume bleibt) |
-| `docker compose down -v` | **alles weg** (Cache, Bibliothek, DB, Gerät) |
+| `docker compose down -v` | **alles weg** (DB, Gerät) |
 | UI „Delete/Down“ + Häkchen **Remove volumes** | **alles weg** |
 | `./clean.sh` | **alles weg** inkl. Image, prüft danach nach |
 
@@ -70,28 +70,37 @@ unabhängig vom Ordnernamen.)
 | `!stop` · `!skip` · `!previous` | stoppen / naechster / vorheriger |
 | `!queue` · `!clear` | Warteschlange anzeigen / leeren |
 | `!status` | was laeuft, wie weit, wie viele Peers |
-| `!seek <mm:ss>` · `!volume <0-100>` · `!video on|off` | spulen / lauter / Bild an aus |
+| `!seek <mm:ss>` · `!volume <0-300>` · `!video on|off` | spulen / lauter / Bild an aus |
 | `!shuffle` · `!loop on|off` | mischen / aktueller Titel in Dauerschleife |
 | `!joincall` · `!leavecall` | Bot ruft alle im Raum an / haengt auf |
-| `!cache` · `!library` · `!unsave <Nr.>` | Speicher-Status ansehen / verwalten |
+| `!playlist create\|delete <name>` | Playlist anlegen / löschen |
+| `!playlist add <name> [Link]` · `remove <name> <nr>` | Titel hinzufügen (ohne Link: laufender Titel) / entfernen |
+| `!playlist show <name>` · `list` | Inhalt / alle Playlists |
+| `!playlist play <name> [shuffle]` · `enqueue <name>` | abspielen (ersetzt Queue) / hinten anhängen |
+| `!24/7 song [Link]` · `!24/7 playlist <name>` · `!24/7 off` | Dauerschleife, Bot bleibt im Call |
 | `!help` | Kommandoliste |
+
+**Wer darf steuern?** Nur Leute, die selbst im Call sind (Element Call oder
+klassischer Call). `!help`, `!status`, `!queue`, `!playlist list|show` und
+`!24/7` ohne Argument gehen für alle im Raum. Abschaltbar mit
+`CALL_ONLY_CONTROL=false`; `ALLOWED_USERS` gilt zusätzlich.
+
+**Auto-Verlassen:** Ist der Song zu Ende und die Warteschlange leer, verlässt
+der Bot sofort den Call (`LEAVE_WHEN_DONE=false` schaltet das ab). Im 24/7-Modus
+bleibt er, auch wenn der Call leer ist; `!stop` oder `!24/7 off` beendet ihn.
+Playlists liegen in der SQLite-DB (nur Links/Titel, keine Audiodateien).
 
 Deutsche Aliase funktionieren auch (`!abspielen`, `!pausieren`, `!fortsetzen`,
 `!hilfe`, …). Praefix: `!` (konfigurierbar via `BOT_PREFIXES`).
 
-## Speicher-Regeln (genau so, wie gewuenscht)
+## Speicher-Regeln
 
-- Ein Titel wird ab **3 Anforderungen** (Default) dauerhaft in `library/`
-  (im Volume `/data`) gespeichert und nie automatisch geloescht.
-- Sonst liegt er in `cache/` mit maximal **10 Titeln**.
-- Ein frischer Cache-Titel fliegt raus, wenn er **2 weitere Anforderungen**
-  braucht, bevor **9 andere Titel** angefordert wurden.
-- Alles per `.env` einstellbar: `SAVE_AFTER_REQUESTS`, `CACHE_MAX_ENTRIES`,
-  `CACHE_WINDOW_SELF`, `CACHE_WINDOW_OTHERS`.
-
-Beispiel: Titel A kommt rein. Laufen danach 9 andere Titel, ohne dass A nochmal
-gewaehlt wird, loescht der Bot A inkl. Datei. Kommt A zweimal wieder, ist er
-“gesetzt” und bleibt bis zur 3. Gesamtanforderung in der Bibliothek.
+**Es werden keine Musikdateien gespeichert.** Jeder Titel wird bei jeder
+Wiedergabe frisch heruntergeladen (auch Warteschlange, `!loop`, Wiederholung).
+Die Datei liegt nur waehrend des Abspielens in `/data/tmp` und wird danach
+geloescht; beim Start wird `/data/tmp` (und altes `cache/`, `library/`) geleert.
+Songlimit: Titel ueber `MAX_SONG_SECONDS` (Default 600 = 10 Minuten, `0` = aus) werden abgelehnt.
+In der Datenbank bleiben nur Metadaten (Titel, URL, Laenge).
 
 ## Element Call (MatrixRTC / LiveKit)
 

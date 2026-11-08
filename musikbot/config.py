@@ -60,22 +60,20 @@ class Config:
     # --- Dateien -----------------------------------------------------------
     data_dir: str = "/data"
 
-    # --- Speichern / Caching ----------------------------------------------
-    # Ab sovielen Anforderungen wird ein Titel dauerhaft in die Library verschoben.
-    save_after_requests: int = 3
-    # Maximal so viele Titel dürfen im Cache liegen.
-    cache_max_entries: int = 10
-    # Ein Cachtitel braucht N *zusätzliche* Anforderungen ...
-    cache_window_self: int = 2
-    # ... bevor N *andere* Titel angefordert wurden, sonst wird er gelöscht.
-    cache_window_others: int = 9
-
     # --- Medien ------------------------------------------------------------
+    # Laengere Titel werden abgelehnt (0 = kein Limit).
+    max_song_seconds: int = 600
     enable_video: bool = True
     video_height: int = 480
     video_fps: float = 24.0
     video_bitrate: int = 600_000
     default_volume: int = 60
+    # Call automatisch verlassen, wenn so lange nichts spielt (0 = nie).
+    idle_leave_seconds: int = 60
+    # Call verlassen, sobald der letzte Titel zu Ende ist und die Warteschlange leer.
+    leave_when_done: bool = True
+    # Nur wer selbst im Call ist, darf den Bot steuern.
+    call_only_control: bool = True
 
     # --- Call / WebRTC -----------------------------------------------------
     auto_answer: bool = True
@@ -111,12 +109,8 @@ class Config:
         self.prefixes = tuple(p if p else "!" for p in self.prefixes)
         if self.mesh_invite not in ("auto", "all", "off"):
             raise ConfigError(f"MESH_INVITE muss auto|all|off sein, ist {self.mesh_invite!r}")
-        if self.cache_max_entries < 1:
-            raise ConfigError("CACHE_MAX_ENTRIES muss >= 1 sein")
-        if self.save_after_requests < 1:
-            raise ConfigError("SAVE_AFTER_REQUESTS muss >= 1 sein")
-        if not (0 <= self.default_volume <= 100):
-            raise ConfigError("DEFAULT_VOLUME muss zwischen 0 und 100 liegen")
+        if not (0 <= self.default_volume <= 300):
+            raise ConfigError("DEFAULT_VOLUME muss zwischen 0 und 300 liegen")
 
     @property
     def use_turn(self) -> bool:
@@ -125,6 +119,11 @@ class Config:
     @property
     def cache_dir(self) -> str:
         return os.path.join(self.data_dir, "cache")
+
+    @property
+    def tmp_dir(self) -> str:
+        """Nur für die gerade laufende Wiedergabe; wird nach jedem Titel geleert."""
+        return os.path.join(self.data_dir, "tmp")
 
     @property
     def library_dir(self) -> str:
@@ -162,15 +161,15 @@ class Config:
             prefixes=_list("BOT_PREFIXES", ("!",)),
             auto_join_invites=_bool("AUTO_JOIN_INVITES", True),
             data_dir=_str("DATA_DIR", "/data"),
-            save_after_requests=_int("SAVE_AFTER_REQUESTS", 3),
-            cache_max_entries=_int("CACHE_MAX_ENTRIES", 10),
-            cache_window_self=_int("CACHE_WINDOW_SELF", 2),
-            cache_window_others=_int("CACHE_WINDOW_OTHERS", 9),
+            max_song_seconds=_int("MAX_SONG_SECONDS", 600),
             enable_video=_bool("ENABLE_VIDEO", True),
             video_height=_int("VIDEO_HEIGHT", 480),
             video_fps=_float("VIDEO_FPS", 24.0),
             video_bitrate=_int("VIDEO_BITRATE", 600_000),
             default_volume=_int("DEFAULT_VOLUME", 60),
+            idle_leave_seconds=_int("IDLE_LEAVE_SECONDS", 60),
+            leave_when_done=_bool("LEAVE_WHEN_DONE", True),
+            call_only_control=_bool("CALL_ONLY_CONTROL", True),
             auto_answer=_bool("AUTO_ANSWER", True),
             mesh_invite=_str("MESH_INVITE", "auto").lower(),
             encryption_enabled=_bool("ENCRYPTION_ENABLED", True),

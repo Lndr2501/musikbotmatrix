@@ -1,0 +1,163 @@
+"""Karten fuer Diddy (dev.diddy.card): strukturierte Daten neben dem normalen Text.
+
+Jede Nachricht behaelt ihren lesbaren `body` (fuer Element & Co.); Diddy zeichnet aus dem Zusatzfeld
+`dev.diddy.card` eine Karte. Aktualisiert wird per Bearbeitung (m.replace), die Karte muss dann auch in
+`m.new_content` stehen, damit Suchen -> Laden -> Spielt in einer Karte laufen. Protokoll siehe
+docs/bot-cards.md im Diddy-Repo. Rein (kein nio), damit alles ohne Matrix testbar ist.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+CARD_KEY = "dev.diddy.card"
+VERSION = 1
+
+TONES = ("info", "success", "warning", "error")
+TRACK_STATES = ("searching", "downloading", "playing", "paused", "stopped", "error")
+
+
+def _clean(card: dict) -> dict:
+    """Leere Felder weglassen, Version setzen."""
+    out = {k: v for k, v in card.items() if v not in (None, "", [], {})}
+    out["v"] = VERSION
+    return out
+
+
+def card_content(body: str, card: dict, msgtype: str = "m.notice") -> dict:
+    """Nachrichteninhalt: Rueckfall-Text plus Karte."""
+    return {"msgtype": msgtype, "body": body, CARD_KEY: _clean(card)}
+
+
+def edit_content(event_id: str, content: dict) -> dict:
+    """Inhalt einer Bearbeitung (m.replace) fuer `event_id`; die Karte steht auch in m.new_content."""
+    new = {k: v for k, v in content.items() if k in ("msgtype", "body", CARD_KEY)}
+    edit = dict(new)
+    edit["body"] = "* " + new["body"]
+    edit["m.new_content"] = new
+    edit["m.relates_to"] = {"rel_type": "m.replace", "event_id": event_id}
+    return edit
+
+
+def action(label: str, send: str) -> dict:
+    return {"label": label, "send": send}
+
+
+# Knopfreihen
+CONTROLS_PLAYING = (
+    action("⏸ Pause", "!pause"), action("⏭ Weiter", "!skip"),
+    action("📜 Warteschlange", "!queue"), action("⏹ Stopp", "!stop"),
+)
+CONTROLS_PAUSED = (
+    action("▶ Weiter", "!resume"), action("⏭ Weiter", "!skip"), action("⏹ Stopp", "!stop"),
+)
+
+
+def fmt_len(seconds: Optional[float]) -> str:
+    if not seconds:
+        return ""
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def track_card(
+    state: str,
+    title: str,
+    *,
+    artist: str = "",
+    duration: float = 0.0,
+    position: Optional[float] = None,
+    started_at_ms: Optional[int] = None,
+    url: str = "",
+    note: str = "",
+    actions=(),
+) -> dict:
+    """Karte eines Titels. `position` (s) gilt zum Zeitpunkt `started_at_ms` (Bot-Uhr)."""
+    assert state in TRACK_STATES, state
+    return {
+        "kind": "track", "state": state, "title": title, "artist": artist or None,
+        "duration": duration or None, "position": position, "startedAt": started_at_ms,
+        "url": url or None, "note": note or None, "actions": list(actions),
+    }
+
+
+_TRACK_ICON = {
+    "searching": "🔎", "downloading": "⬇️", "playing": "🎵", "paused": "⏸",
+    "stopped": "⏹", "error": "⚠️",
+}
+_TRACK_VERB = {
+    "searching": "Suchen", "downloading": "Lade herunter", "playing": "Spielt",
+    "paused": "Pausiert", "stopped": "Gestoppt", "error": "Fehler",
+}
+
+
+def track_body(card: dict) -> str:
+    """Lesbarer Rueckfall-Text zu einer Titel-Karte (so sah die Nachricht vorher aus)."""
+    dur = fmt_len(card.get("duration"))
+    extra = f" ({dur})" if dur else ""
+    return f"{_TRACK_ICON[card['state']]} {_TRACK_VERB[card['state']]}: {card['title']}{extra}"
+
+
+def queue_card(now: Optional[dict], items: list[dict], total: int, actions=()) -> dict:
+    return {"kind": "queue", "now": now, "items": items[:50], "total": total, "actions": list(actions)}
+
+
+def queue_body(now: Optional[dict], items: list[dict], total: int) -> str:
+    lines = []
+    if now:
+        lines.append(f"Läuft: {now['title']}")
+    for i, it in enumerate(items, start=1):
+        lines.append(f"{i}. {it['title']}")
+    if total > len(items):
+        lines.append(f"… und {total - len(items)} weitere")
+    return "\n".join(lines) if lines else "Warteschlange ist leer."
+
+
+def note_card(text: str, tone: str = "info", icon: str = "") -> dict:
+    assert tone in TONES, tone
+    return {"kind": "note", "text": text, "tone": tone, "icon": icon or None}
+
+
+def note_body(text: str, icon: str = "") -> str:
+    return f"{icon} {text}".strip()
+
+
+def help_card(groups: list[dict], note: str = "") -> dict:
+    return {"kind": "help", "groups": groups, "note": note or None}
+
+
+def _g(title: str, *rows: tuple[str, str]) -> dict:
+    return {"title": title, "items": [{"usage": u, "desc": d} for u, d in rows]}
+
+
+HELP_GROUPS = [
+    _g("Wiedergabe",
+       ("!play <Link oder Suchbegriff>", "Link von fast jeder Seite (yt-dlp), sonst YouTube-Suche"),
+       ("!play sc: <Begriff>", "SoundCloud-Suche (auch bili: und nico:)"),
+       ("!pause · !resume", "pausieren · weiter"),
+       ("!stop · !skip · !previous", "stoppen · nächster Titel · vorheriger Titel"),
+       ("!status", "was läuft gerade?"),
+       ("!seek <mm:ss | +30 | -30>", "springen"),
+       ("!vor [s] · !zurueck [s]", "vorspulen · zurückspulen (Standard 10 s)")),
+    _g("Warteschlange",
+       ("!queue · !clear", "anzeigen · leeren"),
+       ("!shuffle", "mischen"),
+       ("!loop on|off", "aktuellen Titel wiederholen")),
+    _g("Ton und Bild",
+       ("!volume <0-300>", "Lautstärke (60 = Original, darüber Boost)"),
+       ("!video on|off", "Video im Call")),
+    _g("Call",
+       ("!joincall · !leavecall", "Bot kommt in den Call · verlässt ihn")),
+    _g("Playlists und Dauerbetrieb",
+       ("!playlist create|delete <name>", "anlegen · löschen"),
+       ("!playlist add <name> [Link]", "Titel hinzufügen (ohne Link: der laufende)"),
+       ("!playlist remove <name> <nr>", "Titel entfernen"),
+       ("!playlist show <name> · list", "anzeigen · alle Listen"),
+       ("!playlist play <name> [shuffle]", "abspielen · !playlist enqueue <name> einreihen"),
+       ("!24/7 song [Link] · playlist <name> · off", "Dauerschleife, Bot bleibt im Call")),
+]
+HELP_NOTE = ("Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue, "
+             "playlist list/show geht immer). Ist die Warteschlange leer und der Song zu Ende, "
+             "verlässt der Bot den Call (außer im 24/7-Modus). Nichts wird gespeichert: jeder "
+             "Titel wird bei jeder Wiedergabe neu geladen.")

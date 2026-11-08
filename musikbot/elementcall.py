@@ -79,6 +79,8 @@ class ElementCall:
         self._tasks: list[asyncio.Task] = []
         self._service_url: Optional[str] = None
         self._lock = asyncio.Lock()
+        # Wird vom Bot gesetzt: True = nicht verlassen, auch wenn der Call leer ist (24/7).
+        self.keep_alive = None
 
     # ------------------------------------------------------------ Zustand
     @property
@@ -89,6 +91,10 @@ class ElementCall:
         me = (self.cfg.matrix_user_id or self.cfg.user, self.cfg.device_id)
         return {k: v for k, v in active_members(self.members.get(room_id, {})).items()
                 if k != me}
+
+    def users_in_call(self, room_id: str) -> set[str]:
+        """Nutzer-IDs (klein geschrieben) aller aktiven Teilnehmer ausser dem Bot."""
+        return {u.lower() for (u, _d) in self.others_in_call(room_id)}
 
     async def load_members(self, room_id: str) -> None:
         state = await self.matrix.get_state_events(room_id, MEMBER_EVENT)
@@ -104,7 +110,7 @@ class ElementCall:
         if self.room_id != room_id:
             return
         others = self.others_in_call(room_id)
-        if not others:
+        if not others and not (self.keep_alive and self.keep_alive()):
             log.info("Element Call in %s leer – Bot verlaesst den Call", room_id)
             asyncio.ensure_future(self.leave())
             return

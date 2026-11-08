@@ -17,15 +17,16 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "clear": ("clear", "leeren"),
     "status": ("status", "now", "playing", "info", "was"),
     "volume": ("volume", "vol", "lautstaerke", "lautstärke", "leise", "laut"),
-    "seek": ("seek", "spule"),
+    "seek": ("seek", "spule", "goto"),
+    "forward": ("forward", "ff", "vor", "vorspulen", "fwd"),
+    "rewind": ("rewind", "rw", "zurueck", "zurück", "rueckspulen", "rückspulen", "back"),
     "shuffle": ("shuffle", "mischen"),
     "loop": ("loop", "wiederholen"),
     "joincall": ("joincall", "call", "anruf", "beitreten", "reinkommen"),
     "leavecall": ("leavecall", "leave", "auflegen", "raus"),
-    "cache": ("cache", "caches", "tmp"),
-    "library": ("library", "saved", "bibliothek", "gespeichert"),
-    "unsave": ("unsave", "vergiss", "forget"),
     "video": ("video", "bild"),
+    "playlist": ("playlist", "playlists", "pl", "wiedergabeliste"),
+    "always": ("always", "247", "24/7", "24-7", "dauerbetrieb"),
     "help": ("help", "hilfe", "commands", "befehle"),
 }
 
@@ -37,19 +38,25 @@ for _canon, _names in ALIASES.items():
 COMMANDS: tuple[str, ...] = tuple(sorted(ALIASES))
 
 HELP = """Kommandos:
-!play <Link oder Suchbegriff> – Titel abspielen (Suche, wenn keine URL)
+!play <Link oder Suchbegriff> – Link von praktisch jeder Video-/Audioseite (yt-dlp), sonst YouTube-Suche
+    Suche woanders: !play sc: <Begriff> (SoundCloud) · bili: · nico:
 !pause – pausieren · !resume – weiter
 !stop – stoppen · !skip – nächster Titel · !previous – vorheriger
 !queue – Warteschlange · !clear – Warteschlange leeren
-!status – was läuft gerade? · !seek <mm:ss oder ±s> – spulen
-!volume <0-100> – Lautstärke · !video on|off – Video im Call
+!status – was läuft gerade? · !seek <mm:ss | +30 | -30> – springen
+!vor [s] – vorspulen (Standard 10 s) · !zurueck [s] – zurückspulen
+!volume <0-300> – Lautstärke (60 = Original, darüber Boost) · !video on|off – Video im Call
 !shuffle – mischen · !loop on|off – aktuelle Titel wiederholen
 !joincall – Bot kommt in den Call · !leavecall – Bot verlässt den Call
-!cache – Cache-Status · !library – gespeicherte Titel · !unsave <Nr.> – aus Bibliothek entfernen
+!playlist create|delete <name> · add <name> [Link] · remove <name> <nr>
+    show <name> · list · play <name> [shuffle] · enqueue <name>
+    (ohne Link bei add: der laufende Titel)
+!24/7 song [Link] · !24/7 playlist <name> · !24/7 off – Dauerschleife, Bot bleibt im Call
 !hilfe – diese Liste
-Regel: Titel ab 3 Anforderungen dauerhaft gespeichert, sonst Cache
-(max. 10; ein Titel fällt raus, wenn er 2 Anforderungen braucht, bevor
-9 andere liefen). Alles über .env konfigurierbar."""
+Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue,
+playlist list/show geht immer). Ist die Warteschlange leer und der Song zu Ende,
+verlässt der Bot den Call (außer im 24/7-Modus).
+Hinweis: Nichts wird gespeichert – jeder Titel wird bei jeder Wiedergabe neu geladen."""
 
 
 @dataclass
@@ -73,3 +80,18 @@ def parse(text: str, prefixes: tuple[str, ...] = ("/",)) -> Optional[Parsed]:
     if name is None:
         return None
     return Parsed(name, tail.strip())
+
+
+_READ_ONLY = {"help", "status", "queue"}
+
+
+def is_read_only(name: str, arg: str = "") -> bool:
+    """True, wenn der Befehl den Bot nicht steuert (darf jeder im Raum)."""
+    if name in _READ_ONLY:
+        return True
+    sub = arg.strip().split(" ", 1)[0].lower()
+    if name == "playlist":
+        return sub in ("", "list", "show", "liste", "zeige")
+    if name == "always":
+        return sub == ""
+    return False

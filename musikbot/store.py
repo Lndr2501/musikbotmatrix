@@ -1,19 +1,20 @@
-"""SQLite-Speicher für Titel, Wiedergabe-Warteschlange und Cache-Policy.
+"""SQLite-Speicher für Titel-Metadaten und Warteschlange.
 
-Ein Titel ist genau einmal in der Datenbank und kennt seinen Zustand:
-``cache`` (darf wieder wegfliegen) oder ``library`` (bleibt für immer).
+Musikdateien werden NIE aufbewahrt: Jede Datei liegt nur während der Wiedergabe
+in ``tmp_dir`` und wird danach gelöscht. Jede Wiedergabe lädt neu herunter.
+In der Datenbank stehen nur Titel, URL und Länge.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sqlite3
 import threading
 from dataclasses import dataclass
 from typing import Iterable
 
-from .policy import CACHE, LIBRARY, Entry, Outcome, Policy, register_request
 from .util import now_int
 
 log = logging.getLogger(__name__)
@@ -25,15 +26,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     url         TEXT NOT NULL DEFAULT '',
     duration    REAL NOT NULL DEFAULT 0,
     uploader    TEXT NOT NULL DEFAULT '',
-    state       TEXT NOT NULL DEFAULT 'cache',
-    requests    INTEGER NOT NULL DEFAULT 0,
-    win_self    INTEGER NOT NULL DEFAULT 0,
-    win_others  INTEGER NOT NULL DEFAULT 0,
-    settled     INTEGER NOT NULL DEFAULT 0,
-    added_at    INTEGER NOT NULL DEFAULT 0,
-    last_seen   INTEGER NOT NULL DEFAULT 0,
-    rel_path    TEXT NOT NULL DEFAULT '',
-    bytes       INTEGER NOT NULL DEFAULT 0
+    added_at    INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS queue (
     pos        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,86 +34,69 @@ CREATE TABLE IF NOT EXISTS queue (
     requester  TEXT NOT NULL DEFAULT '',
     added_at   INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS playlists (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    owner      TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS playlist_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL,
+    track_key   TEXT NOT NULL,
+    added_at    INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
 @dataclass
-class Track(Entry):
+class Track:
+    key: str
     title: str = ""
     url: str = ""
     duration: float = 0.0
     uploader: str = ""
     added_at: int = 0
-    rel_path: str = ""
-    bytes: int = 0
+    abs_path: str = ""  # nur gesetzt, solange die Datei für die Wiedergabe existiert
 
     @property
     def playable(self) -> bool:
-        return bool(self.rel_path) and os.path.exists(self.abs_path)
-
-    @property
-    def abs_path(self) -> str:
-        return self._abs
-
-    _abs: str = ""
+        return bool(self.abs_path) and os.path.exists(self.abs_path)
 
 
 class TrackStore:
-    def __init__(self, db_path: str, policy: Policy, cache_dir: str, library_dir: str) -> None:
-        os.makedirs(cache_dir, exist_ok=True)
-        os.makedirs(library_dir, exist_ok=True)
+    def __init__(self, db_path: str, tmp_dir: str, *legacy_dirs: str) -> None:
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-        self.policy = policy
-        self.cache_dir = cache_dir
-        self.library_dir = library_dir
+        self.tmp_dir = tmp_dir
         self._lock = threading.RLock()
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self.db.commit()
         self._tracks: dict[str, Track] = {}
+        # Alles Gespeicherte aus früheren Versionen (cache/, library/) und
+        # Reste eines Absturzes wegräumen.
+        for directory in (tmp_dir, *legacy_dirs):
+            shutil.rmtree(directory, ignore_errors=True)
+        os.makedirs(tmp_dir, exist_ok=True)
         self._load()
 
-    # ------------------------------------------------------------- laden
     def _load(self) -> None:
         with self._lock:
             self._tracks.clear()
-            for row in self.db.execute("SELECT * FROM tracks"):
-                track = Track(
-                    key=row["key"],
-                    state=row["state"],
-                    requests=row["requests"],
-                    win_self=row["win_self"],
-                    win_others=row["win_others"],
-                    settled=bool(row["settled"]),
-                    last_seen=row["last_seen"],
-                    title=row["title"],
-                    url=row["url"],
-                    duration=row["duration"],
-                    uploader=row["uploader"],
-                    added_at=row["added_at"],
-                    rel_path=row["rel_path"],
-                    bytes=row["bytes"],
-                )
-                track._abs = os.path.join(self._dir_for_state(track.state), track.rel_path) \
-                    if track.rel_path else ""
-                self._tracks[track.key] = track
-            log.info("Speicher geladen: %d Library-Titel, %d Cache-Titel",
-                     self.count(LIBRARY), self.count(CACHE))
+            for row in self.db.execute("SELECT key,title,url,duration,uploader,added_at FROM tracks"):
+                self._tracks[row["key"]] = Track(
+                    key=row["key"], title=row["title"], url=row["url"],
+                    duration=row["duration"], uploader=row["uploader"],
+                    added_at=row["added_at"])
 
-    def _dir_for_state(self, state: str) -> str:
-        return self.library_dir if state == LIBRARY else self.cache_dir
-
-    # ------------------------------------------------------- Buchhaltung
+    # ------------------------------------------------------- Metadaten
     def note_request(self, key: str, *, title: str = "", url: str = "",
-                     duration: float = 0.0, uploader: str = "",
-                     now: int | None = None) -> tuple[Track, Outcome]:
-        """Bucht eine Anforderung und räumt Dateien auf, die die Policy killt."""
-        now = now or now_int()
+                     duration: float = 0.0, uploader: str = "") -> Track:
         with self._lock:
             track = self._tracks.get(key)
             if track is None:
-                track = Track(key=key, added_at=now)
+                track = Track(key=key, added_at=now_int())
                 self._tracks[key] = track
             if title:
                 track.title = title
@@ -130,112 +106,49 @@ class TrackStore:
                 track.duration = duration
             if uploader:
                 track.uploader = uploader
-
-            outcome = register_request(self._tracks, key, self.policy, now)
-            track = self._tracks[key]
-
-            if outcome.promoted:
-                self._move_file(track, LIBRARY)
-            for dead in outcome.removed:
-                self._remove_files(dead)
-
-            self._persist(track)
-            for dead in outcome.evicted:
-                self.db.execute("DELETE FROM tracks WHERE key = ?", (dead,))
-                self.db.execute("DELETE FROM queue WHERE track_key = ?", (dead,))
+            self.db.execute(
+                """INSERT INTO tracks (key,title,url,duration,uploader,added_at)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(key) DO UPDATE SET title=excluded.title, url=excluded.url,
+                       duration=excluded.duration, uploader=excluded.uploader""",
+                (track.key, track.title, track.url, track.duration, track.uploader,
+                 track.added_at))
             self.db.commit()
-            if outcome.evicted:
-                log.info("Aus dem Cache geworfen: %s", ", ".join(outcome.evicted))
-            if outcome.promoted:
-                log.info("Dauerhaft gespeichert: %s", track.title or track.key)
-            return track, outcome
+            return track
 
-    def _move_file(self, track: Track, state: str) -> None:
-        if not track.rel_path:
-            track._abs = ""
-            return
-        old = os.path.join(self._dir_for_state("cache" if state == LIBRARY else state), track.rel_path)
-        new_dir = self._dir_for_state(state)
-        new = os.path.join(new_dir, track.rel_path)
-        if os.path.exists(old):
-            os.makedirs(new_dir, exist_ok=True)
-            os.replace(old, new)
-            track._abs = new
-        else:
-            track._abs = new if os.path.exists(new) else ""
-
-    def _remove_files(self, track: Track) -> None:
-        if not track.rel_path:
-            return
-        for directory in (self.cache_dir, self.library_dir):
-            path = os.path.join(directory, track.rel_path)
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                log.debug("Datei %s war schon weg", path)
-
+    # ------------------------------------------------------- Dateien
     def set_file(self, key: str, path: str) -> None:
-        """Nach dem Download: Dateipfad eintragen (relativ zum jeweiligen Ordner)."""
         with self._lock:
-            track = self._tracks[key]
-            filename = os.path.basename(path)
-            track.rel_path = filename
-            track.bytes = os.path.getsize(path) if os.path.exists(path) else 0
-            track._abs = path
-            self._persist(track)
-            self.db.commit()
+            self._tracks[key].abs_path = path
 
-    def dir_for(self, key: str) -> str:
+    def release_file(self, key: str) -> None:
+        """Datei des Titels löschen (nach der Wiedergabe oder bei Abbruch)."""
         with self._lock:
             track = self._tracks.get(key)
-            state = track.state if track else CACHE
-            return self._dir_for_state(state)
+            if track is None or not track.abs_path:
+                return
+            path, track.abs_path = track.abs_path, ""
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        # yt-dlp-Nebendateien (.part, .ytdl, ...) mit gleichem Stamm
+        stem = os.path.splitext(os.path.basename(path))[0]
+        for name in os.listdir(self.tmp_dir):
+            if name.startswith(stem):
+                try:
+                    os.remove(os.path.join(self.tmp_dir, name))
+                except OSError:
+                    pass
 
-    def forget(self, key: str) -> bool:
-        """Titel absichtlich löschen (inkl. Library)."""
-        with self._lock:
-            if key not in self._tracks:
-                return False
-            self._delete_files(key)
-            self._tracks.pop(key)
-            self.db.execute("DELETE FROM tracks WHERE key = ?", (key,))
-            self.db.execute("DELETE FROM queue WHERE track_key = ?", (key,))
-            self.db.commit()
-            return True
+    def release_all(self) -> None:
+        for key in list(self._tracks):
+            self.release_file(key)
 
     # ------------------------------------------------------------ Abfragen
     def get(self, key: str) -> Track | None:
         with self._lock:
             return self._tracks.get(key)
-
-    def all(self) -> list[Track]:
-        with self._lock:
-            return list(self._tracks.values())
-
-    def by_state(self, state: str) -> list[Track]:
-        with self._lock:
-            return [t for t in self._tracks.values() if t.state == state]
-
-    def count(self, state: str) -> int:
-        return len(self.by_state(state))
-
-    def cache_used_bytes(self) -> int:
-        return sum(t.bytes for t in self.by_state(CACHE))
-
-    def library_used_bytes(self) -> int:
-        return sum(t.bytes for t in self.by_state(LIBRARY))
-
-    def cache_report(self) -> list[tuple[Track, str]]:
-        """Cache-Titel inkl. Menschen-lesbarem Status des Fensters."""
-        rows: list[tuple[Track, str]] = []
-        for track in self.by_state(CACHE):
-            if track.settled:
-                status = "geschützt"
-            else:
-                status = (f"{track.win_self}/{self.policy.window_self} Anfragen in "
-                          f"{track.win_others}/{self.policy.window_others} Fensterschritten")
-            rows.append((track, status))
-        return rows
 
     # ---------------------------------------------------------- Warteschlange
     def queue_add(self, key: str, requester: str = "") -> None:
@@ -277,25 +190,77 @@ class TrackStore:
                     "INSERT INTO queue (track_key, added_at) VALUES (?,?)", (key, now_int()))
             self.db.commit()
 
-    # --------------------------------------------------------------- intern
-    def _persist(self, track: Track) -> None:
-        self.db.execute(
-            """INSERT INTO tracks (key, title, url, duration, uploader, state, requests,
-                                   win_self, win_others, settled, added_at, last_seen,
-                                   rel_path, bytes)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(key) DO UPDATE SET
-                   title=excluded.title, url=excluded.url, duration=excluded.duration,
-                   uploader=excluded.uploader, state=excluded.state,
-                   requests=excluded.requests, win_self=excluded.win_self,
-                   win_others=excluded.win_others, settled=excluded.settled,
-                   last_seen=excluded.last_seen, rel_path=excluded.rel_path,
-                   bytes=excluded.bytes""",
-            (track.key, track.title, track.url, track.duration, track.uploader,
-             track.state, track.requests, track.win_self, track.win_others,
-             int(track.settled), track.added_at, track.last_seen, track.rel_path,
-             track.bytes),
-        )
+    # ------------------------------------------------------------ Playlists
+    # Eine Playlist ist nur eine geordnete Liste von Titel-Schluesseln; die
+    # Metadaten (Titel, URL) stehen wie immer in ``tracks``. Dateien gibt es nie.
+    def _playlist_id(self, name: str) -> int | None:
+        row = self.db.execute("SELECT id FROM playlists WHERE name = ?", (name,)).fetchone()
+        return None if row is None else int(row["id"])
+
+    def playlist_create(self, name: str, owner: str = "") -> bool:
+        with self._lock:
+            if self._playlist_id(name) is not None:
+                return False
+            self.db.execute("INSERT INTO playlists (name, owner, created_at) VALUES (?,?,?)",
+                            (name, owner, now_int()))
+            self.db.commit()
+            return True
+
+    def playlist_delete(self, name: str) -> bool:
+        with self._lock:
+            pid = self._playlist_id(name)
+            if pid is None:
+                return False
+            self.db.execute("DELETE FROM playlist_items WHERE playlist_id = ?", (pid,))
+            self.db.execute("DELETE FROM playlists WHERE id = ?", (pid,))
+            self.db.commit()
+            return True
+
+    def playlist_list(self) -> list[tuple[str, int]]:
+        """[(Name, Anzahl Titel)] alphabetisch."""
+        with self._lock:
+            rows = self.db.execute(
+                """SELECT p.name AS name, COUNT(i.id) AS n FROM playlists p
+                   LEFT JOIN playlist_items i ON i.playlist_id = p.id
+                   GROUP BY p.id ORDER BY p.name COLLATE NOCASE""").fetchall()
+            return [(r["name"], int(r["n"])) for r in rows]
+
+    def playlist_keys(self, name: str) -> list[str] | None:
+        """Titel-Schluessel in Reihenfolge; None = Playlist gibt es nicht."""
+        with self._lock:
+            pid = self._playlist_id(name)
+            if pid is None:
+                return None
+            rows = self.db.execute(
+                "SELECT track_key FROM playlist_items WHERE playlist_id = ? ORDER BY id ASC",
+                (pid,)).fetchall()
+            return [r["track_key"] for r in rows]
+
+    def playlist_add(self, name: str, key: str) -> bool:
+        with self._lock:
+            pid = self._playlist_id(name)
+            if pid is None:
+                return False
+            self.db.execute(
+                "INSERT INTO playlist_items (playlist_id, track_key, added_at) VALUES (?,?,?)",
+                (pid, key, now_int()))
+            self.db.commit()
+            return True
+
+    def playlist_remove(self, name: str, index: int) -> str | None:
+        """Entfernt den index-ten Titel (1-basiert); gibt dessen Schluessel zurueck."""
+        with self._lock:
+            pid = self._playlist_id(name)
+            if pid is None or index < 1:
+                return None
+            row = self.db.execute(
+                "SELECT id, track_key FROM playlist_items WHERE playlist_id = ? "
+                "ORDER BY id ASC LIMIT 1 OFFSET ?", (pid, index - 1)).fetchone()
+            if row is None:
+                return None
+            self.db.execute("DELETE FROM playlist_items WHERE id = ?", (row["id"],))
+            self.db.commit()
+            return row["track_key"]
 
     def close(self) -> None:
         with self._lock:

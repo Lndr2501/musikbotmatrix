@@ -15,6 +15,7 @@ import nio
 from nio.responses import (JoinedMembersResponse, KeysQueryResponse,
                           LoginResponse)
 
+from . import cards
 from .config import Config
 
 log = logging.getLogger("musikbot.matrix")
@@ -296,14 +297,27 @@ class Matrix:
             room_id, "m.room.message", {"msgtype": "m.notice", "body": body})
 
     async def send_room_event(self, room_id: str, evtype: str,
-                              content: dict) -> None:
+                              content: dict) -> str | None:
+        """Sendet ein Raum-Event, gibt dessen event_id zurueck (None bei Fehler)."""
         try:
             resp = await self.client.room_send(
                 room_id, evtype, content, ignore_unverified_devices=True)
             if isinstance(resp, nio.ErrorResponse):
                 log.error("Senden (%s) fehlgeschlagen: %s", evtype, resp)
+                return None
+            return getattr(resp, "event_id", None)
         except Exception:
             log.exception("Senden (%s) fehlgeschlagen", evtype)
+            return None
+
+    async def send_card(self, room_id: str, content: dict) -> str | None:
+        """Karte fuer Diddy senden (siehe cards.py). event_id oder None."""
+        return await self.send_room_event(room_id, "m.room.message", content)
+
+    async def edit_card(self, room_id: str, event_id: str, content: dict) -> bool:
+        """Karte per Bearbeitung (m.replace) aktualisieren. True, wenn gesendet."""
+        edit = cards.edit_content(event_id, content)
+        return await self.send_room_event(room_id, "m.room.message", edit) is not None
 
     async def send_to_device(self, recipients: list[tuple[str, str]],
                              evtype: str, content: dict) -> None:

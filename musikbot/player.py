@@ -28,6 +28,9 @@ LEAD_SECONDS = 0.4  # Puffer, damit kleiner Jitter im Call nicht stört
 EventHandler = Callable[[str, dict], Awaitable[None]]
 
 
+MAX_VOLUME = 300  # 60 = Originalpegel, darueber Boost (300 = 5x)
+
+
 class PeerAudioTrack(MediaStreamTrack):
     """WebRTC-Audio eines Teilnehmers: holt Blöcke aus dessen Sink."""
 
@@ -99,11 +102,13 @@ def _blank_frame() -> VideoFrame:
 
 class Player:
     def __init__(self, cfg: Config, hub: Hub, store: TrackStore,
-                 *, on_event: EventHandler | None = None) -> None:
+                 *, on_event: EventHandler | None = None,
+                 fetch: "Callable[[Track], Awaitable[None]] | None" = None) -> None:
         self.cfg = cfg
         self.hub = hub
         self.store = store
         self.on_event = on_event
+        self.fetch = fetch  # lädt die Datei frisch herunter (nie aus einem Cache)
         self.state = "stopped"  # stopped | playing | paused
         self.current: Track | None = None
         self.requester: str = ""
@@ -205,6 +210,8 @@ class Player:
             await self._teardown()
             self.current = track
             self.requester = requester
+            if self.fetch is not None:
+                await self.fetch(track)  # immer frisch herunterladen
             source = MediaSource(
                 track.abs_path,
                 video_height=self.cfg.video_height,
@@ -275,7 +282,7 @@ class Player:
         return True
 
     def set_volume(self, value: int) -> int:
-        self.volume = max(0, min(100, value))
+        self.volume = max(0, min(MAX_VOLUME, value))
         return self.volume
 
     def set_video(self, enabled: bool | None = None) -> bool:
@@ -334,17 +341,25 @@ class Player:
             return False
         key, requester = self.queue.pop(0)
         track = self.store.get(key)
-        if track is None or not track.playable:
+        if track is None or (track.url == "" and not track.playable):
             log.warning("Nächster Titel %s fehlt – übersprungen", key)
             if self.on_event:
                 await self.on_event("missing", {"key": key})
             return await self._advance(auto=auto)
-        await self.play(track, requester)
+        try:
+            await self.play(track, requester)
+        except Exception:
+            log.exception("Nächster Titel %s nicht abspielbar – übersprungen", key)
+            if self.on_event:
+                await self.on_event("missing", {"key": key})
+            return await self._advance(auto=auto)
         if self.on_event:
             await self.on_event("advanced", {"track": track, "requester": requester})
         return True
 
     async def _teardown(self) -> None:
+        if self.current is not None:
+            self.store.release_file(self.current.key)
         if self._source is not None:
             await asyncio.to_thread(self._source.close)
         self._source = None
@@ -358,6 +373,7 @@ class Player:
             await asyncio.gather(self._mix_task, return_exceptions=True)
             self._mix_task = None
         await self._teardown()
+        self.store.release_all()
         self.current = None
         self.state = "stopped"
 

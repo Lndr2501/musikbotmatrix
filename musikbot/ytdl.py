@@ -22,6 +22,24 @@ class MediaError(RuntimeError):
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Suchpraefix im Befehl -> yt-dlp-Suchschluessel, z. B. `!play sc: daft punk`.
+# Links aller von yt-dlp unterstuetzten Seiten (1000+) gehen ohne Praefix.
+SEARCH_PREFIXES: dict[str, str] = {
+    "yt": "ytsearch1", "youtube": "ytsearch1",
+    "sc": "scsearch1", "soundcloud": "scsearch1",
+    "bili": "bilisearch1", "bilibili": "bilisearch1",
+    "nico": "nicosearch1", "niconico": "nicosearch1",
+}
+_PREFIX_RE = re.compile(r"^([A-Za-z]{2,10}):\s*(\S.*)$")
+
+
+def split_search(query: str) -> tuple[str, str]:
+    """`sc: foo` -> ('scsearch1', 'foo'); ohne bekanntes Praefix -> YouTube."""
+    m = _PREFIX_RE.match(query)
+    if m and m.group(1).lower() in SEARCH_PREFIXES:
+        return SEARCH_PREFIXES[m.group(1).lower()], m.group(2).strip()
+    return "ytsearch1", query
+
 
 @dataclass
 class Resolved:
@@ -48,6 +66,13 @@ class MediaResolver:
             "restrictfilenames": True,
             "no_color": True,
         }
+        # Viele Seiten blocken Python-TLS mit 403; mit curl_cffi als Chrome auftreten.
+        try:
+            import curl_cffi  # noqa: F401
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            opts["impersonate"] = ImpersonateTarget("chrome")
+        except Exception:
+            pass
         if self.cfg.yt_cookies_file:
             opts["cookiefile"] = self.cfg.yt_cookies_file
         if self.cfg.yt_player_client:
@@ -65,7 +90,8 @@ class MediaResolver:
             if is_url(query):
                 info = self._extract(query)
             else:
-                listing = self._extract("ytsearch1:" + query, flat=True)
+                key, term = split_search(query)
+                listing = self._extract(f"{key}:{term}", flat=True)
                 entries = [e for e in (listing.get("entries") or []) if e]
                 if not entries:
                     raise MediaError(f"Zu {query!r} wurde nichts gefunden.")
