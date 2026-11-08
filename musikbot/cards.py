@@ -201,5 +201,5 @@ HELP_GROUPS = [
 ]
 HELP_NOTE = ("Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue, "
              "playlist list/show geht immer). Ist die Warteschlange leer und der Song zu Ende, "
-             "verlässt der Bot den Call (außer im 24/7-Modus). Nichts wird gespeichert: jeder "
-             "Titel wird bei jeder Wiedergabe neu geladen.")
+             "verlässt der Bot den Call (außer im 24/7-Modus). Titel werden nur gespeichert, wenn "
+             "sie oft gespielt werden (ab 5 Downloads); nach 3 Tagen ohne Wiedergabe wird die Datei gelöscht.")

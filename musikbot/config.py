@@ -61,6 +61,10 @@ class Config:
     data_dir: str = "/data"
 
     # --- Medien ------------------------------------------------------------
+    # Wer oft gespielt wird, bleibt gespeichert: ab `hot_after` Downloads (0 = nie speichern),
+    # geloescht nach `hot_days` Tagen ohne Wiedergabe.
+    hot_after: int = 5
+    hot_days: float = 3.0
     # Laengere Titel werden abgelehnt (0 = kein Limit).
     max_song_seconds: int = 600
     enable_video: bool = True
@@ -121,6 +125,11 @@ class Config:
         return os.path.join(self.data_dir, "cache")
 
     @property
+    def hot_dir(self) -> str:
+        """Dauerhaft gemerkte Titel (oft gespielt); wird nie beim Start geleert."""
+        return os.path.join(self.data_dir, "hot")
+
+    @property
     def tmp_dir(self) -> str:
         """Nur für die gerade laufende Wiedergabe; wird nach jedem Titel geleert."""
         return os.path.join(self.data_dir, "tmp")
@@ -162,6 +171,8 @@ class Config:
             auto_join_invites=_bool("AUTO_JOIN_INVITES", True),
             data_dir=_str("DATA_DIR", "/data"),
             max_song_seconds=_int("MAX_SONG_SECONDS", 600),
+            hot_after=_int("HOT_AFTER", 5),
+            hot_days=_float("HOT_DAYS", 3.0),
             enable_video=_bool("ENABLE_VIDEO", True),
             video_height=_int("VIDEO_HEIGHT", 480),
             video_fps=_float("VIDEO_FPS", 24.0),

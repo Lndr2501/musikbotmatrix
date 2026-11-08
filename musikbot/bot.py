@@ -34,7 +34,8 @@ MAX_SHOWN = 30
 class Bot:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.store = TrackStore(cfg.db_path, cfg.tmp_dir, cfg.cache_dir, cfg.library_dir)
+        self.store = TrackStore(cfg.db_path, cfg.tmp_dir, cfg.cache_dir, cfg.library_dir,
+                               hot_dir=cfg.hot_dir, hot_after=cfg.hot_after, hot_days=cfg.hot_days)
         self._fetch_room = ""
         self.hub = Hub()
         self.player = Player(cfg, self.hub, self.store,
@@ -625,7 +626,7 @@ class Bot:
         await self._start_key(room_id, track.key, sender, announce=True)
 
     async def _fetch(self, track) -> None:
-        """Lädt den Titel für die Wiedergabe neu herunter (nichts bleibt liegen)."""
+        """Titel fuer die Wiedergabe holen: gemerkt (oft gespielt) oder frisch herunterladen."""
         want_video = self.player.video_enabled and self.cfg.enable_video
         room = self._fetch_room or self._notice_room()
         if room:
@@ -637,12 +638,18 @@ class Bot:
         from .ytdl import Resolved
         resolved = Resolved(key=track.key, title=track.title, url=track.url,
                             duration=track.duration, uploader=track.uploader)
+        cached = self.store.hot_path(track.key, want_video)    # oft gespielt: liegt schon da
+        if cached:
+            self.store.set_file(track.key, cached)
+            return
         self._fetching += 1
         try:
             path = await self.resolver.download_async(resolved, want_video, self.cfg.tmp_dir)
         finally:
             self._fetching -= 1
         self.store.set_file(track.key, path)
+        self.store.note_download(track.key, want_video)
+        self.store.prune_hot()
 
     async def _start_key(self, room_id: str, key: str, sender: str,
                          *, announce: bool = True) -> bool:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -52,6 +53,13 @@ CREATE TABLE IF NOT EXISTS favorites (
     added_at  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user, track_key)
 );
+CREATE TABLE IF NOT EXISTS hot (
+    track_key TEXT PRIMARY KEY,
+    downloads INTEGER NOT NULL DEFAULT 0,
+    last_used INTEGER NOT NULL DEFAULT 0,
+    path      TEXT NOT NULL DEFAULT '',
+    video     INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS plays (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     track_key TEXT NOT NULL,
@@ -78,9 +86,13 @@ class Track:
 
 
 class TrackStore:
-    def __init__(self, db_path: str, tmp_dir: str, *legacy_dirs: str) -> None:
+    def __init__(self, db_path: str, tmp_dir: str, *legacy_dirs: str,
+                 hot_dir: str = "", hot_after: int = 5, hot_days: float = 3.0) -> None:
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.tmp_dir = tmp_dir
+        self.hot_dir = hot_dir if hot_after > 0 else ""
+        self.hot_after = hot_after
+        self.hot_seconds = int(hot_days * 86400)
         self._lock = threading.RLock()
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -92,7 +104,10 @@ class TrackStore:
         for directory in (tmp_dir, *legacy_dirs):
             shutil.rmtree(directory, ignore_errors=True)
         os.makedirs(tmp_dir, exist_ok=True)
+        if self.hot_dir:
+            os.makedirs(self.hot_dir, exist_ok=True)
         self._load()
+        self.prune_hot()
 
     def _load(self) -> None:
         with self._lock:
@@ -134,6 +149,81 @@ class TrackStore:
         with self._lock:
             self._tracks[key].abs_path = path
 
+    # ------------------------------------------------- oft gespielt: behalten
+    def _in_hot(self, path: str) -> bool:
+        return bool(self.hot_dir) and os.path.dirname(os.path.abspath(path)) == os.path.abspath(self.hot_dir)
+
+    def hot_path(self, key: str, want_video: bool = False) -> str | None:
+        """Gemerkte Datei des Titels (und Nutzung vermerken), sonst None. Ohne Video reicht jede Datei."""
+        if not self.hot_dir:
+            return None
+        with self._lock:
+            row = self.db.execute("SELECT path, video FROM hot WHERE track_key = ?", (key,)).fetchone()
+            if row is None or not row["path"] or not os.path.exists(row["path"]):
+                return None
+            if want_video and not row["video"]:
+                return None
+            self.db.execute("UPDATE hot SET last_used = ? WHERE track_key = ?", (now_int(), key))
+            self.db.commit()
+            return row["path"]
+
+    def note_download(self, key: str, video: bool = False) -> int:
+        """Zaehlt einen echten Download; gibt die bisherige Anzahl zurueck."""
+        with self._lock:
+            self.db.execute(
+                """INSERT INTO hot (track_key, downloads, last_used, video) VALUES (?,1,?,?)
+                   ON CONFLICT(track_key) DO UPDATE SET downloads = downloads + 1, last_used = excluded.last_used""",
+                (key, now_int(), int(video)))
+            self.db.commit()
+            return int(self.db.execute("SELECT downloads FROM hot WHERE track_key = ?", (key,)).fetchone()[0])
+
+    def _keep_hot(self, key: str, path: str) -> bool:
+        """Datei nach der Wiedergabe behalten, wenn der Titel oft genug geladen wurde."""
+        if not self.hot_dir or self._in_hot(path) or not os.path.exists(path):
+            return False
+        with self._lock:
+            row = self.db.execute("SELECT downloads, video FROM hot WHERE track_key = ?", (key,)).fetchone()
+            if row is None or row["downloads"] < self.hot_after:
+                return False
+            dest = os.path.join(self.hot_dir, re.sub(r"[^\w.-]", "_", key) + os.path.splitext(path)[1])
+            try:
+                shutil.move(path, dest)
+            except OSError:
+                log.warning("Titel %s lässt sich nicht merken", key, exc_info=True)
+                return False
+            self.db.execute("UPDATE hot SET path = ?, last_used = ? WHERE track_key = ?",
+                            (dest, now_int(), key))
+            self.db.commit()
+            return True
+
+    def prune_hot(self) -> int:
+        """Gemerkte Titel loeschen, die laenger als hot_days nicht gespielt wurden. Gibt die Anzahl zurueck."""
+        if not self.hot_dir:
+            return 0
+        n = 0
+        with self._lock:
+            cutoff = now_int() - self.hot_seconds
+            for row in self.db.execute("SELECT track_key, path, last_used FROM hot WHERE path != ''").fetchall():
+                if row["last_used"] < cutoff or not os.path.exists(row["path"]):
+                    try:
+                        os.remove(row["path"])
+                    except FileNotFoundError:
+                        pass
+                    # Zaehler beginnt von vorn: ein Titel muss sich den Platz neu verdienen
+                    self.db.execute("UPDATE hot SET path = '', downloads = 0 WHERE track_key = ?",
+                                    (row["track_key"],))
+                    n += 1
+            self.db.commit()
+            known = {r["path"] for r in self.db.execute("SELECT path FROM hot WHERE path != ''")}
+        for name in os.listdir(self.hot_dir):       # Waisen (z. B. nach Absturz) wegraeumen
+            full = os.path.join(self.hot_dir, name)
+            if full not in known:
+                try:
+                    os.remove(full)
+                except OSError:
+                    pass
+        return n
+
     def release_file(self, key: str) -> None:
         """Datei des Titels löschen (nach der Wiedergabe oder bei Abbruch)."""
         with self._lock:
@@ -141,6 +231,8 @@ class TrackStore:
             if track is None or not track.abs_path:
                 return
             path, track.abs_path = track.abs_path, ""
+        if self._in_hot(path) or self._keep_hot(key, path):
+            return
         try:
             os.remove(path)
         except FileNotFoundError:
