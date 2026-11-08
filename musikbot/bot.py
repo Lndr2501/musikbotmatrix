@@ -165,10 +165,12 @@ class Bot:
         if state == "playing":
             card = cards.track_card("playing", track.title or track.key, position=pos,
                                     started_at_ms=now_ms(), actions=cards.CONTROLS_PLAYING,
+                                    seek=cards.SEEK_COMMAND, volume=self.player.volume,
                                     **self._track_meta(track))
         else:
             card = cards.track_card("paused", track.title or track.key, position=pos,
-                                    actions=cards.CONTROLS_PAUSED, **self._track_meta(track))
+                                    actions=cards.CONTROLS_PAUSED, seek=cards.SEEK_COMMAND,
+                                    volume=self.player.volume, **self._track_meta(track))
         content = cards.card_content(cards.track_body(card), card)
         return await self.matrix.edit_card(room, eid, content)
 
@@ -242,7 +244,8 @@ class Bot:
             await self._finish_now_card(room)       # naechster Titel aus der Warteschlange
         card = cards.track_card(
             "playing", track.title or track.key, position=0.0, started_at_ms=now_ms(),
-            actions=cards.CONTROLS_PLAYING, **self._track_meta(track))
+            actions=cards.CONTROLS_PLAYING, seek=cards.SEEK_COMMAND, volume=self.player.volume,
+            **self._track_meta(track))
         eid = await self._put_track_card(room, card, pending)
         if eid:
             self._card_now[room] = (eid, track)
@@ -360,15 +363,23 @@ class Bot:
             if cur["duration"] and target >= cur["duration"] - 1:
                 target = max(0.0, cur["duration"] - 2)
             ok = await p.seek(target)
-            await m.send_notice(room_id, f"⏩ {fmt_time(p.position)}" if ok else "Kann gerade nicht gespult werden.")
+            state = "paused" if p.state == "paused" else "playing"
+            if not (ok and await self._now_card_state(room_id, state)):
+                await self._note(room_id, f"{fmt_time(p.position)}" if ok else "Kann gerade nicht gespult werden.",
+                                 "info" if ok else "warning", "⏩" if ok else "")
         elif name == "volume":
+            a = arg.strip()
             try:
-                value = int(arg.strip())
+                # "+10" / "-10": relativ zur aktuellen Lautstaerke (Knoepfe der Karte), sonst absolut
+                value = p.volume + int(a) if a[:1] in "+-" and a[1:].isdigit() else int(a)
             except ValueError:
-                await m.send_notice(room_id, f"Lautstaerke ist {p.volume}. Benutzung: !volume 0-300 (60 = Original, darueber Boost)")
+                await self._note(room_id, f"Lautstärke ist {p.volume}. Benutzung: !volume 0-300 "
+                                          "(60 = Original, darüber Boost) · !volume +10 / -10", "info", "🔊")
                 return
             v = p.set_volume(value)
-            await self._note(room_id, f"Lautstärke: {v}", "info", "🔊")
+            state = "paused" if p.state == "paused" else "playing"
+            if not await self._now_card_state(room_id, state):
+                await self._note(room_id, f"Lautstärke: {v}", "info", "🔊")
         elif name == "video":
             mode = arg.strip().lower()
             on = p.set_video(True if mode == "on" else False if mode == "off" else None)
@@ -695,8 +706,8 @@ class Bot:
         meta = self._track_meta(t) if t else {}
         meta["duration"] = s["duration"] or meta.get("duration", 0.0)
         card = cards.track_card(
-            state, title, position=s["position"],
-            started_at_ms=now_ms() if state == "playing" else None, actions=acts,
+            state, title, position=s["position"], seek=cards.SEEK_COMMAND if t else "",
+            volume=s["volume"], started_at_ms=now_ms() if state == "playing" else None, actions=acts,
             note=f"Lautstärke {s['volume']} · Video {'an' if s['video'] else 'aus'} · "
                  f"Peers im Call: {s['peers']} · Warteschlange: {len(s['queue'])}", **meta)
         body = (f"{ {'playing': '▶', 'paused': '⏸', 'stopped': '⏹'}[state] } {title} "

@@ -42,14 +42,21 @@ def action(label: str, send: str) -> dict:
     return {"label": label, "send": send}
 
 
-# Knopfreihen
+# Knopfreihen: Pause/Weiter, naechster Titel, 10 s zurueck/vor, leiser/lauter (relativ), Rest.
+# Die Zeitleiste der Karte spult per Klick ("seek": "!seek" -> Diddy sendet "!seek 1:23").
+_SEEK_AND_VOLUME = (
+    action("⏪ 10 s", "!zurueck 10"), action("⏩ 10 s", "!vor 10"),
+    action("🔉 −", "!volume -10"), action("🔊 +", "!volume +10"),
+)
 CONTROLS_PLAYING = (
-    action("⏸ Pause", "!pause"), action("⏭ Weiter", "!skip"),
+    action("⏸ Pause", "!pause"), action("⏭ Weiter", "!skip"), *_SEEK_AND_VOLUME,
     action("📜 Warteschlange", "!queue"), action("⏹ Stopp", "!stop"),
 )
 CONTROLS_PAUSED = (
-    action("▶ Weiter", "!resume"), action("⏭ Weiter", "!skip"), action("⏹ Stopp", "!stop"),
+    action("▶ Weiter", "!resume"), action("⏭ Weiter", "!skip"), *_SEEK_AND_VOLUME,
+    action("⏹ Stopp", "!stop"),
 )
+SEEK_COMMAND = "!seek"
 
 
 def fmt_len(seconds: Optional[float]) -> str:
@@ -71,14 +78,18 @@ def track_card(
     started_at_ms: Optional[int] = None,
     url: str = "",
     note: str = "",
+    seek: str = "",
+    volume: Optional[float] = None,
     actions=(),
 ) -> dict:
-    """Karte eines Titels. `position` (s) gilt zum Zeitpunkt `started_at_ms` (Bot-Uhr)."""
+    """Karte eines Titels. `position` (s) gilt zum Zeitpunkt `started_at_ms` (Bot-Uhr).
+    `seek`: Befehl fuer die Zeitleiste (Klick = "<seek> mm:ss"), `volume`: aktuelle Lautstaerke."""
     assert state in TRACK_STATES, state
     return {
         "kind": "track", "state": state, "title": title, "artist": artist or None,
         "duration": duration or None, "position": position, "startedAt": started_at_ms,
-        "url": url or None, "note": note or None, "actions": list(actions),
+        "url": url or None, "note": note or None, "seek": seek or None, "volume": volume,
+        "actions": list(actions),
     }
 
 
@@ -145,7 +156,7 @@ HELP_GROUPS = [
        ("!shuffle", "mischen"),
        ("!loop on|off", "aktuellen Titel wiederholen")),
     _g("Ton und Bild",
-       ("!volume <0-300>", "Lautstärke (60 = Original, darüber Boost)"),
+       ("!volume <0-300 | +10 | -10>", "Lautstärke (60 = Original, darüber Boost), +/- relativ"),
        ("!video on|off", "Video im Call")),
     _g("Call",
        ("!joincall · !leavecall", "Bot kommt in den Call · verlässt ihn")),

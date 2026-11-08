@@ -66,3 +66,17 @@ def test_help_groups_cover_every_command_of_the_text_help():
     card = cards.help_card(cards.HELP_GROUPS, cards.HELP_NOTE)
     json.dumps(card)
     assert all(g["items"] for g in card["groups"])
+
+
+def test_track_card_has_seek_volume_and_the_new_controls():
+    card = cards.track_card("playing", "X", duration=100, position=1.0, started_at_ms=5,
+                            seek=cards.SEEK_COMMAND, volume=60, actions=cards.CONTROLS_PLAYING)
+    c = cards.card_content(cards.track_body(card), card)[cards.CARD_KEY]
+    assert c["seek"] == "!seek" and c["volume"] == 60
+    sends = [a["send"] for a in c["actions"]]
+    for cmd in ("!pause", "!skip", "!zurueck 10", "!vor 10", "!volume -10", "!volume +10", "!stop"):
+        assert cmd in sends, cmd
+    assert len(sends) <= 10                                  # Diddy zeigt hoechstens zehn Knoepfe
+    paused = [a["send"] for a in cards.CONTROLS_PAUSED]
+    assert "!resume" in paused and "!volume +10" in paused and "!pause" not in paused
+    assert cards._clean(cards.track_card("playing", "X")).get("seek") is None   # leer -> weggelassen

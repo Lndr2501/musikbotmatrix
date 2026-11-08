@@ -45,7 +45,7 @@ HELP = """Kommandos:
 !queue – Warteschlange · !clear – Warteschlange leeren
 !status – was läuft gerade? · !seek <mm:ss | +30 | -30> – springen
 !vor [s] – vorspulen (Standard 10 s) · !zurueck [s] – zurückspulen
-!volume <0-300> – Lautstärke (60 = Original, darüber Boost) · !video on|off – Video im Call
+!volume <0-300 | +10 | -10> – Lautstärke (60 = Original, darüber Boost) · !video on|off – Video im Call
 !shuffle – mischen · !loop on|off – aktuelle Titel wiederholen
 !joincall – Bot kommt in den Call · !leavecall – Bot verlässt den Call
 !playlist create|delete <name> · add <name> [Link] · remove <name> <nr>
