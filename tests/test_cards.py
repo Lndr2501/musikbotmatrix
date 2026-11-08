@@ -80,3 +80,10 @@ def test_track_card_has_seek_volume_and_the_new_controls():
     paused = [a["send"] for a in cards.CONTROLS_PAUSED]
     assert "!resume" in paused and "!volume +10" in paused and "!pause" not in paused
     assert cards._clean(cards.track_card("playing", "X")).get("seek") is None   # leer -> weggelassen
+
+
+def test_commands_content_lists_every_command_with_usage():
+    c = cards.commands_content("!")
+    names = {x["name"] for x in c["commands"]}
+    assert c["prefix"] == "!" and {"play", "pause", "fav", "stats", "help"} <= names
+    assert all(x["usage"].startswith("!") and x["desc"] for x in c["commands"])

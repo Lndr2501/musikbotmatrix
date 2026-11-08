@@ -46,6 +46,7 @@ class Matrix:
         self.on_text: Callable[[str, str, str], Awaitable[None]] | None = None      # room_id, sender, body
         self.on_call: Callable[[Optional[str], str, Optional[str], dict], Awaitable[None]] | None = None  # room_id|None, sender, device, content
         self.on_member_join: Callable[[str, str], Awaitable[None]] | None = None    # room_id, user_id
+        self.on_joined: Callable[[str], Awaitable[None]] | None = None              # room_id (Bot beigetreten)
         self.on_room_left: Callable[[str], Awaitable[None]] | None = None           # room_id (Bot verlassen)
         # Element Call: room_id, sender, state_key, content
         self.on_rtc_member: Callable[[str, str, str, dict], Awaitable[None]] | None = None
@@ -238,6 +239,8 @@ class Matrix:
         resp = await self.client.join(room_id)
         if isinstance(resp, nio.JoinResponse):
             log.info("Raum beigetreten: %s", room_id)
+            if self.on_joined:
+                asyncio.ensure_future(self.on_joined(room_id))
         else:
             log.warning("Raum-Beitritt %s fehlgeschlagen: %s", room_id, resp)
 

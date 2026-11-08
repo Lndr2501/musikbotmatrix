@@ -203,3 +203,38 @@ HELP_NOTE = ("Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, s
              "playlist list/show geht immer). Ist die Warteschlange leer und der Song zu Ende, "
              "verlässt der Bot den Call (außer im 24/7-Modus). Titel werden nur gespeichert, wenn "
              "sie oft gespielt werden (ab 5 Downloads); nach 3 Tagen ohne Wiedergabe wird die Datei gelöscht.")
+
+
+# Befehlsliste fuer die Eingabe-Vorschlaege der Clients (State-Event dev.diddy.commands, state_key = Bot-ID).
+COMMANDS_EVENT = "dev.diddy.commands"
+COMMAND_LIST = [
+    ("play", "!play <Link oder Suchbegriff>", "Titel abspielen"),
+    ("pause", "!pause", "pausieren"),
+    ("resume", "!resume", "weiterspielen"),
+    ("stop", "!stop", "stoppen"),
+    ("skip", "!skip", "nächster Titel"),
+    ("previous", "!previous", "vorheriger Titel"),
+    ("queue", "!queue", "Warteschlange anzeigen"),
+    ("clear", "!clear", "Warteschlange leeren"),
+    ("status", "!status", "was läuft gerade?"),
+    ("seek", "!seek <mm:ss | +30 | -30>", "zu einer Stelle springen"),
+    ("vor", "!vor [s]", "vorspulen"),
+    ("zurueck", "!zurueck [s]", "zurückspulen"),
+    ("volume", "!volume <0-300 | +10 | -10>", "Lautstärke"),
+    ("shuffle", "!shuffle", "Warteschlange mischen"),
+    ("loop", "!loop on|off", "Titel wiederholen"),
+    ("video", "!video on|off", "Video im Call"),
+    ("joincall", "!joincall", "Bot kommt in den Call"),
+    ("leavecall", "!leavecall", "Bot verlässt den Call"),
+    ("playlist", "!playlist create|add|remove|show|list|play|enqueue|delete", "Playlists"),
+    ("fav", "!fav [list | remove <nr> | play [shuffle]]", "deine Favoriten"),
+    ("stats", "!stats", "Diagramme: meistgespielt, wer hört am meisten"),
+    ("24/7", "!24/7 song [Link] | playlist <name> | off", "Dauerschleife"),
+    ("help", "!help", "alle Befehle"),
+]
+
+
+def commands_content(prefix: str = "!") -> dict:
+    """Inhalt des State-Events: Praefix plus Befehle (name ohne Praefix, usage, desc)."""
+    return {"v": VERSION, "prefix": prefix,
+            "commands": [{"name": n, "usage": u, "desc": d} for n, u, d in COMMAND_LIST]}

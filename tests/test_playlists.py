@@ -241,3 +241,27 @@ def test_fav_commands_and_stats_card(bot):
     assert c["charts"][1]["items"][0]["label"] == "a"
     say("!fav play", "@b:x")                                   # abspielen steuert: nicht im Call
     assert "Call sind" in bot.sent[-1] or "Call" in bot.sent[-1]
+
+
+def test_commands_are_published_once_per_room_and_failure_is_harmless(bot):
+    calls = []
+
+    async def get_state(room, evtype):
+        return {}
+
+    async def put_state(room, evtype, key, content):
+        calls.append((room, evtype, key, content["prefix"]))
+
+    bot.matrix.get_state_events = get_state
+    bot.matrix.put_state = put_state
+    in_call(bot, "!r", "@a:x")
+    run(bot._on_text("!r", "@a:x", "!status"))
+    run(bot._on_text("!r", "@a:x", "!status"))
+    assert calls == [("!r", "dev.diddy.commands", "@bot:x", "!")]
+
+    async def broken(*a, **k):
+        raise RuntimeError("M_FORBIDDEN")
+
+    bot.matrix.put_state = broken
+    run(bot._on_text("!r2", "@a:x", "!status"))                # ohne Rechte: Befehl laeuft trotzdem
+    assert bot.sent

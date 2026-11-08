@@ -70,6 +70,7 @@ def make_bot():
     bot._thumb_url = {}
     bot._thumb_mxc = {}
     bot._cover_frames = {}
+    bot._cmds_done = set()
     bot._thumb_tasks = {}
     bot._loop_on = False
     bot._always = None
