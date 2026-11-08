@@ -7,6 +7,7 @@ sowohl als Raum-Event als auch als To-Device-Nachricht.
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
 from typing import Awaitable, Callable, Optional
@@ -313,6 +314,18 @@ class Matrix:
     async def send_card(self, room_id: str, content: dict) -> str | None:
         """Karte fuer Diddy senden (siehe cards.py). event_id oder None."""
         return await self.send_room_event(room_id, "m.room.message", content)
+
+    async def upload_image(self, data: bytes, content_type: str, name: str) -> str | None:
+        """Bild (z. B. Titelbild) auf den Medien-Server laden. mxc://-Adresse oder None."""
+        try:
+            resp, _keys = await self.client.upload(
+                io.BytesIO(data), content_type=content_type, filename=name, filesize=len(data))
+            if isinstance(resp, nio.UploadResponse):
+                return resp.content_uri
+            log.warning("Bild-Upload fehlgeschlagen: %s", resp)
+        except Exception:
+            log.exception("Bild-Upload fehlgeschlagen")
+        return None
 
     async def edit_card(self, room_id: str, event_id: str, content: dict) -> bool:
         """Karte per Bearbeitung (m.replace) aktualisieren. True, wenn gesendet."""

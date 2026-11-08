@@ -87,3 +87,18 @@ def test_split_search_prefixes():
     assert split_search("sc: daft punk") == ("scsearch1", "daft punk")
     assert split_search("Bili:foo") == ("bilisearch1", "foo")
     assert split_search("Re: Zero opening") == ("ytsearch1", "Re: Zero opening")
+
+
+def test_seek_moves_forward_and_back_without_errors(tmp_path):
+    """Regression: seek() scheiterte mit PyAV 17 (any_frame statt any, av.Error gibt es nicht)."""
+    path = str(tmp_path / "clip.mp4")
+    _make_clip(path, seconds=3.0)
+    src = MediaSource(path, video_height=240, video_fps=25.0)
+    src.open()
+    try:
+        for target in (1.5, 0.0, 2.2):
+            src.seek(target)
+            block = next(iter(src.audio_blocks(target)))
+            assert block.shape[-1] == 960 * 2
+    finally:
+        src.close()

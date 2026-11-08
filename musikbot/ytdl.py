@@ -41,6 +41,16 @@ def split_search(query: str) -> tuple[str, str]:
     return "ytsearch1", query
 
 
+def _thumb_of(info: dict) -> str:
+    """Titelbild-Adresse aus den yt-dlp-Infos (Albumcover oder Video-Vorschaubild), nur http(s)."""
+    url = str(info.get("thumbnail") or "")
+    if not url:
+        thumbs = [t for t in (info.get("thumbnails") or []) if isinstance(t, dict) and t.get("url")]
+        if thumbs:
+            url = str(thumbs[-1]["url"])
+    return url if url.startswith(("http://", "https://")) else ""
+
+
 @dataclass
 class Resolved:
     key: str
@@ -48,6 +58,7 @@ class Resolved:
     url: str
     duration: float
     uploader: str
+    thumbnail: str = ""
 
 
 class MediaResolver:
@@ -133,6 +144,7 @@ class MediaResolver:
             url=str(info.get("webpage_url") or info.get("url") or ""),
             duration=float(duration or 0),
             uploader=str(info.get("uploader") or info.get("channel") or info.get("uploader_id") or ""),
+            thumbnail=_thumb_of(info),
         )
 
     # ----------------------------------------------------------- Download

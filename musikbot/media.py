@@ -12,6 +12,13 @@ from fractions import Fraction
 from typing import Iterator
 
 import av
+
+# PyAV hat die Fehlerklasse je nach Version unter anderem Namen (av.Error gibt es nicht mehr).
+_AV_ERRORS = tuple(
+    c for c in (getattr(av, "FFmpegError", None), getattr(getattr(av, "error", None), "FFmpegError", None),
+                getattr(av, "AVError", None))
+    if isinstance(c, type)
+) or (Exception,)
 import numpy as np
 
 from .ytdl import MediaError
@@ -90,8 +97,11 @@ class MediaSource:
             if container is None:
                 continue
             try:
-                container.seek(offset, backward=True, any=False)
-            except (av.Error, ValueError):
+                try:
+                    container.seek(offset, backward=True, any_frame=False)
+                except TypeError:  # aeltere PyAV-Versionen nannten den Parameter "any"
+                    container.seek(offset, backward=True, any=False)
+            except (_AV_ERRORS, ValueError):
                 log.debug("Seek nicht möglich, Container wird neu geöffnet")
                 self._reopen(seconds)
                 return

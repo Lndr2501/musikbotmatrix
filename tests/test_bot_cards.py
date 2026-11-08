@@ -10,6 +10,7 @@ from musikbot.bot import Bot
 class FakeMatrix:
     def __init__(self):
         self.events = []          # (art, event_id, content)
+        self.uploads = []
         self._n = 0
 
     async def send_card(self, room, content):
@@ -21,6 +22,10 @@ class FakeMatrix:
     async def edit_card(self, room, eid, content):
         self.events.append(("edit", eid, cards.edit_content(eid, content)))
         return True
+
+    async def upload_image(self, data, content_type, name):
+        self.uploads.append((len(data), content_type, name))
+        return f"mxc://x.de/{name}"
 
     async def send_notice(self, room, text):
         self.events.append(("notice", None, {"body": text}))
@@ -44,6 +49,9 @@ class FakePlayer:
         self.volume = max(0, min(300, value))
         return self.volume
 
+    async def skip(self):
+        return False          # keine weiteren Titel
+
     async def seek(self, seconds):
         self.seeks.append(seconds)
         self.position = seconds
@@ -55,6 +63,11 @@ def make_bot():
     bot.matrix = FakeMatrix()
     bot._card_pending = {}
     bot._card_now = {}
+    bot._thumb_url = {}
+    bot._thumb_mxc = {}
+    bot._thumb_tasks = {}
+    bot._loop_on = False
+    bot._always = None
     bot._fetch_room = "!r:x"
     bot.ecall = SimpleNamespace(room_id=None)
     bot.calls = SimpleNamespace(active_room=None)
@@ -214,3 +227,76 @@ def test_seek_while_paused_keeps_the_card_paused():
     run_cmd(bot, "forward", "10")
     c = card_of(bot.matrix.events[-1])
     assert c["state"] == "paused" and "startedAt" not in c
+
+
+def test_thumbnail_source_prefers_ytdlp_then_derives_youtube():
+    bot = make_bot()
+    assert bot._thumb_source("youtube:9q8M_T8PC2Q") == "https://i.ytimg.com/vi/9q8M_T8PC2Q/mqdefault.jpg"
+    bot._thumb_url["youtube:abcdefghijk"] = "https://example.org/cover.jpg"
+    assert bot._thumb_source("youtube:abcdefghijk") == "https://example.org/cover.jpg"
+    assert bot._thumb_source("soundcloud:123") == ""
+    assert bot._thumb_source("youtube:../../etc") == "", "keine Pfad-Tricks in der Video-ID"
+
+
+def test_cover_is_downloaded_uploaded_once_and_put_into_the_card():
+    from aiohttp import web
+
+    png = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000001e221bc330000000049454e44ae426082")
+
+    async def flow():
+        async def image(_):
+            return web.Response(body=png, content_type="image/png")
+
+        async def page(_):
+            return web.Response(text="<html>kein Bild</html>", content_type="text/html")
+
+        app = web.Application()
+        app.router.add_get("/c.png", image)
+        app.router.add_get("/c.html", page)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        bot = make_bot()
+        bot._thumb_url["a:1"] = f"http://127.0.0.1:{port}/c.png"
+        bot._thumb_url["a:2"] = f"http://127.0.0.1:{port}/c.html"
+        try:
+            first = await bot._fetch_thumb("a:1")
+            again = await bot._fetch_thumb("a:1")
+            not_image = await bot._fetch_thumb("a:2")
+            await bot._announce(track(key="a:1"))
+        finally:
+            await runner.cleanup()
+        return bot, first, again, not_image
+
+    bot, first, again, not_image = asyncio.run(flow())
+    assert first == again == "mxc://x.de/cover.png"
+    assert len(bot.matrix.uploads) == 1, "ein Titel wird nur einmal hochgeladen"
+    assert not_image == "", "eine Webseite ist kein Titelbild"
+    c = card_of(bot.matrix.events[-1])
+    assert c["thumbnail"] == "mxc://x.de/cover.png"
+
+
+def test_pause_keeps_the_cover_on_the_card():
+    bot = make_bot()
+    bot._thumb_mxc["k1"] = "mxc://x.de/cover.jpg"
+
+    async def flow():
+        await bot._announce(track())
+        await bot._now_card_state("!r:x", "paused")
+
+    asyncio.run(flow())
+    assert all(card_of(e)["thumbnail"] == "mxc://x.de/cover.jpg" for e in bot.matrix.events)
+
+
+def test_skip_without_a_next_track_ends_the_card_and_says_so():
+    bot = make_bot()
+    asyncio.run(bot._announce(track()))
+    run_cmd(bot, "skip", "")
+    track_cards = [card_of(e) for e in bot.matrix.events if cards.CARD_KEY in (
+        e[2] if e[0] == "send" else e[2].get("m.new_content", {}))]
+    states = [c["state"] for c in track_cards if c["kind"] == "track"]
+    assert states[:2] == ["playing", "stopped"]
+    assert "Keine weiteren Titel" in bot.matrix.events[-1][2]["body"]
+    assert bot._card_now == {}

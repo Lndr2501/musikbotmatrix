@@ -11,6 +11,8 @@ import logging
 import random
 import re
 
+import aiohttp
+
 from . import cards
 from .calls import CallManager
 from .commands import HELP, is_read_only, parse
@@ -50,6 +52,10 @@ class Bot:
         # Karten (Diddy): Suche/Download-Karte eines Raums und die Karte des laufenden Titels
         self._card_pending: dict[str, str] = {}
         self._card_now: dict[str, tuple[str, object]] = {}
+        # Titelbilder: Quelle (http) und die auf den Medien-Server geladene mxc://-Adresse je Titel
+        self._thumb_url: dict[str, str] = {}
+        self._thumb_mxc: dict[str, str] = {}
+        self._thumb_tasks: dict[str, asyncio.Task] = {}
         # 24/7-Modus: None oder {"kind": "song"|"playlist", "keys": [...], "name": str}
         self._always: dict | None = None
         self.ecall.keep_alive = lambda: self._always is not None
@@ -126,7 +132,61 @@ class Bot:
     # ------------------------------------------------------------------ Karten
     def _track_meta(self, track) -> dict:
         return {"artist": getattr(track, "uploader", "") or "", "duration": track.duration or 0.0,
-                "url": getattr(track, "url", "") or ""}
+                "url": getattr(track, "url", "") or "",
+                "thumbnail": self._thumb_mxc.get(track.key, "")}
+
+    # --- Titelbild (Albumcover bzw. Video-Vorschaubild) -------------------------------------
+    def _thumb_source(self, key: str) -> str:
+        """Adresse des Titelbilds: von yt-dlp gemeldet, sonst bei YouTube aus der Video-ID."""
+        url = self._thumb_url.get(key, "")
+        if url:
+            return url
+        ext, _, vid = key.partition(":")
+        if ext == "youtube" and re.fullmatch(r"[\w-]{6,20}", vid):
+            return f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"      # 16:9, ohne schwarze Balken
+        return ""
+
+    async def _fetch_thumb(self, key: str) -> str:
+        """Titelbild laden und hochladen; mxc://-Adresse oder "" (nie ein Fehler)."""
+        if key in self._thumb_mxc:
+            return self._thumb_mxc[key]
+        url = self._thumb_source(key)
+        if not url:
+            return ""
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as http:
+                async with http.get(url) as resp:
+                    ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                    if resp.status != 200 or not ctype.startswith("image/"):
+                        return ""
+                    data = await resp.content.read(3_000_001)
+            if not data or len(data) > 3_000_000:
+                return ""
+            ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(ctype, "img")
+            mxc = await self.matrix.upload_image(data, ctype, f"cover.{ext}")
+            if mxc:
+                self._thumb_mxc[key] = mxc
+            return mxc or ""
+        except Exception:
+            log.debug("Titelbild nicht verfuegbar (%s)", key, exc_info=True)
+            return ""
+
+    def _prefetch_thumb(self, key: str) -> None:
+        """Titelbild schon waehrend Suche/Download laden, damit es zur Karte fertig ist."""
+        if key in self._thumb_mxc or key in self._thumb_tasks:
+            return
+        self._thumb_tasks[key] = asyncio.create_task(self._fetch_thumb(key))
+
+    async def _thumb_ready(self, key: str, wait: float = 4.0) -> str:
+        """Titelbild fuer die Karte: laeuft das Laden noch, hoechstens `wait` Sekunden darauf warten."""
+        if key in self._thumb_mxc:
+            return self._thumb_mxc[key]
+        self._prefetch_thumb(key)
+        try:
+            return await asyncio.wait_for(asyncio.shield(self._thumb_tasks[key]), wait)
+        except Exception:
+            return ""
 
     async def _note(self, room: str, text: str, tone: str = "info", icon: str = "") -> None:
         """Kurze Meldung als Hinweis-Chip (Diddy); andere Clients sehen den Text."""
@@ -242,6 +302,7 @@ class Bot:
         pending = self._card_pending.pop(room, None)
         if pending is None:
             await self._finish_now_card(room)       # naechster Titel aus der Warteschlange
+        await self._thumb_ready(track.key)          # Titelbild gehoert in die Karte
         card = cards.track_card(
             "playing", track.title or track.key, position=0.0, started_at_ms=now_ms(),
             actions=cards.CONTROLS_PLAYING, seek=cards.SEEK_COMMAND, volume=self.player.volume,
@@ -329,7 +390,9 @@ class Bot:
                 self._refill_always()
             ok = await p.skip()
             if not ok:
-                await self._note(room_id, "Warteschlange ist leer.", "warning")
+                # kein naechster Titel: die Wiedergabe ist beendet, die Karte nicht auf "Spielt" stehen lassen
+                await self._finish_now_card(room_id)
+                await self._note(room_id, "Keine weiteren Titel in der Warteschlange.", "warning", "⏭")
         elif name == "previous":
             if len(self._history) >= 2:
                 prev = self._history[-2]
@@ -445,6 +508,9 @@ class Bot:
         track = st.note_request(
             resolved.key, title=resolved.title, url=resolved.url,
             duration=resolved.duration, uploader=resolved.uploader)
+        if getattr(resolved, "thumbnail", ""):
+            self._thumb_url[resolved.key] = resolved.thumbnail
+        self._prefetch_thumb(resolved.key)
         self._fetch_room = room_id
 
         if self._loop_on and self.player.current and self.player.current.key == track.key:

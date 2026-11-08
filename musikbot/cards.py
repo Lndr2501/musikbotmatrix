@@ -49,11 +49,11 @@ _SEEK_AND_VOLUME = (
     action("🔉 −", "!volume -10"), action("🔊 +", "!volume +10"),
 )
 CONTROLS_PLAYING = (
-    action("⏸ Pause", "!pause"), action("⏭ Weiter", "!skip"), *_SEEK_AND_VOLUME,
+    action("⏸ Pause", "!pause"), action("⏭ Nächster", "!skip"), *_SEEK_AND_VOLUME,
     action("📜 Warteschlange", "!queue"), action("⏹ Stopp", "!stop"),
 )
 CONTROLS_PAUSED = (
-    action("▶ Weiter", "!resume"), action("⏭ Weiter", "!skip"), *_SEEK_AND_VOLUME,
+    action("▶ Weiter", "!resume"), action("⏭ Nächster", "!skip"), *_SEEK_AND_VOLUME,
     action("⏹ Stopp", "!stop"),
 )
 SEEK_COMMAND = "!seek"
@@ -80,6 +80,7 @@ def track_card(
     note: str = "",
     seek: str = "",
     volume: Optional[float] = None,
+    thumbnail: str = "",
     actions=(),
 ) -> dict:
     """Karte eines Titels. `position` (s) gilt zum Zeitpunkt `started_at_ms` (Bot-Uhr).
@@ -89,7 +90,7 @@ def track_card(
         "kind": "track", "state": state, "title": title, "artist": artist or None,
         "duration": duration or None, "position": position, "startedAt": started_at_ms,
         "url": url or None, "note": note or None, "seek": seek or None, "volume": volume,
-        "actions": list(actions),
+        "thumbnail": thumbnail or None, "actions": list(actions),
     }
 
 
