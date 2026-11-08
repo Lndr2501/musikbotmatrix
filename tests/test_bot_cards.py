@@ -71,6 +71,7 @@ def make_bot():
     bot._thumb_mxc = {}
     bot._cover_frames = {}
     bot._cmds_done = set()
+    bot._cmds_failed = {}
     bot._thumb_tasks = {}
     bot._loop_on = False
     bot._always = None
@@ -306,3 +307,73 @@ def test_skip_without_a_next_track_ends_the_card_and_says_so():
     assert states[:2] == ["playing", "stopped"]
     assert "Keine weiteren Titel" in bot.matrix.events[-1][2]["body"]
     assert bot._card_now == {}
+
+
+def test_large_cover_arrives_complete_even_when_the_server_sends_it_in_pieces():
+    """Regression: content.read(n) gab nur den Puffer zurueck -> abgeschnittenes Titelbild."""
+    from aiohttp import web
+
+    body = bytes(range(256)) * 2000                              # 512 KB
+
+    async def flow():
+        async def image(request):
+            resp = web.StreamResponse(headers={"Content-Type": "image/png"})
+            await resp.prepare(request)
+            for i in range(0, len(body), 30000):
+                await resp.write(body[i:i + 30000])
+                await asyncio.sleep(0.01)
+            return resp
+
+        app = web.Application()
+        app.router.add_get("/big.png", image)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        bot = make_bot()
+        got = []
+
+        async def upload(data, ctype, name):
+            got.append(data)
+            return "mxc://x.de/big"
+
+        bot.matrix.upload_image = upload
+        bot._thumb_url["a:1"] = f"http://127.0.0.1:{port}/big.png"
+        try:
+            await bot._fetch_thumb("a:1")
+        finally:
+            await runner.cleanup()
+        return got
+
+    got = asyncio.run(flow())
+    assert got and got[0] == body
+
+
+def test_commands_publish_is_retried_after_a_minute_when_it_failed(monkeypatch):
+    import musikbot.bot as botmod
+    bot = make_bot()
+    bot.cfg = type("C", (), {"matrix_user_id": "@b:x", "user": "@b:x", "prefixes": ("!",)})()
+    calls = []
+
+    async def get_state(room, ev):
+        return {}
+
+    async def put_state(room, ev, key, content):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("M_FORBIDDEN")
+
+    bot.matrix.get_state_events = get_state
+    bot.matrix.put_state = put_state
+    now = [1000.0]
+    monkeypatch.setattr(botmod.time, "monotonic", lambda: now[0])
+    asyncio.run(bot._publish_commands("!r"))
+    asyncio.run(bot._publish_commands("!r"))                    # gleich danach: kein neuer Versuch
+    assert len(calls) == 1
+    now[0] += 61
+    asyncio.run(bot._publish_commands("!r"))                    # nach einer Minute: zweiter Versuch
+    now[0] += 61
+    asyncio.run(bot._publish_commands("!r"))                    # klappt jetzt
+    asyncio.run(bot._publish_commands("!r"))                    # danach nie wieder
+    assert len(calls) == 3

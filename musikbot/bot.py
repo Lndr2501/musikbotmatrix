@@ -10,6 +10,7 @@ import asyncio
 import logging
 import random
 import re
+import time
 
 import aiohttp
 
@@ -58,6 +59,7 @@ class Bot:
         self._thumb_mxc: dict[str, str] = {}
         self._cover_frames: dict[str, object] = {}
         self._cmds_done: set[str] = set()
+        self._cmds_failed: dict[str, float] = {}
         self._thumb_tasks: dict[str, asyncio.Task] = {}
         # 24/7-Modus: None oder {"kind": "song"|"playlist", "keys": [...], "name": str}
         self._always: dict | None = None
@@ -165,8 +167,14 @@ class Bot:
                     ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
                     if resp.status != 200 or not ctype.startswith("image/"):
                         return ""
-                    data = await resp.content.read(3_000_001)
-            if not data or len(data) > 3_000_000:
+                    # read(n) liefert nur, was gerade im Puffer liegt: in Stuecken bis zum Ende lesen
+                    buf = bytearray()
+                    async for chunk in resp.content.iter_chunked(65536):
+                        buf += chunk
+                        if len(buf) > 3_000_000:
+                            return ""
+                    data = bytes(buf)
+            if not data:
                 return ""
             ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(ctype, "img")
             mxc = await self.matrix.upload_image(data, ctype, f"cover.{ext}")
@@ -418,7 +426,10 @@ class Bot:
         Braucht das Recht, Raumzustand zu setzen; fehlt es, bleibt es bei einer Warnung."""
         if room_id in self._cmds_done:
             return
-        self._cmds_done.add(room_id)
+        last = self._cmds_failed.get(room_id, 0.0)
+        if time.monotonic() - last < 60:           # fehlgeschlagen: hoechstens einmal pro Minute neu versuchen
+            return
+        self._cmds_failed.pop(room_id, None)
         uid = self.cfg.matrix_user_id or self.cfg.user
         try:
             current = await self.matrix.get_state_events(room_id, cards.COMMANDS_EVENT)
@@ -426,7 +437,9 @@ class Bot:
             have = {k: v for k, v in (current.get(uid) or {}).items() if k != "_sender"}
             if have != want:
                 await self.matrix.put_state(room_id, cards.COMMANDS_EVENT, uid, want)
+            self._cmds_done.add(room_id)
         except Exception as exc:
+            self._cmds_failed[room_id] = time.monotonic()
             log.warning("Befehle in %s nicht angemeldet (Rechte?): %s", room_id, exc)
 
     async def _on_text(self, room_id: str, sender: str, body: str) -> None:
