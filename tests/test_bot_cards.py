@@ -26,6 +26,30 @@ class FakeMatrix:
         self.events.append(("notice", None, {"body": text}))
 
 
+class FakePlayer:
+    """Nur das, was die Befehle brauchen."""
+
+    def __init__(self):
+        self.position = 12.0
+        self.volume = 60
+        self.state = "playing"
+        self.queue = []
+        self.seeks = []
+
+    def status(self):
+        return {"duration": 197.0, "state": self.state, "position": self.position, "track": None,
+                "volume": self.volume, "video": False, "queue": [], "peers": 0}
+
+    def set_volume(self, value):
+        self.volume = max(0, min(300, value))
+        return self.volume
+
+    async def seek(self, seconds):
+        self.seeks.append(seconds)
+        self.position = seconds
+        return True
+
+
 def make_bot():
     bot = Bot.__new__(Bot)
     bot.matrix = FakeMatrix()
@@ -34,7 +58,7 @@ def make_bot():
     bot._fetch_room = "!r:x"
     bot.ecall = SimpleNamespace(room_id=None)
     bot.calls = SimpleNamespace(active_room=None)
-    bot.player = SimpleNamespace(position=12.0, queue=[], status=lambda: {})
+    bot.player = FakePlayer()
     return bot
 
 
@@ -134,3 +158,59 @@ def test_finish_now_card_sets_stopped_and_forgets_it():
     asyncio.run(flow())
     assert [card_of(e)["state"] for e in bot.matrix.events] == ["playing", "stopped"]
     assert bot._card_now == {}
+
+
+def run_cmd(bot, name, arg=""):
+    asyncio.run(bot._dispatch("!r:x", "@u:x", name, arg))
+
+
+def test_volume_buttons_change_the_volume_relatively_and_update_the_card():
+    bot = make_bot()
+    asyncio.run(bot._announce(track()))
+    run_cmd(bot, "volume", "+10")
+    run_cmd(bot, "volume", "-30")
+    assert bot.player.volume == 40
+    ev = bot.matrix.events
+    assert [e[0] for e in ev] == ["send", "edit", "edit"], "keine Chips, nur Bearbeitungen der Karte"
+    assert [card_of(e)["volume"] for e in ev] == [60, 70, 40]
+    assert card_of(ev[-1])["state"] == "playing" and card_of(ev[-1])["seek"] == "!seek"
+
+
+def test_absolute_volume_and_limits():
+    bot = make_bot()
+    asyncio.run(bot._announce(track()))
+    run_cmd(bot, "volume", "80")
+    run_cmd(bot, "volume", "+500")
+    assert bot.player.volume == 300
+    run_cmd(bot, "volume", "-1000")
+    assert bot.player.volume == 0
+
+
+def test_volume_without_a_card_falls_back_to_a_note_and_bad_input_shows_usage():
+    bot = make_bot()
+    run_cmd(bot, "volume", "+10")
+    ev = bot.matrix.events
+    assert ev[-1][0] == "send" and ev[-1][2]["body"] == "🔊 Lautstärke: 70"
+    run_cmd(bot, "volume", "laut")
+    assert "Benutzung" in bot.matrix.events[-1][2]["body"]
+    assert bot.player.volume == 70
+
+
+def test_seek_updates_the_card_with_the_new_position():
+    bot = make_bot()
+    asyncio.run(bot._announce(track()))
+    run_cmd(bot, "seek", "1:30")
+    assert bot.player.seeks == [90.0]
+    last = bot.matrix.events[-1]
+    assert last[0] == "edit"
+    c = card_of(last)
+    assert c["state"] == "playing" and c["position"] == 90.0 and c["startedAt"] > 0
+
+
+def test_seek_while_paused_keeps_the_card_paused():
+    bot = make_bot()
+    asyncio.run(bot._announce(track()))
+    bot.player.state = "paused"
+    run_cmd(bot, "forward", "10")
+    c = card_of(bot.matrix.events[-1])
+    assert c["state"] == "paused" and "startedAt" not in c
