@@ -377,3 +377,16 @@ def test_commands_publish_is_retried_after_a_minute_when_it_failed(monkeypatch):
     asyncio.run(bot._publish_commands("!r"))                    # klappt jetzt
     asyncio.run(bot._publish_commands("!r"))                    # danach nie wieder
     assert len(calls) == 3
+
+
+def test_loop_button_toggles_and_the_card_shows_the_state():
+    bot = make_bot()
+    asyncio.run(bot._announce(track()))
+    first = card_of(bot.matrix.events[-1])
+    assert [a["send"] for a in first["actions"]].count("!loop") == 1 and len(first["actions"]) <= 10
+    assert any(a["label"] == "🔁 Loop" for a in first["actions"])
+    run_cmd(bot, "loop")                                       # Knopf ohne Argument = umschalten
+    on = card_of(bot.matrix.events[-1])
+    assert on["state"] == "playing" and any(a["label"] == "🔁 Loop: an" for a in on["actions"])
+    run_cmd(bot, "loop")
+    assert any(a["label"] == "🔁 Loop" for a in card_of(bot.matrix.events[-1])["actions"])

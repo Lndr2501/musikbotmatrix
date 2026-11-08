@@ -48,14 +48,17 @@ _SEEK_AND_VOLUME = (
     action("⏪ 10 s", "!zurueck 10"), action("⏩ 10 s", "!vor 10"),
     action("🔉 −", "!volume -10"), action("🔊 +", "!volume +10"),
 )
-CONTROLS_PLAYING = (
-    action("⏸ Pause", "!pause"), action("⏭ Nächster", "!skip"), *_SEEK_AND_VOLUME,
-    action("📜 Warteschlange", "!queue"), action("⏹ Stopp", "!stop"),
-)
-CONTROLS_PAUSED = (
-    action("▶ Weiter", "!resume"), action("⏭ Nächster", "!skip"), *_SEEK_AND_VOLUME,
-    action("⏹ Stopp", "!stop"),
-)
+def controls(paused: bool = False, loop: bool = False) -> tuple:
+    """Knopfreihe der Titel-Karte. Der Loop-Knopf zeigt, ob die Schleife gerade an ist."""
+    first = action("▶ Weiter", "!resume") if paused else action("⏸ Pause", "!pause")
+    loop_btn = action("🔁 Loop: an" if loop else "🔁 Loop", "!loop")
+    rest = (action("📜 Warteschlange", "!queue"),) if not paused else ()
+    return (first, action("⏭ Nächster", "!skip"), *_SEEK_AND_VOLUME, loop_btn, *rest,
+            action("⏹ Stopp", "!stop"))
+
+
+CONTROLS_PLAYING = controls(False)
+CONTROLS_PAUSED = controls(True)
 SEEK_COMMAND = "!seek"
 
 

@@ -252,12 +252,12 @@ class Bot:
         pos = self.player.position
         if state == "playing":
             card = cards.track_card("playing", track.title or track.key, position=pos,
-                                    started_at_ms=now_ms(), actions=cards.CONTROLS_PLAYING,
+                                    started_at_ms=now_ms(), actions=cards.controls(False, self._loop_on),
                                     seek=cards.SEEK_COMMAND, volume=self.player.volume,
                                     **self._track_meta(track))
         else:
             card = cards.track_card("paused", track.title or track.key, position=pos,
-                                    actions=cards.CONTROLS_PAUSED, seek=cards.SEEK_COMMAND,
+                                    actions=cards.controls(True, self._loop_on), seek=cards.SEEK_COMMAND,
                                     volume=self.player.volume, **self._track_meta(track))
         content = cards.card_content(cards.track_body(card), card)
         return await self.matrix.edit_card(room, eid, content)
@@ -335,7 +335,7 @@ class Bot:
         self.player.set_cover(track.key, self._cover_frames.get(track.key))   # und in die Kamera
         card = cards.track_card(
             "playing", track.title or track.key, position=0.0, started_at_ms=now_ms(),
-            actions=cards.CONTROLS_PLAYING, seek=cards.SEEK_COMMAND, volume=self.player.volume,
+            actions=cards.controls(False, self._loop_on), seek=cards.SEEK_COMMAND, volume=self.player.volume,
             **self._track_meta(track))
         eid = await self._put_track_card(room, card, pending)
         if eid:
@@ -585,7 +585,9 @@ class Bot:
         elif name == "loop":
             mode = arg.strip().lower()
             self._loop_on = True if mode == "on" else False if mode == "off" else not self._loop_on
-            await self._note(room_id, f"Schleife: {'an' if self._loop_on else 'aus'}", "info", "🔁")
+            state = "paused" if self.player.state == "paused" else "playing"
+            if not await self._now_card_state(room_id, state):      # Karte zeigt es selbst im Knopf
+                await self._note(room_id, f"Schleife: {'an' if self._loop_on else 'aus'}", "info", "🔁")
         elif name == "joincall":
             if await self._join_element_call(room_id, force=True):
                 await m.send_notice(room_id, "📞 Bin im Element Call.")
@@ -909,7 +911,7 @@ class Bot:
         t = s["track"]
         state = s["state"] if s["state"] in ("playing", "paused") else "stopped"
         title = (t.title if t else "") or "kein Titel"
-        acts = cards.CONTROLS_PLAYING if state == "playing" else cards.CONTROLS_PAUSED if state == "paused" else ()
+        acts = cards.controls(state == "paused", self._loop_on) if state in ("playing", "paused") else ()
         meta = self._track_meta(t) if t else {}
         meta["duration"] = s["duration"] or meta.get("duration", 0.0)
         card = cards.track_card(
