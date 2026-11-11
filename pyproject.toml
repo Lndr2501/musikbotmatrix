@@ -23,5 +23,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["musikbot*"]
 
+[tool.setuptools.package-data]
+musikbot = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

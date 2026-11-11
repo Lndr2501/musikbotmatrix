@@ -26,6 +26,7 @@ from .matrix import Matrix
 from .player import Player
 from .store import TrackStore
 from .util import fmt_time, now_ms, parse_time
+from .webauth import WebAuth
 from .ytdl import MediaError, MediaResolver
 
 log = logging.getLogger("musikbot")
@@ -87,6 +88,10 @@ class Bot:
         self._always: dict | None = None
         self._radio_files: dict[str, str] = {}      # Radio-Key -> Dateipfad
         self.ecall.keep_alive = lambda: self._always is not None
+        # Web-Dashboard: Login-Daten liegen in derselben Datenbank
+        self.webauth = WebAuth(self.store.db, self.store._lock)
+        self.dashboard = None
+        self._load_fade_settings()
 
         m = self.matrix
         m.on_text = self._on_text
@@ -150,7 +155,21 @@ class Bot:
             except Exception:
                 log.exception("Idle-Check fehlgeschlagen")
 
+    async def start_web(self) -> None:
+        """Dashboard starten (nach dem Login, nicht im Selbsttest)."""
+        if not self.cfg.web_enabled:
+            return
+        from .web import Dashboard
+        self.dashboard = Dashboard(self)
+        try:
+            await self.dashboard.start()
+        except OSError:
+            log.exception("Dashboard-Port %d belegt – Dashboard aus", self.cfg.web_port)
+            self.dashboard = None
+
     async def shutdown(self) -> None:
+        if self.dashboard is not None:
+            await self.dashboard.stop()
         try:
             await self.ecall.leave()
         except Exception:
@@ -710,6 +729,8 @@ class Bot:
             await self._stats(room_id)
         elif name == "always":
             await self._always_cmd(room_id, sender, arg)
+        elif name == "dashboard":
+            await self._send_dashboard_login(room_id, sender)
         elif name == "help":
             await m.send_card(room_id, cards.card_content(
                 HELP, cards.help_card(cards.HELP_GROUPS, cards.HELP_NOTE)))
@@ -1073,3 +1094,171 @@ class Bot:
                 f"Lautstaerke {s['volume']} · Video {'an' if s['video'] else 'aus'}\n"
                 f"Peers im Call: {s['peers']} · Warteschlange: {len(s['queue'])}")
         await self.matrix.send_card(room_id, cards.card_content(body, card))
+
+    # ------------------------------------------------------------------ Dashboard
+    def _dashboard_url(self) -> str:
+        return self.cfg.public_url or f"http://<server>:{self.cfg.web_port}"
+
+    async def _send_dashboard_login(self, room_id: str, sender: str) -> None:
+        if not self.cfg.web_enabled:
+            await self._note(room_id, "Das Dashboard ist ausgeschaltet (WEB_ENABLED).", "warning")
+            return
+        token = self.webauth.issue_link_token(sender, room_id)
+        url = f"{self._dashboard_url()}/#login={token}"
+        body = (f"🎛 Dein persönlicher Link zum Musikbot-Dashboard:\n{url}\n\n"
+                "Einfach öffnen – du bleibst eingeloggt (auch auf mehreren Geräten). "
+                "Nicht weitergeben: wer den Link hat, kann den Bot steuern. "
+                "Neuer Link (der alte wird ungültig): !dashboard")
+        html = (f"<p>🎛 <b>Dein persönlicher Link zum Musikbot-Dashboard</b></p>"
+                f"<p><a href=\"{url}\">Dashboard öffnen</a></p>"
+                "<p>Einfach öffnen – du bleibst eingeloggt (auch auf mehreren Geräten). "
+                "Nicht weitergeben: wer den Link hat, kann den Bot steuern. "
+                "Neuer Link (der alte wird ungültig): <code>!dashboard</code></p>")
+        ok = await self.matrix.send_dm(sender, body, html)
+        if ok:
+            await self._note(room_id, "Zugang zum Dashboard kommt per Direktnachricht.", "success", "🎛")
+        else:
+            await self._note(room_id, "Konnte dir keine Direktnachricht schicken – siehe Log.", "error", "❌")
+
+    def _load_fade_settings(self) -> None:
+        for name in ("crossfade_seconds", "fade_in_seconds"):
+            raw = self.store.setting(name)
+            if raw:
+                try:
+                    setattr(self.cfg, name, max(0.0, min(20.0, float(raw))))
+                except ValueError:
+                    pass
+
+    def _web_room(self, user: str) -> str:
+        room = self._notice_room() or self.webauth.room_of(user)
+        if not room:
+            raise MediaError("Ich weiß nicht, in welchem Raum ich spielen soll – schreib !dashboard "
+                             "in den Musik-Raum.")
+        return room
+
+    def _track_json(self, key: str, requester: str = "") -> dict:
+        t = self.store.get(key)
+        return {"key": key, "title": (t.title if t else "") or key,
+                "artist": (t.uploader if t else "") or "", "duration": (t.duration if t else 0) or 0,
+                "url": (t.url if t else "") or "", "thumb": self._thumb_source(key),
+                "requester": self._who(requester) if requester else ""}
+
+    def web_state(self, user: str) -> dict:
+        p = self.player
+        st = p.status()
+        cur = st["track"]
+        track = self._track_json(cur.key, p.requester) if cur else None
+        if track and st["duration"]:
+            track["duration"] = st["duration"]
+        hist = [k for k in reversed(self._history) if not cur or k != cur.key][:8]
+        always = None
+        if self._always:
+            always = {"kind": self._always.get("kind"), "name": self._always.get("name", "")}
+        return {
+            "me": user, "state": st["state"], "position": st["position"], "track": track,
+            "volume": st["volume"], "video": st["video"], "loop": self._loop_on, "always": always,
+            "queue": [self._track_json(k, r) for k, r in st["queue"]],
+            "history": [self._track_json(k) for k in hist],
+            "peers": st["peers"], "in_call": bool(self.ecall.active or self.calls.peers),
+            "busy": bool(self._fetching or self._busy or p._lock.locked()),
+            "crossfade": self.cfg.crossfade_seconds, "fade_in": self.cfg.fade_in_seconds,
+            "room": self._notice_room() or self.webauth.room_of(user),
+            "favs": self.store.fav_keys(user),
+        }
+
+    def web_library(self, user: str) -> dict:
+        return {
+            "playlists": [{"name": n, "count": c} for n, c in self.store.playlist_list()],
+            "favorites": [self._track_json(k) for k in self.store.fav_keys(user)],
+            "top": [dict(self._track_json(k), plays=n) for k, n in self.store.top_tracks(12)],
+            "radio": len(self._radio_scan()) if os.path.isdir(self.cfg.radio_dir) else 0,
+        }
+
+    # Erlaubte Befehle aus dem Dashboard (wie im Chat, gleiche Karten im Raum)
+    _WEB_COMMANDS = {"play", "pause", "resume", "stop", "skip", "previous", "clear", "seek",
+                     "forward", "rewind", "volume", "video", "shuffle", "loop", "joincall",
+                     "leavecall", "always", "playlist", "fav"}
+
+    async def web_command(self, user: str, name: str, arg: str) -> None:
+        if name == "softskip":
+            await self._soft_skip(self._web_room(user))
+            return
+        if name == "softstop":
+            await self._soft_stop(self._web_room(user), float(arg or 4))
+            return
+        if name == "favkey":                          # beliebigen Titel merken/entfernen
+            keys = self.store.fav_keys(user)
+            if arg in keys:
+                self.store.fav_remove(user, keys.index(arg) + 1)
+            elif self.store.get(arg):
+                self.store.fav_add(user, arg)
+            return
+        if name not in self._WEB_COMMANDS:
+            raise MediaError("Unbekannter Befehl.")
+        if name == "playlist" and arg.split(" ", 1)[0] not in ("play", "enqueue"):
+            raise MediaError("Playlists bitte im Chat bearbeiten.")
+        await self._dispatch(self._web_room(user), user, name, arg)
+
+    async def _soft_skip(self, room: str) -> None:
+        p = self.player
+        self._loop_on = False
+        if self._always and not p.queue:
+            self._refill_always()
+        if await p.crossfade_now():
+            return
+        if p.queue and not await p.fade_out(1.5):
+            return
+        await self._dispatch(room, "", "skip", "")
+        p.reset_master()
+
+    async def _soft_stop(self, room: str, seconds: float) -> None:
+        if await self.player.fade_out(max(0.5, min(15.0, seconds))):
+            await self._dispatch(room, "", "stop", "")
+        self.player.reset_master()
+
+    async def web_add(self, user: str, query: str, mode: str) -> None:
+        if not query.strip():
+            raise MediaError("Bitte Link oder Suchbegriff angeben.")
+        room = self._web_room(user)
+        resolved = await self.resolver.resolve_async(query)
+        limit = self.cfg.max_song_seconds
+        if limit and resolved.duration > limit:
+            raise MediaError(f"Zu lang ({fmt_time(resolved.duration)}). Maximal {fmt_time(limit)}.")
+        track = self.store.note_request(resolved.key, title=resolved.title, url=resolved.url,
+                                        duration=resolved.duration, uploader=resolved.uploader)
+        if resolved.thumbnail:
+            self._thumb_url[resolved.key] = resolved.thumbnail
+        self._prefetch_thumb(resolved.key)
+        p = self.player
+        idle = p.state == "stopped" and not p._lock.locked()
+        if idle:
+            self._fetch_room = room
+            self._history.append(track.key)
+            del self._history[:-20]
+            await self._start_key(room, track.key, user, announce=True)
+        elif mode in ("now", "next"):
+            p.queue.insert(0, (track.key, user))
+            if mode == "now":
+                await self._soft_skip(room)
+        else:
+            p.enqueue(track.key, user)
+
+    def web_queue(self, user: str, op: str, index: int, to: int) -> None:
+        q = self.player.queue
+        if not (0 <= index < len(q)):
+            raise MediaError("Diesen Platz gibt es nicht (mehr).")
+        if op == "remove":
+            q.pop(index)
+        elif op == "top":
+            q.insert(0, q.pop(index))
+        elif op == "move" and 0 <= to < len(q):
+            q.insert(to, q.pop(index))
+        else:
+            raise MediaError("Unbekannte Aktion.")
+
+    async def web_fade(self, user: str, data: dict) -> None:
+        for field, name in (("crossfade", "crossfade_seconds"), ("fade_in", "fade_in_seconds")):
+            if field in data:
+                value = max(0.0, min(20.0, float(data[field])))
+                setattr(self.cfg, name, value)
+                self.store.set_setting(name, str(value))

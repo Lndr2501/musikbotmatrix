@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS hot (
     path      TEXT NOT NULL DEFAULT '',
     video     INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS settings (
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS plays (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     track_key TEXT NOT NULL,
@@ -428,6 +432,18 @@ class TrackStore:
                    WHERE played_at >= ? GROUP BY requester ORDER BY s DESC, n DESC LIMIT ?""",
                 (since, limit)).fetchall()
             return [(r["requester"], int(r["n"]), float(r["s"] or 0)) for r in rows]
+
+    # ------------------------------------------------------------ Einstellungen
+    def setting(self, name: str, default: str = "") -> str:
+        with self._lock:
+            row = self.db.execute("SELECT value FROM settings WHERE name = ?", (name,)).fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, name: str, value: str) -> None:
+        with self._lock:
+            self.db.execute("INSERT INTO settings (name, value) VALUES (?,?) "
+                            "ON CONFLICT(name) DO UPDATE SET value = excluded.value", (name, value))
+            self.db.commit()
 
     def close(self) -> None:
         with self._lock:

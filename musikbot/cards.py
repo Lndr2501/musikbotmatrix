@@ -190,7 +190,8 @@ HELP_GROUPS = [
        ("!volume <0-300 | +10 | -10>", "Lautstärke (60 = Original, darüber Boost), +/- relativ"),
        ("!video on|off", "Video im Call")),
     _g("Call",
-       ("!joincall · !leavecall", "Bot kommt in den Call · verlässt ihn")),
+       ("!joincall · !leavecall", "Bot kommt in den Call · verlässt ihn"),
+       ("!dashboard", "Web-Dashboard: Link + persönliches Passwort per Direktnachricht")),
     _g("Playlists und Dauerbetrieb",
        ("!playlist create|delete <name>", "anlegen · löschen"),
        ("!playlist add <name> [Link]", "Titel hinzufügen (ohne Link: der laufende)"),
@@ -212,6 +213,7 @@ HELP_NOTE = ("Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, s
 COMMANDS_EVENT = "dev.diddy.commands"
 COMMAND_LIST = [
     ("play", "!play <Link oder Suchbegriff>", "Titel abspielen"),
+    ("dashboard", "!dashboard", "Web-Dashboard: Link + Passwort per DM"),
     ("pause", "!pause", "pausieren"),
     ("resume", "!resume", "weiterspielen"),
     ("stop", "!stop", "stoppen"),

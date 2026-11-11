@@ -19,7 +19,7 @@ from av import AudioFrame, VideoFrame
 
 from .config import Config
 from .hub import Hub, Sink
-from .media import MediaSource, apply_gain, crossfade_mix, silence_block
+from .media import MediaSource, apply_gain, crossfade_mix, fade_block, silence_block
 from .store import Track, TrackStore
 
 log = logging.getLogger(__name__)
@@ -152,7 +152,12 @@ class Player:
         self._prefetch_key: str | None = None
         self._prefetch_task: asyncio.Task | None = None
         self._fade: _Fade | None = None
+        self._force_fade = False       # "Sanft ueberspringen": Ueberblendung sofort starten
         self._bg: set[asyncio.Task] = set()
+        # Master-Lautstaerke fuer Ein-/Ausblenden (0..1), aendert sich je Sample um _master_rate
+        self._master = 1.0
+        self._master_target = 1.0
+        self._master_rate = 0.0
 
     # ------------------------------------------------------------ Peers (WebRTC)
     def add_peer_audio(self, peer) -> PeerAudioTrack:
@@ -214,7 +219,7 @@ class Player:
                         block = await self._mix_fade(block)
                     else:
                         block = apply_gain(block, self.gain)
-                    self.hub.push_audio(block)
+                    self.hub.push_audio(self._apply_master(block))
                     self._pos += (block.shape[1] // 2) / SAMPLE_RATE
                     continue
 
@@ -259,6 +264,11 @@ class Player:
                 await asyncio.to_thread(source.open)
             self._source = source
             self._start_streams(0.0)
+            if self.cfg.fade_in_seconds > 0:      # sanft einblenden statt mit voller Lautstaerke
+                self._master = 0.0
+                self._ramp(1.0, self.cfg.fade_in_seconds)
+            else:
+                self._master = self._master_target = 1.0
             self.state = "playing"
             await self._ensure_loop()
             log.info("Spielt: %s (%s)", track.title or track.key, track.abs_path)
@@ -320,6 +330,7 @@ class Player:
                 self.queue.clear()
             self._discard_prepared()
             await self._teardown()
+            self.reset_master()
             self.state = "stopped"
 
     async def skip(self) -> bool:
@@ -503,10 +514,14 @@ class Player:
     def _crossfade_due(self) -> bool:
         prepared = self._prepared
         if prepared is None or self._fade is not None or self._source is None:
+            self._force_fade = self._force_fade and prepared is not None
             return False
         if not self.queue or self.queue[0][0] != prepared.key:
             self._discard_prepared()    # Warteschlange hat sich geaendert
+            self._force_fade = False
             return False
+        if self._force_fade:
+            return True
         dur = self._source.duration
         fade = self._fade_seconds(dur, prepared.source.duration)
         return bool(dur) and fade > 0 and self._pos >= dur - fade
@@ -517,7 +532,11 @@ class Player:
         assert prepared is not None and self._source is not None and self.current is not None
         _, requester = self.queue.pop(0)
         old = self.current
-        fade = self._fade_seconds(self._source.duration, prepared.source.duration)
+        if self._force_fade:          # von Hand ausgeloest: mindestens 2 s, auch wenn Crossfade aus ist
+            fade = min(max(self.cfg.crossfade_seconds, 2.0), (prepared.source.duration or 60) / 3)
+            self._force_fade = False
+        else:
+            fade = self._fade_seconds(self._source.duration, prepared.source.duration)
         self._fade = _Fade(old, self._source, self._audio_iter,
                            total=max(1, int(fade * SAMPLE_RATE)))
         self._wall_base += self._pos          # neuer Titel beginnt genau hier
@@ -549,6 +568,58 @@ class Player:
         if fade.done >= fade.total:
             await self._end_fade()
         return block
+
+    # ------------------------------------------------- Ein-/Ausblenden (Master)
+    def _ramp(self, target: float, seconds: float) -> None:
+        self._master_target = max(0.0, min(1.0, target))
+        dist = abs(self._master_target - self._master)
+        self._master_rate = dist / (seconds * SAMPLE_RATE) if seconds > 0 else 1.0
+
+    def _apply_master(self, block: "np.ndarray") -> "np.ndarray":
+        g0, target = self._master, self._master_target
+        if g0 == target:
+            return block if g0 == 1.0 else fade_block(block, g0, g0)
+        step = self._master_rate * (block.shape[1] // 2)
+        g1 = min(target, g0 + step) if target > g0 else max(target, g0 - step)
+        self._master = g1
+        return fade_block(block, g0, g1)
+
+    async def fade_out(self, seconds: float) -> bool:
+        """Langsam ausblenden und warten, bis es leise ist. False: inzwischen wurde etwas
+        anderes gestartet (dann nicht stoppen/ueberspringen)."""
+        if self.state != "playing" or seconds <= 0:
+            return True
+        self._ramp(0.0, seconds)
+        await asyncio.sleep(seconds + LEAD_SECONDS)
+        return self._master_target == 0.0
+
+    def reset_master(self) -> None:
+        self._master = self._master_target = 1.0
+
+    async def crossfade_now(self) -> bool:
+        """Sofort zum naechsten Titel ueberblenden. False: der naechste Titel ist (noch) nicht
+        geladen – dann bitte normal ueberspringen."""
+        if not self.queue or self._source is None or self.state != "playing":
+            return False
+        key = self.queue[0][0]
+        if self.current is not None and key == self.current.key:
+            return False
+        if self._prepared is None or self._prepared.key != key:
+            if self._prefetch_key != key:
+                self._discard_prepared()
+                self._prefetch_key = key
+                self._prefetch_task = asyncio.create_task(self._prefetch(key), name="prefetch")
+            task = self._prefetch_task
+            if task is not None and not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), 4.0)
+                except asyncio.TimeoutError:
+                    return False
+        if self._prepared is None or self._prepared.key != key:
+            return False
+        self.reset_master()
+        self._force_fade = True
+        return True
 
     async def _end_fade(self) -> None:
         fade, self._fade = self._fade, None

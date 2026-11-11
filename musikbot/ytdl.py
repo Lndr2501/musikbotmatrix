@@ -201,6 +201,40 @@ class MediaResolver:
 
         return self._to_resolved(info)
 
+    def search(self, query: str, limit: int = 8) -> list[dict]:
+        """Trefferliste fuers Dashboard (nur Metadaten, schnell, nichts geladen).
+
+        Gleiche Praefixe wie !play (sc:, bili:, nico:); ohne Praefix YouTube."""
+        query = query.strip()
+        if not query:
+            return []
+        key, term = split_search(query)
+        site = key.rstrip("0123456789") or "ytsearch"
+        try:
+            listing = self._extract(f"{site}{limit}:{term}", flat=True)
+        except yt_dlp.utils.DownloadError as exc:
+            raise MediaError(f"yt-dlp Fehler: {_clean(exc)}") from exc
+        out = []
+        for e in listing.get("entries") or []:
+            if not e:
+                continue
+            url = e.get("url") or e.get("webpage_url") or ""
+            if not url.startswith("http"):
+                vid = e.get("id") or ""
+                url = f"https://www.youtube.com/watch?v={vid}" if site == "ytsearch" and vid else url
+            if not url:
+                continue
+            thumb = _thumb_of(e)
+            if not thumb and site == "ytsearch" and e.get("id"):
+                thumb = f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"
+            out.append({"title": str(e.get("title") or url), "url": url,
+                        "artist": str(e.get("uploader") or e.get("channel") or ""),
+                        "duration": float(e.get("duration") or 0), "thumbnail": thumb})
+        return out
+
+    async def search_async(self, query: str, limit: int = 8) -> list[dict]:
+        return await asyncio.to_thread(self.search, query, limit)
+
     def _search_everywhere(self, term: str) -> Optional[dict]:
         """YouTube, YouTube-Lyrics und SoundCloud parallel durchsuchen, besten Treffer waehlen."""
         lyric_term = term if "lyric" in term.lower() else f"{term} lyrics"

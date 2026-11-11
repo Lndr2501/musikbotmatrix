@@ -94,6 +94,22 @@ Playlists liegen in der SQLite-DB (nur Links/Titel, keine Audiodateien).
 Deutsche Aliase funktionieren auch (`!abspielen`, `!pausieren`, `!fortsetzen`,
 `!hilfe`, …). Praefix: `!` (konfigurierbar via `BOT_PREFIXES`).
 
+## Web-Dashboard
+
+`!dashboard` im Chat: Der Bot schickt dir per Direktnachricht einen
+persönlichen Link. Einmal öffnen, danach bleibst du eingeloggt (90 Tage,
+verlängert sich bei jeder Nutzung). Ein neues `!dashboard` macht den alten Link
+ungültig, angemeldete Geräte bleiben drin.
+
+Im Dashboard: Wiedergabe steuern (Play/Pause, Spulen, Lautstärke, Loop,
+Video), Warteschlange sortieren (ziehen), Suche mit Trefferliste („jetzt“,
+„als Nächstes“, „hinten anstellen“), Playlists, Favoriten, 24/7-Radio und die
+Fade-Regler (Crossfade-Länge, Einblenden, sanft stoppen, sofort überblenden).
+
+Das Dashboard läuft im Bot auf `WEB_PORT` (Standard 8095). Für den Zugriff von
+außen einen Reverse-Proxy oder Cloudflare-Tunnel davor setzen und `PUBLIC_URL`
+eintragen.
+
 ## Übergänge (Crossfade)
 
 Titel aus der Warteschlange werden weich ineinander übergeblendet – wie bei

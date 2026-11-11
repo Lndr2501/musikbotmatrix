@@ -29,6 +29,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "fav": ("fav", "favs", "favorit", "favoriten", "favorite", "favorites", "merken"),
     "stats": ("stats", "statistik", "top", "charts"),
     "always": ("always", "247", "24/7", "24-7", "dauerbetrieb"),
+    "dashboard": ("dashboard", "web", "login", "passwort", "password"),
     "help": ("help", "hilfe", "commands", "befehle"),
 }
 
@@ -58,6 +59,7 @@ Audio-/Videodatei an die Nachricht anhängen – der Bot spielt sie direkt ab
 !stats – meistgespielte Titel und wer am meisten Musik hört
 !24/7 (oder !24/7 radio) – zufällig die MP3s aus dem Radio-Ordner, Dauerschleife
 !24/7 song [Link] · !24/7 playlist <name> · !24/7 off – Dauerschleife, Bot bleibt im Call
+!dashboard – Link + persönliches Passwort fürs Web-Dashboard per Direktnachricht
 !hilfe – diese Liste
 Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue,
 playlist list/show geht immer). Ist die Warteschlange leer und der Song zu Ende,
@@ -89,7 +91,7 @@ def parse(text: str, prefixes: tuple[str, ...] = ("/",)) -> Optional[Parsed]:
     return Parsed(name, tail.strip())
 
 
-_READ_ONLY = {"help", "status", "queue", "stats"}
+_READ_ONLY = {"help", "status", "queue", "stats", "dashboard"}
 
 
 def is_read_only(name: str, arg: str = "") -> bool:

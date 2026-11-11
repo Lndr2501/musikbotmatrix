@@ -348,6 +348,57 @@ class Matrix:
             log.exception("Senden (%s) fehlgeschlagen", evtype)
             return None
 
+    def find_dm(self, user_id: str) -> Optional[str]:
+        """Bestehender Zweier-Raum mit `user_id` (beigetreten oder eingeladen)."""
+        me = (self.cfg.matrix_user_id or self.cfg.user).lower()
+        want = user_id.lower()
+        for room_id, room in self.client.rooms.items():
+            members = {u.lower() for u in list(room.users) + list(getattr(room, "invited_users", {}))}
+            if want in members and members <= {me, want}:
+                return room_id
+        return None
+
+    async def send_dm(self, user_id: str, body: str, html: str = "") -> bool:
+        """Direktnachricht schicken; legt den Zweier-Raum bei Bedarf an (verschluesselt)."""
+        room_id = self.find_dm(user_id)
+        if room_id is None:
+            state = ([{"type": "m.room.encryption", "state_key": "",
+                       "content": {"algorithm": "m.megolm.v1.aes-sha2"}}]
+                     if self.cfg.encryption_enabled else [])
+            resp = await self.client.room_create(
+                is_direct=True, invite=[user_id], preset=nio.RoomPreset.trusted_private_chat,
+                name="Musikbot", initial_state=state)
+            if isinstance(resp, nio.ErrorResponse):
+                log.error("DM-Raum mit %s nicht angelegt: %s", user_id, resp)
+                return False
+            room_id = resp.room_id
+            await self._mark_direct(user_id, room_id)
+            for _ in range(40):                    # bis der Sync den neuen Raum kennt
+                if room_id in self.client.rooms:
+                    break
+                await asyncio.sleep(0.25)
+        content = {"msgtype": "m.text", "body": body}
+        if html:
+            content.update(format="org.matrix.custom.html", formatted_body=html)
+        return await self.send_room_event(room_id, "m.room.message", content) is not None
+
+    async def _mark_direct(self, user_id: str, room_id: str) -> None:
+        """Raum in m.direct eintragen, damit Clients ihn als Direktnachricht zeigen."""
+        from urllib.parse import quote
+        me = self.cfg.matrix_user_id or self.cfg.user
+        url = self._cs(f"/user/{quote(me)}/account_data/m.direct")
+        try:
+            try:
+                data = await self.http_json("GET", url)
+            except RuntimeError:
+                data = {}
+            rooms = list(data.get(user_id) or [])
+            if room_id not in rooms:
+                data[user_id] = rooms + [room_id]
+                await self.http_json("PUT", url, data)
+        except Exception:
+            log.warning("m.direct nicht gesetzt", exc_info=True)
+
     async def send_card(self, room_id: str, content: dict) -> str | None:
         """Karte fuer Diddy senden (siehe cards.py). event_id oder None."""
         return await self.send_room_event(room_id, "m.room.message", content)

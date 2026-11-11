@@ -78,6 +78,15 @@ class Config:
     default_volume: int = 60
     # Ueberblendung zwischen zwei Titeln aus der Warteschlange (Sekunden, 0 = aus).
     crossfade_seconds: float = 6.0
+    # Neuer Titel (ohne Crossfade) wird so lange eingeblendet (Sekunden, 0 = sofort voll).
+    fade_in_seconds: float = 0.0
+
+    # --- Dashboard (Web) ---------------------------------------------------
+    web_enabled: bool = True
+    web_host: str = "0.0.0.0"
+    web_port: int = 8095
+    # Oeffentliche Adresse fuer den Link in der DM, z. B. https://music.example.org
+    public_url: str = ""
     # Call automatisch verlassen, wenn so lange nichts spielt (0 = nie).
     idle_leave_seconds: int = 60
     # Call verlassen, sobald der letzte Titel zu Ende ist und die Warteschlange leer.
@@ -123,6 +132,8 @@ class Config:
             raise ConfigError("DEFAULT_VOLUME muss zwischen 0 und 300 liegen")
         if not (0 <= self.crossfade_seconds <= 20):
             raise ConfigError("CROSSFADE_SECONDS muss zwischen 0 und 20 liegen")
+        if not (0 <= self.fade_in_seconds <= 20):
+            raise ConfigError("FADE_IN_SECONDS muss zwischen 0 und 20 liegen")
 
     @property
     def use_turn(self) -> bool:
@@ -189,6 +200,11 @@ class Config:
             video_bitrate=_int("VIDEO_BITRATE", 600_000),
             default_volume=_int("DEFAULT_VOLUME", 60),
             crossfade_seconds=_float("CROSSFADE_SECONDS", 6.0),
+            fade_in_seconds=_float("FADE_IN_SECONDS", 0.0),
+            web_enabled=_bool("WEB_ENABLED", True),
+            web_host=_str("WEB_HOST", "0.0.0.0"),
+            web_port=_int("WEB_PORT", 8095),
+            public_url=_str("PUBLIC_URL").rstrip("/"),
             idle_leave_seconds=_int("IDLE_LEAVE_SECONDS", 60),
             leave_when_done=_bool("LEAVE_WHEN_DONE", True),
             call_only_control=_bool("CALL_ONLY_CONTROL", True),

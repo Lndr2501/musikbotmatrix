@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b10">
+<meta name="robots" content="noindex">
+<title>Musikbot</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<div class="backdrop" id="backdrop"></div>
+
+<!-- Login ------------------------------------------------------------ -->
+<main class="login" id="login" hidden>
+  <div class="login-card">
+    <img src="/static/icon.svg" alt="" class="login-logo">
+    <h1>Musikbot</h1>
+    <p class="muted" id="login-text">Schreib <code>!dashboard</code> im Musik-Raum – der Bot schickt dir per Direktnachricht deinen persönlichen Link. Einmal öffnen, danach bleibst du eingeloggt.</p>
+    <p class="error" id="login-error" hidden></p>
+  </div>
+</main>
+
+<!-- App -------------------------------------------------------------- -->
+<div class="app" id="app" hidden>
+  <header class="topbar">
+    <div class="brand"><img src="/static/icon.svg" alt=""> <span>Musikbot</span></div>
+    <div class="status" id="status-chips"></div>
+    <button class="icon-btn" id="logout" title="Abmelden" aria-label="Abmelden">
+      <svg viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>
+    </button>
+  </header>
+
+  <section class="player" id="player">
+    <div class="cover-wrap">
+      <img class="cover" id="cover" alt="">
+      <div class="cover cover-empty" id="cover-empty"><svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm12-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/></svg></div>
+    </div>
+    <div class="meta">
+      <div class="title-row">
+        <div class="titles">
+          <h2 id="title">Nichts läuft</h2>
+          <p id="artist" class="muted"></p>
+        </div>
+        <button class="icon-btn fav" id="fav" title="Favorit" aria-label="Favorit">
+          <svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8Z"/></svg>
+        </button>
+      </div>
+      <div class="progress" id="progress">
+        <div class="bar"><div class="fill" id="fill"></div><div class="knob" id="knob"></div></div>
+        <div class="times"><span id="pos">0:00</span><span id="dur">0:00</span></div>
+      </div>
+      <div class="controls">
+        <button class="icon-btn" data-cmd="shuffle" title="Mischen" aria-label="Mischen">
+          <svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+        </button>
+        <button class="icon-btn big" data-cmd="previous" title="Vorheriger Titel" aria-label="Vorheriger Titel">
+          <svg viewBox="0 0 24 24" class="solid"><path d="M19 20 9 12l10-8v16ZM5 19V5"/></svg>
+        </button>
+        <button class="play-btn" id="playpause" title="Abspielen/Pause" aria-label="Abspielen/Pause">
+          <svg viewBox="0 0 24 24" class="solid" id="ic-play"><path d="M7 4v16l13-8L7 4Z"/></svg>
+          <svg viewBox="0 0 24 24" class="solid" id="ic-pause" hidden><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+        </button>
+        <button class="icon-btn big" data-cmd="softskip" title="Nächster Titel (sanft überblenden)" aria-label="Nächster Titel">
+          <svg viewBox="0 0 24 24" class="solid"><path d="m5 4 10 8-10 8V4ZM19 5v14"/></svg>
+        </button>
+        <button class="icon-btn" id="loop" title="Wiederholen" aria-label="Wiederholen">
+          <svg viewBox="0 0 24 24"><path d="m17 2 4 4-4 4M3 11v-1a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+        </button>
+      </div>
+      <div class="sub-controls">
+        <div class="volume">
+          <svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>
+          <input type="range" id="volume" min="0" max="300" step="5" aria-label="Lautstärke">
+          <span id="volume-val" class="muted">60</span>
+        </div>
+        <div class="chip-row">
+          <button class="chip" id="softstop" title="Langsam ausblenden und stoppen">
+            <svg viewBox="0 0 24 24"><path d="M3 6c6 0 12 12 18 12"/></svg> Sanft stoppen
+          </button>
+          <button class="chip" data-cmd="stop" title="Sofort stoppen">
+            <svg viewBox="0 0 24 24" class="solid"><rect x="6" y="6" width="12" height="12" rx="2"/></svg> Stopp
+          </button>
+          <button class="chip" id="video" title="Video im Call">Video</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="queue" aria-selected="true">Warteschlange <span class="badge" id="queue-count"></span></button>
+      <button role="tab" data-tab="search">Suche</button>
+      <button role="tab" data-tab="library">Bibliothek</button>
+      <button role="tab" data-tab="fades">Fades</button>
+    </nav>
+
+    <div class="tab" id="tab-queue">
+      <div class="tab-head">
+        <span class="muted" id="queue-sum"></span>
+        <button class="chip" data-cmd="clear">Leeren</button>
+      </div>
+      <ol class="list" id="queue"></ol>
+      <p class="empty" id="queue-empty">Die Warteschlange ist leer. Such dir unter „Suche“ etwas aus.</p>
+      <h3 class="section" id="history-head">Zuletzt gespielt</h3>
+      <ol class="list" id="history"></ol>
+    </div>
+
+    <div class="tab" id="tab-search" hidden>
+      <form class="search" id="search-form">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="search-q" placeholder="Song, Künstler oder Link (sc: für SoundCloud)" autocomplete="off" enterkeyhint="search">
+      </form>
+      <p class="hint muted">Tipp: einen Link von YouTube, SoundCloud, Bandcamp … einfügen und Enter drücken.</p>
+      <ol class="list" id="results"></ol>
+    </div>
+
+    <div class="tab" id="tab-library" hidden>
+      <div class="cards" id="lib-actions"></div>
+      <h3 class="section">Playlists</h3>
+      <ol class="list" id="playlists"></ol>
+      <h3 class="section">Deine Favoriten <button class="chip small" id="fav-play">Alle abspielen</button></h3>
+      <ol class="list" id="favorites"></ol>
+      <h3 class="section">Meistgespielt</h3>
+      <ol class="list" id="top"></ol>
+    </div>
+
+    <div class="tab" id="tab-fades" hidden>
+      <div class="fade-card">
+        <div class="fade-head">
+          <div><h3>Crossfade</h3><p class="muted">Übergang zwischen zwei Titeln der Warteschlange.</p></div>
+          <span class="value" id="cf-val">6 s</span>
+        </div>
+        <input type="range" id="crossfade" min="0" max="20" step="1" aria-label="Crossfade in Sekunden">
+        <svg class="curve" viewBox="0 0 300 80" preserveAspectRatio="none" aria-hidden="true">
+          <path id="curve-out" class="out"/><path id="curve-in" class="in"/>
+        </svg>
+        <div class="legend"><span class="dot out"></span>alter Titel <span class="dot in"></span>neuer Titel</div>
+      </div>
+      <div class="fade-card">
+        <div class="fade-head">
+          <div><h3>Einblenden</h3><p class="muted">Neuer Titel startet leise und wird lauter (ohne Crossfade).</p></div>
+          <span class="value" id="fi-val">0 s</span>
+        </div>
+        <input type="range" id="fadein" min="0" max="10" step="0.5" aria-label="Einblenden in Sekunden">
+      </div>
+      <div class="fade-card">
+        <div class="fade-head">
+          <div><h3>Sanft stoppen</h3><p class="muted">Ausblenden über diese Zeit, dann Stopp.</p></div>
+          <span class="value" id="ss-val">5 s</span>
+        </div>
+        <input type="range" id="softstop-len" min="1" max="15" step="1" value="5" aria-label="Ausblenden in Sekunden">
+        <div class="row-btns">
+          <button class="btn" data-cmd="softskip">Jetzt überblenden zum nächsten</button>
+          <button class="btn" id="softstop2">Jetzt sanft stoppen</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<template id="row-tpl">
+  <li class="row">
+    <span class="handle" aria-hidden="true">⋮⋮</span>
+    <img class="thumb" alt="" loading="lazy">
+    <div class="thumb thumb-empty"></div>
+    <div class="row-text"><b class="row-title"></b><span class="row-sub muted"></span></div>
+    <div class="row-actions"></div>
+  </li>
+</template>
+</body>
+</html>
