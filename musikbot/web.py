@@ -82,6 +82,7 @@ class Dashboard:
         r.add_post("/api/add", self.add)
         r.add_post("/api/queue", self.queue)
         r.add_post("/api/fade", self.fade)
+        r.add_post("/api/playlist", self.playlist)
 
     # --------------------------------------------------------------- Lifecycle
     async def start(self) -> None:
@@ -138,7 +139,7 @@ class Dashboard:
 
     async def library(self, request: web.Request) -> web.StreamResponse:
         user = self._user(request)
-        return web.json_response(self.bot.web_library(user))
+        return web.json_response(await self.bot.web_library(user))
 
     async def search(self, request: web.Request) -> web.StreamResponse:
         self._user(request)
@@ -169,3 +170,11 @@ class Dashboard:
         data = await request.json()
         await self.bot.web_fade(user, data)
         return web.json_response(self.bot.web_state(user))
+
+    async def playlist(self, request: web.Request) -> web.StreamResponse:
+        user = self._user(request)
+        data = await request.json()
+        await self.bot.web_playlist(user, str(data.get("op", "")), str(data.get("name", "")),
+                                    str(data.get("key", "")), int(data.get("index", 0) or 0),
+                                    str(data.get("query", ""))[:500])
+        return web.json_response(await self.bot.web_library(user))

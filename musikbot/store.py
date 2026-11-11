@@ -445,6 +445,44 @@ class TrackStore:
                             "ON CONFLICT(name) DO UPDATE SET value = excluded.value", (name, value))
             self.db.commit()
 
+    # ------------------------------------------------------------ pro Nutzer (Dashboard)
+    def playlists_full(self) -> list[dict]:
+        """Alle Playlists mit Besitzer und Anzahl Titel."""
+        with self._lock:
+            rows = self.db.execute(
+                """SELECT p.name AS name, p.owner AS owner, COUNT(i.id) AS n FROM playlists p
+                   LEFT JOIN playlist_items i ON i.playlist_id = p.id
+                   GROUP BY p.id ORDER BY p.name COLLATE NOCASE""").fetchall()
+        return [{"name": r["name"], "owner": r["owner"], "count": int(r["n"])} for r in rows]
+
+    def playlist_owner(self, name: str) -> str | None:
+        with self._lock:
+            row = self.db.execute("SELECT owner FROM playlists WHERE name = ?", (name,)).fetchone()
+        return None if row is None else row["owner"]
+
+    def top_of(self, user: str, limit: int = 10) -> list[tuple[str, int]]:
+        with self._lock:
+            rows = self.db.execute(
+                """SELECT track_key, COUNT(*) AS n FROM plays WHERE lower(requester) = ?
+                   GROUP BY track_key ORDER BY n DESC, MAX(id) DESC LIMIT ?""",
+                (user.lower(), limit)).fetchall()
+        return [(r["track_key"], int(r["n"])) for r in rows]
+
+    def recent_of(self, user: str, limit: int = 10) -> list[str]:
+        with self._lock:
+            rows = self.db.execute(
+                """SELECT track_key FROM plays WHERE lower(requester) = ?
+                   GROUP BY track_key ORDER BY MAX(id) DESC LIMIT ?""",
+                (user.lower(), limit)).fetchall()
+        return [r["track_key"] for r in rows]
+
+    def totals_of(self, user: str) -> dict:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(seconds), 0) AS s FROM plays WHERE lower(requester) = ?",
+                (user.lower(),)).fetchone()
+        return {"plays": int(row["n"]), "seconds": float(row["s"])}
+
     def close(self) -> None:
         with self._lock:
             self.db.close()

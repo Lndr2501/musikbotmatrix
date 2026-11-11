@@ -151,3 +151,78 @@ def test_master_fade_out_ramps_to_silence():
     p.reset_master()
     assert p._apply_master(block) is block
     assert Hub  # Import geprueft
+
+
+def _bot_with_store(tmp_path):
+    from musikbot.bot import Bot
+    from musikbot.store import TrackStore
+
+    bot = Bot.__new__(Bot)
+    bot.store = TrackStore(str(tmp_path / "db"), str(tmp_path / "tmp"))
+    bot.player = SimpleNamespace(current=None, queue=[])
+    bot._thumb_url = {}
+    bot._names = {}
+    bot._bg_tasks = set()
+    for key in ("a", "b"):
+        bot.store.note_request(key, title=key.upper())
+    return bot
+
+
+def test_own_playlists_only_owner_may_change(tmp_path):
+    from musikbot.ytdl import MediaError
+
+    bot = _bot_with_store(tmp_path)
+    run = lambda *a, **k: asyncio.run(bot.web_playlist(*a, **k))  # noqa: E731
+    run("@lndr:x", "create", "Chill")
+    with pytest.raises(MediaError):
+        run("@anna:x", "create", "chill")                 # Name schon vergeben
+    run("@lndr:x", "add", "Chill", key="a")
+    run("@lndr:x", "add", "Chill", key="b")
+    assert bot.store.playlist_keys("Chill") == ["a", "b"]
+    with pytest.raises(MediaError):
+        run("@anna:x", "add", "Chill", key="a")           # fremde Playlist
+    with pytest.raises(MediaError):
+        run("@anna:x", "delete", "Chill")
+    run("@lndr:x", "remove", "Chill", index=0)
+    assert bot.store.playlist_keys("Chill") == ["b"]
+    full = bot.store.playlists_full()
+    assert full == [{"name": "Chill", "owner": "@lndr:x", "count": 1}]
+    run("@lndr:x", "delete", "Chill")
+    assert bot.store.playlists_full() == []
+
+
+def test_personal_stats_are_per_user(tmp_path):
+    bot = _bot_with_store(tmp_path)
+    st = bot.store
+    st.play_log("a", "@lndr:x", 100)
+    st.play_log("a", "@lndr:x", 100)
+    st.play_log("b", "@lndr:x", 50)
+    st.play_log("b", "@anna:x", 50)
+    assert st.top_of("@LNDR:x") == [("a", 2), ("b", 1)]
+    assert st.recent_of("@lndr:x") == ["b", "a"]
+    assert st.totals_of("@lndr:x") == {"plays": 3, "seconds": 250.0}
+    assert st.top_of("@anna:x") == [("b", 1)]
+
+
+def test_quick_returns_fast_but_reports_quick_errors():
+    from musikbot.bot import Bot
+    from musikbot.ytdl import MediaError
+
+    bot = Bot.__new__(Bot)
+    bot._bg_tasks = set()
+
+    async def slow():
+        await asyncio.sleep(1.0)
+
+    async def broken():
+        raise MediaError("kaputt")
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        await bot._quick(slow(), wait=0.05)
+        assert loop.time() - t0 < 0.5 and len(bot._bg_tasks) == 1   # laeuft im Hintergrund weiter
+        with pytest.raises(MediaError):
+            await bot._quick(broken())
+
+    asyncio.run(go())

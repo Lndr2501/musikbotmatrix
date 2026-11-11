@@ -91,6 +91,8 @@ class Bot:
         # Web-Dashboard: Login-Daten liegen in derselben Datenbank
         self.webauth = WebAuth(self.store.db, self.store._lock)
         self.dashboard = None
+        self._bg_tasks: set[asyncio.Task] = set()
+        self._names: dict[str, str] = {}            # Anzeigenamen fuers Dashboard
         self._load_fade_settings()
 
         m = self.matrix
@@ -1114,11 +1116,25 @@ class Bot:
                 "<p>Einfach öffnen – du bleibst eingeloggt (auch auf mehreren Geräten). "
                 "Nicht weitergeben: wer den Link hat, kann den Bot steuern. "
                 "Neuer Link (der alte wird ungültig): <code>!dashboard</code></p>")
-        ok = await self.matrix.send_dm(sender, body, html)
-        if ok:
-            await self._note(room_id, "Zugang zum Dashboard kommt per Direktnachricht.", "success", "🎛")
+        who = self._who(sender)
+        in_dm = self.matrix.find_dm(sender) == room_id
+        if in_dm:
+            pass                                    # Befehl kam schon im Privatchat: Link kommt hierher
+        elif self.matrix.find_dm(sender):
+            await self._note(room_id, f"📬 {who}, schau in deine DMs – dein Dashboard-Link ist da.",
+                             "success", "🎛")
         else:
-            await self._note(room_id, "Konnte dir keine Direktnachricht schicken – siehe Log.", "error", "❌")
+            await self._note(room_id, f"📬 {who}, schau in deine DMs: Ich hab dich in einen Privatchat "
+                                      "eingeladen – Einladung annehmen, da steht dein Dashboard-Link.",
+                             "success", "🎛")
+
+        async def deliver() -> None:              # im Hintergrund: der neue Privatchat braucht ein paar Sekunden
+            if not await self.matrix.send_dm(sender, body, html):
+                await self._note(room_id, "Konnte dir keine Direktnachricht schicken – siehe Log.", "error", "❌")
+
+        task = asyncio.create_task(deliver(), name="dashboard-dm")
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     def _load_fade_settings(self) -> None:
         for name in ("crossfade_seconds", "fade_in_seconds"):
@@ -1164,15 +1180,77 @@ class Bot:
             "crossfade": self.cfg.crossfade_seconds, "fade_in": self.cfg.fade_in_seconds,
             "room": self._notice_room() or self.webauth.room_of(user),
             "favs": self.store.fav_keys(user),
+            "me_name": self._names.get(user) or self._who(user),
         }
 
-    def web_library(self, user: str) -> dict:
+    async def _display_name(self, user: str) -> str:
+        if user not in self._names:
+            name = ""
+            try:
+                resp = await self.matrix.client.get_displayname(user)
+                name = getattr(resp, "displayname", "") or ""
+            except Exception:
+                log.debug("Anzeigename von %s nicht ladbar", user, exc_info=True)
+            self._names[user] = name or self._who(user)
+        return self._names[user]
+
+    async def web_library(self, user: str) -> dict:
+        """Persoenliche Bibliothek: eigene Playlists, Favoriten, Verlauf, Statistik – plus die der anderen."""
+        name = await self._display_name(user)
+        lists = self.store.playlists_full()
+        mine = [p for p in lists if p["owner"].lower() == user.lower()]
+        others = [p for p in lists if p["owner"].lower() != user.lower()]
+        for p in others:
+            p["by"] = self._who(p["owner"]) if p["owner"] else ""
+        for p in mine:
+            p["tracks"] = [self._track_json(k) for k in self.store.playlist_keys(p["name"]) or []]
+        totals = self.store.totals_of(user)
         return {
-            "playlists": [{"name": n, "count": c} for n, c in self.store.playlist_list()],
+            "me": {"id": user, "name": name, **totals},
+            "my_playlists": mine,
+            "playlists": others,
             "favorites": [self._track_json(k) for k in self.store.fav_keys(user)],
-            "top": [dict(self._track_json(k), plays=n) for k, n in self.store.top_tracks(12)],
+            "my_top": [dict(self._track_json(k), plays=n) for k, n in self.store.top_of(user, 10)],
+            "my_recent": [self._track_json(k) for k in self.store.recent_of(user, 10)],
+            "top": [dict(self._track_json(k), plays=n) for k, n in self.store.top_tracks(10)],
             "radio": len(self._radio_scan()) if os.path.isdir(self.cfg.radio_dir) else 0,
         }
+
+    async def web_playlist(self, user: str, op: str, name: str, key: str = "", index: int = 0,
+                           query: str = "") -> None:
+        """Eigene Playlists im Dashboard verwalten (fremde nur abspielen)."""
+        name = name.strip()[:60]
+        if not name:
+            raise MediaError("Bitte einen Namen angeben.")
+        st = self.store
+        if op == "create":
+            if not st.playlist_create(name, user):
+                raise MediaError(f"Eine Playlist „{name}“ gibt es schon.")
+            return
+        owner = st.playlist_owner(name)
+        if owner is None:
+            raise MediaError(f"Playlist „{name}“ gibt es nicht.")
+        if owner and owner.lower() != user.lower():
+            raise MediaError("Das ist nicht deine Playlist – die darf nur ihr Besitzer ändern.")
+        if op == "add":
+            if not key and query:                       # Suchtreffer: erst Metadaten holen
+                resolved = await self.resolver.resolve_async(query)
+                key = st.note_request(resolved.key, title=resolved.title, url=resolved.url,
+                                      duration=resolved.duration, uploader=resolved.uploader).key
+                if resolved.thumbnail:
+                    self._thumb_url[resolved.key] = resolved.thumbnail
+            cur = self.player.current
+            key = key or (cur.key if cur else "")
+            if not key or st.get(key) is None:
+                raise MediaError("Welcher Titel? Gerade läuft nichts.")
+            st.playlist_add(name, key)
+        elif op == "remove":
+            if st.playlist_remove(name, index + 1) is None:
+                raise MediaError("Diesen Titel gibt es in der Playlist nicht (mehr).")
+        elif op == "delete":
+            st.playlist_delete(name)
+        else:
+            raise MediaError("Unbekannte Aktion.")
 
     # Erlaubte Befehle aus dem Dashboard (wie im Chat, gleiche Karten im Raum)
     _WEB_COMMANDS = {"play", "pause", "resume", "stop", "skip", "previous", "clear", "seek",
@@ -1181,10 +1259,10 @@ class Bot:
 
     async def web_command(self, user: str, name: str, arg: str) -> None:
         if name == "softskip":
-            await self._soft_skip(self._web_room(user))
+            await self._quick(self._soft_skip(self._web_room(user)))
             return
         if name == "softstop":
-            await self._soft_stop(self._web_room(user), float(arg or 4))
+            await self._quick(self._soft_stop(self._web_room(user), float(arg or 4)))
             return
         if name == "favkey":                          # beliebigen Titel merken/entfernen
             keys = self.store.fav_keys(user)
@@ -1197,7 +1275,19 @@ class Bot:
             raise MediaError("Unbekannter Befehl.")
         if name == "playlist" and arg.split(" ", 1)[0] not in ("play", "enqueue"):
             raise MediaError("Playlists bitte im Chat bearbeiten.")
-        await self._dispatch(self._web_room(user), user, name, arg)
+        await self._quick(self._dispatch(self._web_room(user), user, name, arg))
+
+    async def _quick(self, coro, wait: float = 0.35) -> None:
+        """Befehl starten und kurz warten: Der Player reagiert sofort, die Karten im Chat
+        (Netzwerk) laufen im Hintergrund weiter – so fuehlt sich das Dashboard flott an."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        task.add_done_callback(lambda t: t.cancelled() or not t.exception() or log.error(
+            "Dashboard-Befehl fehlgeschlagen", exc_info=t.exception()))
+        done, _ = await asyncio.wait({task}, timeout=wait)
+        if done:
+            task.result()                        # Fehler (z. B. MediaError) gehen ans Dashboard
 
     async def _soft_skip(self, room: str) -> None:
         p = self.player

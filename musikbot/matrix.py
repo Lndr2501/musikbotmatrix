@@ -373,10 +373,14 @@ class Matrix:
                 return False
             room_id = resp.room_id
             await self._mark_direct(user_id, room_id)
-            for _ in range(40):                    # bis der Sync den neuen Raum kennt
+            # Der Sync haengt bis zu SYNC_TIMEOUT_MS im Long-Poll: so lange auf den Raum warten
+            for _ in range(int(SYNC_TIMEOUT_MS / 1000 * 4) + 40):
                 if room_id in self.client.rooms:
                     break
                 await asyncio.sleep(0.25)
+            else:
+                log.error("Neuer DM-Raum %s kam nicht im Sync an", room_id)
+                return False
         content = {"msgtype": "m.text", "body": body}
         if html:
             content.update(format="org.matrix.custom.html", formatted_body=html)

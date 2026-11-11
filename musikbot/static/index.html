@@ -28,6 +28,7 @@
   <header class="topbar">
     <div class="brand"><img src="/static/icon.svg" alt=""> <span>Musikbot</span></div>
     <div class="status" id="status-chips"></div>
+    <div class="me" id="me" title=""><span class="avatar" id="me-avatar"></span><span class="me-name" id="me-name"></span></div>
     <button class="icon-btn" id="logout" title="Abmelden" aria-label="Abmelden">
       <svg viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>
     </button>
@@ -44,6 +45,9 @@
           <h2 id="title">Nichts läuft</h2>
           <p id="artist" class="muted"></p>
         </div>
+        <button class="icon-btn" id="to-playlist" title="Zu deiner Playlist" aria-label="Zu deiner Playlist">
+          <svg viewBox="0 0 24 24"><path d="M3 6h12M3 12h12M3 18h7M18 13v8M14 17h8"/></svg>
+        </button>
         <button class="icon-btn fav" id="fav" title="Favorit" aria-label="Favorit">
           <svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8Z"/></svg>
         </button>
@@ -93,7 +97,7 @@
     <nav class="tabs" role="tablist">
       <button role="tab" data-tab="queue" aria-selected="true">Warteschlange <span class="badge" id="queue-count"></span></button>
       <button role="tab" data-tab="search">Suche</button>
-      <button role="tab" data-tab="library">Bibliothek</button>
+      <button role="tab" data-tab="library">Meins</button>
       <button role="tab" data-tab="fades">Fades</button>
     </nav>
 
@@ -118,12 +122,29 @@
     </div>
 
     <div class="tab" id="tab-library" hidden>
+      <div class="hello">
+        <span class="avatar big" id="hello-avatar"></span>
+        <div><h3 id="hello-name">Hallo!</h3><p class="muted" id="hello-stats"></p></div>
+      </div>
       <div class="cards" id="lib-actions"></div>
-      <h3 class="section">Playlists</h3>
-      <ol class="list" id="playlists"></ol>
+
+      <h3 class="section">Deine Playlists <button class="chip small" id="pl-new">+ Neue</button></h3>
+      <form class="inline-form" id="pl-form" hidden>
+        <input id="pl-name" placeholder="Name der Playlist" maxlength="60" autocomplete="off">
+        <button class="btn primary" type="submit">Anlegen</button>
+      </form>
+      <div id="my-playlists"></div>
+
       <h3 class="section">Deine Favoriten <button class="chip small" id="fav-play">Alle abspielen</button></h3>
       <ol class="list" id="favorites"></ol>
-      <h3 class="section">Meistgespielt</h3>
+      <h3 class="section">Zuletzt von dir gewünscht</h3>
+      <ol class="list" id="my-recent"></ol>
+      <h3 class="section">Deine Top-Titel</h3>
+      <ol class="list" id="my-top"></ol>
+
+      <h3 class="section" id="others-head">Playlists der anderen</h3>
+      <ol class="list" id="playlists"></ol>
+      <h3 class="section">Alle: meistgespielt</h3>
       <ol class="list" id="top"></ol>
     </div>
 
@@ -162,6 +183,7 @@
 </div>
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
+<div class="popover" id="popover" hidden></div>
 
 <template id="row-tpl">
   <li class="row">

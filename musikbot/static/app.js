@@ -12,6 +12,8 @@ const ICONS = {
   remove: '<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   heart: '<svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8Z"/></svg>',
   shuffle: '<svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>',
+  list: '<svg viewBox="0 0 24 24"><path d="M3 6h12M3 12h12M3 18h7M18 13v8M14 17h8"/></svg>',
+  trash: '<svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>',
 };
 
 let S = null;            // letzter Zustand vom Server
@@ -19,7 +21,14 @@ let fetchedAt = 0;       // wann S kam (fuer die laufende Zeit)
 let seeking = false;     // Nutzer zieht gerade den Fortschrittsbalken
 let sliding = new Set(); // Regler, die gerade bewegt werden (nicht ueberschreiben)
 let pollTimer = null;
-
+let LIB = null;          // persoenliche Bibliothek (fuer "Zu Playlist" und den Tab "Meins")
+const shown = {};        // zuletzt gezeichneter Stand je Bereich -> nur bei Aenderung neu zeichnen
+const changed = (part, value) => {
+  const key = JSON.stringify(value);
+  if (shown[part] === key) return false;
+  shown[part] = key;
+  return true;
+};
 // ---------------------------------------------------------------- API
 async function api(path, body) {
   const opts = { credentials: "same-origin", headers: {} };
@@ -107,7 +116,7 @@ function button(icon, title, onClick, extra = "") {
   b.innerHTML = ICONS[icon];
   b.title = title;
   b.setAttribute("aria-label", title);
-  b.addEventListener("click", (ev) => { ev.stopPropagation(); onClick(); });
+  b.addEventListener("click", (ev) => { ev.stopPropagation(); onClick(ev); });
   return b;
 }
 function row(item, sub, actions = []) {
@@ -116,6 +125,11 @@ function row(item, sub, actions = []) {
   if (item.thumb || item.thumbnail) { img.src = item.thumb || item.thumbnail; empty.remove(); }
   else img.remove();
   $(".row-title", li).textContent = item.title || item.key || "?";
+  if (item.mine) {
+    const b = document.createElement("span");
+    b.className = "mine-badge"; b.textContent = "Du";
+    $(".row-title", li).append(b);
+  }
   $(".row-sub", li).textContent = sub;
   const box = $(".row-actions", li);
   actions.forEach((a) => box.append(a));
@@ -152,8 +166,11 @@ function render() {
     $("#backdrop").style.backgroundImage = "";
   }
 
-  $("#ic-play").hidden = S.state === "playing";
-  $("#ic-pause").hidden = S.state !== "playing";
+  setPlayIcon(S.state === "playing");
+  const initials = (S.me_name || "?").replace(/^@/, "").slice(0, 1).toUpperCase();
+  $("#me-avatar").textContent = initials;
+  $("#me-name").textContent = S.me_name || "";
+  $("#me").title = S.me;
   $("#loop").classList.toggle("on", S.loop);
   $("#video").classList.toggle("on", S.video);
   $("#fav").classList.toggle("on", !!(t && S.favs.includes(t.key)));
@@ -161,6 +178,18 @@ function render() {
   $("#volume-val").textContent = S.volume;
 
   // Status oben rechts
+  if (changed("chips", [S.busy, S.always, S.in_call, S.peers])) renderChips();
+  if (changed("queue", [S.queue, S.history, S.me])) renderQueue();
+  if (changed("fades", [S.crossfade, S.fade_in])) renderFades();
+  tick();
+}
+
+function setPlayIcon(playing) {
+  $("#ic-play").hidden = playing;
+  $("#ic-pause").hidden = !playing;
+}
+
+function renderChips() {
   const chips = $("#status-chips");
   chips.replaceChildren();
   const pill = (text, cls = "", hideSm = false) => {
@@ -173,10 +202,6 @@ function render() {
   if (S.busy) pill("lädt …", "busy");
   if (S.always) pill(S.always.kind === "radio" ? "24/7 Radio" : "24/7", "live", true);
   pill(S.in_call ? `im Call · ${S.peers}` : "nicht im Call", S.in_call ? "live" : "");
-
-  renderQueue();
-  renderFades();
-  tick();
 }
 
 function tick() {
@@ -203,8 +228,11 @@ function renderQueue() {
   $("#queue-empty").hidden = q.length > 0;
   const list = $("#queue");
   list.classList.add("sortable");
+  const meShort = S.me.replace(/^@/, "").split(":")[0];
   list.replaceChildren(...q.map((t, i) => {
-    const li = row(t, subline(t, t.requester ? `von ${t.requester}` : ""), [
+    const mine = t.requester === meShort;
+    const li = row({ ...t, mine }, subline(t, t.requester && !mine ? `von ${t.requester}` : ""), [
+      button("list", "Zu deiner Playlist", (ev) => playlistMenu(ev, { key: t.key }), "hover-only"),
       i > 0 ? button("top", "Als Nächstes", () => act("/api/queue", { op: "top", index: i }), "hover-only") : "",
       button("remove", "Entfernen", () => act("/api/queue", { op: "remove", index: i })),
     ].filter(Boolean));
@@ -253,14 +281,16 @@ $$("[data-cmd]").forEach((b) => b.addEventListener("click", () => {
 
 $("#playpause").addEventListener("click", () => {
   if (!S) return;
-  if (S.state === "playing") cmd("pause");
-  else if (S.state === "paused") cmd("resume");
+  if (S.state === "playing") { setPlayIcon(false); cmd("pause"); }
+  else if (S.state === "paused") { setPlayIcon(true); cmd("resume"); }
   else if (S.queue.length) cmd("skip");
   else { toast("Die Warteschlange ist leer – such dir etwas aus."); selectTab("search"); }
 });
-$("#loop").addEventListener("click", () => cmd("loop", S && S.loop ? "off" : "on"));
-$("#video").addEventListener("click", () => cmd("video", S && S.video ? "off" : "on"));
-$("#fav").addEventListener("click", () => {
+$("#loop").addEventListener("click", (ev) => { ev.currentTarget.classList.toggle("on"); cmd("loop", S && S.loop ? "off" : "on"); });
+$("#video").addEventListener("click", (ev) => { ev.currentTarget.classList.toggle("on"); cmd("video", S && S.video ? "off" : "on"); });
+$("#to-playlist").addEventListener("click", (ev) => { if (S && S.track) playlistMenu(ev, { key: S.track.key }); });
+$("#fav").addEventListener("click", (ev) => {
+  if (S && S.track) ev.currentTarget.classList.toggle("on");
   if (S && S.track) cmd("favkey", S.track.key, S.favs.includes(S.track.key) ? "Aus Favoriten entfernt" : "Zu Favoriten hinzugefügt");
 });
 const softStop = () => cmd("softstop", $("#softstop-len").value, "Wird ausgeblendet …");
@@ -329,20 +359,50 @@ function searchActions(url) {
     button("play", "Jetzt spielen", add("now", "Kommt jetzt (wird geladen) …")),
     button("next", "Als Nächstes", add("next", "Als Nächstes eingereiht")),
     button("plus", "Hinten anstellen", add("end", "Eingereiht")),
+    button("list", "Zu deiner Playlist", (ev) => playlistMenu(ev, { query: url })),
   ];
 }
 
-// ---------------------------------------------------------------- Bibliothek
+// ---------------------------------------------------------------- Meins (persoenlich)
+const emptyNote = (text) => Object.assign(document.createElement("p"), { className: "empty", textContent: text });
+const enqueueBtn = (t) => t.url ? button("plus", "Einreihen", () => act("/api/add", { query: t.url, mode: "end" }, "Eingereiht")) : "";
+const openPlaylists = new Set();
+
+async function playlistOp(body, okText) {
+  try {
+    LIB = await api("/api/playlist", body);
+    if (okText) toast(okText);
+    if (!$("#tab-library").hidden) renderLibrary();
+    return true;
+  } catch (e) {
+    if (e.message !== "login") toast(e.message, true);
+    return false;
+  }
+}
+
 async function loadLibrary() {
-  let lib;
-  try { lib = await api("/api/library"); } catch { return; }
+  try { LIB = await api("/api/library"); } catch { return; }
+  renderLibrary();
+}
+
+function renderLibrary() {
+  const lib = LIB;
+  if (!lib) return;
+  const me = lib.me;
+  $("#hello-avatar").textContent = (me.name || "?").slice(0, 1).toUpperCase();
+  $("#hello-name").textContent = `Hallo, ${me.name}!`;
+  const hours = Math.floor(me.seconds / 3600), mins = Math.round((me.seconds % 3600) / 60);
+  $("#hello-stats").textContent = me.plays
+    ? `${me.plays} Titel von dir gewünscht · ${hours ? hours + " h " : ""}${mins} min Musik`
+    : "Noch nichts von dir gewünscht – leg los unter „Suche“.";
+
   const cards = $("#lib-actions");
   const card = (title, sub, onClick, on = false) => {
     const b = document.createElement("button");
     b.className = "action-card" + (on ? " on" : "");
     const t = document.createElement("b"); t.textContent = title;
-    const s = document.createElement("span"); s.textContent = sub;
-    b.append(t, s);
+    const s2 = document.createElement("span"); s2.textContent = sub;
+    b.append(t, s2);
     b.addEventListener("click", onClick);
     return b;
   };
@@ -351,27 +411,118 @@ async function loadLibrary() {
     always
       ? card("24/7 ausschalten", "Dauerschleife beenden", () => cmd("always", "off", "24/7 ist aus"), true)
       : card("24/7 Radio", lib.radio ? `${lib.radio} Dateien, zufällig` : "Radio-Ordner ist leer", () => cmd("always", "radio", "Radio läuft")),
-    card("Favoriten mischen", `${lib.favorites.length} Titel`, () => cmd("fav", "play shuffle")),
+    card("Deine Favoriten", `${lib.favorites.length} Titel gemischt abspielen`, () => cmd("fav", "play shuffle")),
   );
   $("#fav-play").onclick = () => cmd("fav", "play");
 
-  $("#playlists").replaceChildren(...(lib.playlists.length ? lib.playlists.map((p) =>
-    row({ title: p.name }, `${p.count} Titel`, [
+  // Eigene Playlists: aufklappbar, mit Titeln
+  const box = $("#my-playlists");
+  box.replaceChildren(...(lib.my_playlists.length ? lib.my_playlists.map((p) => {
+    const wrap = document.createElement("div");
+    wrap.className = "pl";
+    const head = document.createElement("div");
+    head.className = "pl-head";
+    const name = document.createElement("b"); name.textContent = p.name;
+    const count = document.createElement("span"); count.className = "muted"; count.textContent = `${p.count} Titel`;
+    head.append(name, count,
       button("play", "Abspielen", () => cmd("playlist", `play ${p.name}`)),
       button("shuffle", "Gemischt abspielen", () => cmd("playlist", `play ${p.name} shuffle`)),
       button("plus", "Einreihen", () => cmd("playlist", `enqueue ${p.name}`, "Eingereiht")),
-    ])) : [Object.assign(document.createElement("p"), { className: "empty", textContent: "Noch keine Playlists – anlegen im Chat mit !playlist create <name>." })]));
+      button("trash", "Playlist löschen", () => {
+        if (confirm(`Playlist „${p.name}“ löschen?`)) playlistOp({ op: "delete", name: p.name }, "Gelöscht");
+      }, "hover-only"));
+    head.addEventListener("click", () => {
+      openPlaylists.has(p.name) ? openPlaylists.delete(p.name) : openPlaylists.add(p.name);
+      renderLibrary();
+    });
+    wrap.append(head);
+    if (openPlaylists.has(p.name)) {
+      const list = document.createElement("ol");
+      list.className = "list";
+      list.replaceChildren(...(p.tracks.length ? p.tracks.map((t, i) => row(t, subline(t), [
+        enqueueBtn(t),
+        button("remove", "Aus Playlist entfernen", () => playlistOp({ op: "remove", name: p.name, index: i })),
+      ].filter(Boolean))) : [emptyNote("Leer – füge Titel über das Listen-Symbol beim Player, in der Suche oder Warteschlange hinzu.")]));
+      wrap.append(list);
+    }
+    return wrap;
+  }) : [emptyNote("Noch keine eigenen Playlists. Leg oben eine an.")]));
 
-  $("#favorites").replaceChildren(...(lib.favorites.length ? lib.favorites.map((t) =>
-    row(t, subline(t), [
-      t.url ? button("plus", "Einreihen", () => act("/api/add", { query: t.url, mode: "end" }, "Eingereiht")) : "",
-      button("remove", "Aus Favoriten entfernen", async () => { await cmd("favkey", t.key); loadLibrary(); }, "hover-only"),
-    ].filter(Boolean))) : [Object.assign(document.createElement("p"), { className: "empty", textContent: "Noch keine Favoriten – tipp beim laufenden Titel aufs Herz." })]));
+  $("#favorites").replaceChildren(...(lib.favorites.length ? lib.favorites.map((t) => row(t, subline(t), [
+    enqueueBtn(t),
+    button("list", "Zu deiner Playlist", (ev) => playlistMenu(ev, { key: t.key }), "hover-only"),
+    button("remove", "Aus Favoriten entfernen", async () => { await cmd("favkey", t.key); loadLibrary(); }, "hover-only"),
+  ].filter(Boolean))) : [emptyNote("Noch keine Favoriten – tipp beim laufenden Titel aufs Herz.")]));
 
-  $("#top").replaceChildren(...lib.top.map((t) => row(t, subline(t, `${t.plays}× gespielt`), t.url ? [
-    button("plus", "Einreihen", () => act("/api/add", { query: t.url, mode: "end" }, "Eingereiht")),
-  ] : [])));
+  const simple = (items, extra) => items.map((t) => row(t, subline(t, extra ? extra(t) : ""), [
+    enqueueBtn(t),
+    button("list", "Zu deiner Playlist", (ev) => playlistMenu(ev, { key: t.key }), "hover-only"),
+  ].filter(Boolean)));
+  $("#my-recent").replaceChildren(...(lib.my_recent.length ? simple(lib.my_recent) : [emptyNote("Noch nichts.")]));
+  $("#my-top").replaceChildren(...(lib.my_top.length ? simple(lib.my_top, (t) => `${t.plays}×`) : [emptyNote("Noch nichts.")]));
+
+  $("#others-head").hidden = lib.playlists.length === 0;
+  $("#playlists").replaceChildren(...lib.playlists.map((p) =>
+    row({ title: p.name }, [p.by ? `von ${p.by}` : "", `${p.count} Titel`].filter(Boolean).join(" · "), [
+      button("play", "Abspielen", () => cmd("playlist", `play ${p.name}`)),
+      button("shuffle", "Gemischt abspielen", () => cmd("playlist", `play ${p.name} shuffle`)),
+      button("plus", "Einreihen", () => cmd("playlist", `enqueue ${p.name}`, "Eingereiht")),
+    ])));
+  $("#top").replaceChildren(...simple(lib.top, (t) => `${t.plays}× gespielt`));
 }
+
+$("#pl-new").addEventListener("click", () => {
+  const f = $("#pl-form");
+  f.hidden = !f.hidden;
+  if (!f.hidden) $("#pl-name").focus();
+});
+$("#pl-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const name = $("#pl-name").value.trim();
+  if (!name) return;
+  if (await playlistOp({ op: "create", name }, `Playlist „${name}“ angelegt`)) {
+    $("#pl-name").value = "";
+    $("#pl-form").hidden = true;
+  }
+});
+
+// Kleines Menue "Zu deiner Playlist" (eigene Playlists + neue anlegen)
+async function playlistMenu(ev, item) {
+  ev.stopPropagation();
+  const anchor = ev.currentTarget;              // nach dem await ist currentTarget weg
+  if (!LIB) await loadLibrary();
+  if (!LIB) return;
+  const pop = $("#popover");
+  const title = Object.assign(document.createElement("div"), { className: "pop-title", textContent: "Zu Playlist hinzufügen" });
+  const entries = LIB.my_playlists.map((p) => {
+    const b = Object.assign(document.createElement("button"), { textContent: p.name });
+    b.addEventListener("click", () => { closePopover(); playlistOp({ op: "add", name: p.name, ...item }, `Zu „${p.name}“ hinzugefügt`); });
+    return b;
+  });
+  const form = document.createElement("form");
+  form.className = "inline-form";
+  form.style.margin = "4px";
+  const input = Object.assign(document.createElement("input"), { placeholder: "Neue Playlist …", maxLength: 60 });
+  const ok = Object.assign(document.createElement("button"), { className: "btn primary", type: "submit", textContent: "+" });
+  form.append(input, ok);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = input.value.trim();
+    if (!name) return;
+    closePopover();
+    if (await playlistOp({ op: "create", name })) playlistOp({ op: "add", name, ...item }, `„${name}“ angelegt und Titel hinzugefügt`);
+  });
+  pop.replaceChildren(title, ...entries, form);
+  pop.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(16, Math.min(window.innerWidth - w - 16, r.right - w)) + "px";
+  pop.style.top = (r.bottom + h + 8 > window.innerHeight ? Math.max(16, r.top - h - 6) : r.bottom + 6) + "px";
+  if (!entries.length) input.focus();
+}
+function closePopover() { $("#popover").hidden = true; }
+document.addEventListener("click", (ev) => { if (!ev.target.closest("#popover")) closePopover(); });
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closePopover(); });
 
 // ---------------------------------------------------------------- Fades
 function drawCurve(seconds) {
@@ -433,7 +584,8 @@ async function start() {
   let tab = "queue";
   try { tab = localStorage.getItem("musikbot-tab") || tab; } catch { /* egal */ }
   selectTab(tab === "search" ? "queue" : tab);
+  if (tab !== "library") loadLibrary();
   poll();
-  if (!start.ticking) { start.ticking = true; (function frame() { tick(); requestAnimationFrame(frame); })(); }
+  if (!start.ticking) { start.ticking = true; setInterval(tick, 250); }
 }
 start();

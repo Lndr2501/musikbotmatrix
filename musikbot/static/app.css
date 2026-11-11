@@ -1,6 +1,6 @@
 :root {
   --bg: #0b0b10;
-  --panel: rgba(22, 22, 30, 0.72);
+  --panel: rgba(20, 20, 28, 0.86);
   --panel-solid: #16161e;
   --line: rgba(255, 255, 255, 0.08);
   --line-strong: rgba(255, 255, 255, 0.16);
@@ -41,8 +41,9 @@ input { font: inherit; color: inherit; }
   background-size: cover; background-position: center;
   filter: blur(70px) saturate(1.4) brightness(.55);
   transform: scale(1.1);
-  transition: background-image .8s ease;
   z-index: -1;
+  will-change: transform;      /* eigene Ebene: wird einmal weichgezeichnet, nicht bei jedem Frame */
+  contain: strict;
 }
 
 /* Buttons */
@@ -86,7 +87,7 @@ input { font: inherit; color: inherit; }
 /* Login */
 .login { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; }
 .login-card {
-  width: min(400px, 100%); background: var(--panel); backdrop-filter: blur(24px);
+  width: min(400px, 100%); background: var(--panel);
   border: 1px solid var(--line); border-radius: 24px; padding: 32px 28px; box-shadow: var(--shadow);
   display: grid; gap: 14px;
 }
@@ -127,7 +128,7 @@ input { font: inherit; color: inherit; }
 
 /* Player */
 .player {
-  background: var(--panel); backdrop-filter: blur(30px); border: 1px solid var(--line);
+  background: var(--panel); border: 1px solid var(--line);
   border-radius: 28px; padding: 22px; box-shadow: var(--shadow); display: grid; gap: 20px;
 }
 .cover-wrap { position: relative; aspect-ratio: 1; width: 100%; max-width: 400px; margin: 0 auto; }
@@ -176,7 +177,7 @@ input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bord
 
 /* Panel mit Tabs */
 .panel {
-  background: var(--panel); backdrop-filter: blur(30px); border: 1px solid var(--line);
+  background: var(--panel); border: 1px solid var(--line);
   border-radius: 28px; padding: 8px 8px 16px; box-shadow: var(--shadow); min-width: 0;
 }
 .tabs { display: flex; gap: 4px; padding: 6px; overflow-x: auto; scrollbar-width: none; }
@@ -268,3 +269,40 @@ input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bord
   .panel { border-radius: 24px; }
   .status .pill.hide-sm { display: none; }
 }
+
+/* Persoenliches */
+.me { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
+.me-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.avatar {
+  width: 30px; height: 30px; border-radius: 50%; display: inline-grid; place-items: center; flex: none;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; font-weight: 700; font-size: 13px;
+}
+.avatar.big { width: 52px; height: 52px; font-size: 20px; }
+.hello { display: flex; gap: 14px; align-items: center; padding: 8px 4px 14px; }
+.hello h3 { margin: 0; font-size: 20px; }
+.hello p { margin: 2px 0 0; font-size: 13px; }
+.mine-badge { background: var(--accent-soft); color: #fda4af; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; margin-left: 6px; }
+.inline-form { display: flex; gap: 8px; margin: 0 4px 10px; }
+.inline-form input {
+  flex: 1; min-width: 0; background: rgba(0,0,0,.3); border: 1px solid var(--line-strong); border-radius: 12px;
+  padding: 10px 12px; outline: none; font-size: 15px;
+}
+.inline-form input:focus { border-color: var(--accent); }
+.pl { border: 1px solid var(--line); border-radius: 16px; margin: 0 0 8px; overflow: hidden; }
+.pl-head { display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 14px; cursor: pointer; }
+.pl-head b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-head .muted { font-size: 13px; white-space: nowrap; }
+.pl .list { padding: 0 6px 8px; }
+.pl .empty { padding: 10px; }
+@media (max-width: 520px) { .me-name { display: none; } }
+
+.popover {
+  position: fixed; z-index: 20; min-width: 220px; max-width: calc(100vw - 32px);
+  background: var(--panel-solid); border: 1px solid var(--line-strong); border-radius: 14px;
+  box-shadow: var(--shadow); padding: 6px; display: grid; gap: 2px;
+}
+.popover button {
+  text-align: left; border: 0; background: transparent; padding: 9px 12px; border-radius: 10px; font-weight: 600;
+}
+.popover button:hover { background: rgba(255,255,255,.08); }
+.popover .pop-title { font-size: 12px; color: var(--muted); padding: 6px 12px 4px; text-transform: uppercase; letter-spacing: .05em; }
