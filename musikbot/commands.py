@@ -29,6 +29,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "fav": ("fav", "favs", "favorit", "favoriten", "favorite", "favorites", "merken"),
     "stats": ("stats", "statistik", "top", "charts"),
     "always": ("always", "247", "24/7", "24-7", "dauerbetrieb"),
+    "autoplay": ("autoplay", "auto", "ähnlich", "aehnlich"),
     "dashboard": ("dashboard", "web", "login", "passwort", "password"),
     "help": ("help", "hilfe", "commands", "befehle"),
 }
@@ -51,6 +52,7 @@ Audio-/Videodatei an die Nachricht anhängen – der Bot spielt sie direkt ab
 !vor [s] – vorspulen (Standard 10 s) · !zurueck [s] – zurückspulen
 !volume <0-300 | +10 | -10> – Lautstärke (60 = Original, darüber Boost) · !video on|off – Video im Call
 !shuffle – mischen · !loop on|off – aktuelle Titel wiederholen
+!autoplay on|off – ist die Warteschlange leer, kommt ähnliche Musik (YouTube-Mix)
 !joincall – Bot kommt in den Call · !leavecall – Bot verlässt den Call
 !playlist create|delete <name> · add <name> [Link] · remove <name> <nr>
     show <name> · list · play <name> [shuffle] · enqueue <name>

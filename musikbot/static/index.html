@@ -91,6 +91,9 @@
             <svg viewBox="0 0 24 24" class="solid"><rect x="6" y="6" width="12" height="12" rx="2"/></svg> Stopp
           </button>
           <button class="chip" id="video" title="Video im Call">Video</button>
+          <button class="chip" id="autoplay" title="Ist die Warteschlange leer, kommt ähnliche Musik">
+            <svg viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z"/></svg> Autoplay
+          </button>
         </div>
       </div>
     </div>
@@ -111,6 +114,7 @@
       </div>
       <ol class="list" id="queue"></ol>
       <p class="empty" id="queue-empty">Die Warteschlange ist leer. Such dir unter „Suche“ etwas aus.</p>
+      <p class="hint muted" id="autoplay-hint" hidden>✨ Autoplay ist an – kurz vor Ende des Songs kommt ähnliche Musik dazu.</p>
       <h3 class="section" id="history-head">Zuletzt gespielt</h3>
       <ol class="list" id="history"></ol>
     </div>

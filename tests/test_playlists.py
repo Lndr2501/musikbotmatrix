@@ -55,6 +55,7 @@ def bot(tmp_path):
     cfg = Config(homeserver="http://h", user="@bot:x", password="p",
                  data_dir=str(tmp_path), matrix_user_id="@bot:x")
     b = Bot(cfg)
+    b._autoplay = False       # hier geht es ums Verlassen bei leerer Warteschlange (Autoplay: test_autoplay)
     b.sent = []
 
     async def notice(room, text):

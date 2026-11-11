@@ -24,7 +24,7 @@ from .elementcall import ElementCall
 from .config import Config
 from .hub import Hub
 from .matrix import Matrix
-from .player import Player
+from .player import AUTOPLAY, Player
 from .store import TrackStore
 from .util import fmt_time, now_ms, parse_time
 from .webauth import WebAuth
@@ -56,6 +56,12 @@ MAX_SHOWN = 30
 
 
 class Bot:
+    # Standardwerte (auch fuer Test-Attrappen, die __init__ ueberspringen)
+    _autoplay = False
+    _autoplay_busy = False
+    _last_finished = None
+    _recent: tuple | list = ()
+
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.store = TrackStore(cfg.db_path, cfg.tmp_dir, cfg.cache_dir, cfg.library_dir,
@@ -94,6 +100,11 @@ class Bot:
         self.dashboard = None
         self._bg_tasks: set[asyncio.Task] = set()
         self._names: dict[str, str] = {}            # Anzeigenamen fuers Dashboard
+        # Autoplay: ist die Warteschlange leer, kommt ein aehnlicher Titel (YouTube-Mix)
+        self._autoplay = self.store.setting("autoplay", "1") == "1"
+        self._autoplay_busy = False
+        self._recent: list[str] = []                # zuletzt gespielte Titel (keine Wiederholung)
+        self._last_finished = None
         self._load_fade_settings()
 
         m = self.matrix
@@ -392,7 +403,12 @@ class Bot:
         return True
 
     async def _player_event(self, name: str, data: dict) -> None:
+        if name == "need-next":
+            if self._autoplay_on() and data.get("track") is not None:
+                await self._autoplay_pick(data["track"], start=False)
+            return
         if name == "track-end":
+            self._last_finished = data.get("track")
             if self._loop_on and data.get("track") is not None:
                 self.player.enqueue(data["track"].key, "")
             elif self._always and not self.player.queue:
@@ -409,6 +425,13 @@ class Bot:
         elif name == "queue-empty":
             if not data.get("auto"):
                 return
+            if self._autoplay_on() and self._last_finished is not None:
+                # zu spaet fuer die Vorauswahl (z. B. sehr kurzer Titel): jetzt direkt starten
+                seed = self._last_finished
+                task = asyncio.create_task(self._autoplay_pick(seed, start=True, fallback_room=room))
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+                return
             await self._finish_now_card(room)
             if self._always:
                 await self._note(
@@ -422,6 +445,8 @@ class Bot:
                 await self._note(room, "Warteschlange ist leer – ich pausiere.")
 
     async def _announce(self, track) -> None:
+        if track is not None:
+            self._recent = (list(self._recent) + [track.key])[-60:]
         room = self._notice_room()
         if not room or track is None:
             return
@@ -673,7 +698,10 @@ class Bot:
                 self._loop_on = False
             if self._always and not p.queue:
                 self._refill_always()
+            seed = p.current if (not p.queue and self._autoplay_on()) else None
             ok = await p.skip()
+            if not ok and seed is not None:       # nichts in der Warteschlange: Autoplay springt ein
+                ok = await self._autoplay_pick(seed, start=True, fallback_room=room_id)
             if not ok:
                 # kein naechster Titel: die Wiedergabe ist beendet, die Karte nicht auf "Spielt" stehen lassen
                 await self._finish_now_card(room_id)
@@ -757,6 +785,15 @@ class Bot:
             await self._stats(room_id)
         elif name == "always":
             await self._always_cmd(room_id, sender, arg)
+        elif name == "autoplay":
+            mode = arg.strip().lower()
+            self._autoplay = True if mode in ("on", "an") else False if mode in ("off", "aus") \
+                else not self._autoplay
+            self.store.set_setting("autoplay", "1" if self._autoplay else "0")
+            if not self._autoplay:      # schon eingereihte Autoplay-Titel wieder raus
+                p.queue[:] = [(k, r) for k, r in p.queue if r != AUTOPLAY]
+            await self._note(room_id, "Autoplay an: Ist die Warteschlange leer, kommt ähnliche Musik."
+                             if self._autoplay else "Autoplay aus.", "info", "✨")
         elif name == "dashboard":
             await self._send_dashboard_login(room_id, sender)
         elif name == "help":
@@ -1205,6 +1242,7 @@ class Bot:
             "peers": st["peers"], "in_call": bool(self.ecall.active or self.calls.peers),
             "busy": bool(self._fetching or self._busy or p._lock.locked()),
             "crossfade": self.cfg.crossfade_seconds, "fade_in": self.cfg.fade_in_seconds,
+            "autoplay": self._autoplay,
             "room": self._notice_room() or self.webauth.room_of(user),
             "favs": self.store.fav_keys(user),
             "me_name": self._names.get(user) or self._who(user),
@@ -1280,7 +1318,7 @@ class Bot:
             raise MediaError("Unbekannte Aktion.")
 
     # Erlaubte Befehle aus dem Dashboard (wie im Chat, gleiche Karten im Raum)
-    _WEB_COMMANDS = {"play", "pause", "resume", "stop", "skip", "previous", "clear", "seek",
+    _WEB_COMMANDS = {"play", "pause", "resume", "stop", "skip", "previous", "clear", "seek", "autoplay",
                      "forward", "rewind", "volume", "video", "shuffle", "loop", "joincall",
                      "leavecall", "always", "playlist", "fav"}
 
@@ -1379,3 +1417,46 @@ class Bot:
                 value = max(0.0, min(20.0, float(data[field])))
                 setattr(self.cfg, name, value)
                 self.store.set_setting(name, str(value))
+
+    # ------------------------------------------------------------------ Autoplay
+    def _autoplay_on(self) -> bool:
+        return self._autoplay and not self._loop_on and not self._always
+
+    async def _autoplay_pick(self, seed, *, start: bool, fallback_room: str | None = None) -> bool:
+        """Aehnlichen Titel zum `seed` suchen und einreihen (start=False) bzw. sofort spielen."""
+        if self._autoplay_busy:
+            return False
+        self._autoplay_busy = True
+        try:
+            found = await self.resolver.similar_async(seed.key, seed.title or "", seed.uploader or "")
+            skip = set(self._recent) | set(self._history) | {k for k, _ in self.player.queue} | {seed.key}
+            limit = self.cfg.max_song_seconds
+            fits = [c for c in found if c["key"] not in skip
+                    and (not c["duration"] or 60 <= c["duration"] <= (limit or 10 ** 6))]
+            if not fits:
+                log.info("Autoplay: nichts Passendes zu %s", seed.key)
+                if start and fallback_room:
+                    await self._note(fallback_room, "Autoplay hat nichts Ähnliches gefunden.", "warning", "✨")
+                return False
+            pick = random.choice(fits[:6])          # etwas Abwechslung, aber nah am Original
+            track = self.store.note_request(pick["key"], title=pick["title"], url=pick["url"],
+                                            duration=pick["duration"], uploader=pick["artist"])
+            self._thumb_url[pick["key"]] = pick["thumbnail"]
+            self._prefetch_thumb(pick["key"])
+            log.info("Autoplay: %s -> %s", seed.title or seed.key, track.title)
+            if not start:
+                if self.player.queue:                # inzwischen hat jemand etwas gewuenscht
+                    return False
+                self.player.enqueue(track.key, AUTOPLAY)
+                return True
+            room = self._notice_room() or fallback_room
+            if not room or self.player.state != "stopped":
+                return False
+            self._history.append(track.key)
+            del self._history[:-20]
+            return await self._start_key(room, track.key, AUTOPLAY, announce=True)
+        except Exception:
+            log.exception("Autoplay fehlgeschlagen")
+            return False
+        finally:
+            self._autoplay_busy = False

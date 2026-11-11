@@ -232,6 +232,45 @@ class MediaResolver:
                         "duration": float(e.get("duration") or 0), "thumbnail": thumb})
         return out
 
+    def similar(self, key: str, title: str = "", artist: str = "", limit: int = 25) -> list[dict]:
+        """Aehnliche Titel ueber den YouTube-Mix ("Radio") zum Titel. Ohne YouTube-ID wird
+        der Titel erst auf YouTube gesucht. Leere Liste, wenn nichts zu finden ist."""
+        site, _, vid = key.partition(":")
+        if site != "youtube" or not vid:
+            term = " ".join(t for t in (artist, title) if t).strip()
+            if not term:
+                return []
+            try:
+                hit = self._extract(f"ytsearch1:{term}", flat=True)
+            except Exception:  # noqa: BLE001
+                return []
+            entries = [e for e in (hit.get("entries") or []) if e and e.get("id")]
+            if not entries:
+                return []
+            vid = entries[0]["id"]
+        opts = self._base_opts()
+        opts.update({"extract_flat": "in_playlist", "playlistend": limit, "noplaylist": False})
+        url = f"https://www.youtube.com/watch?v={vid}&list=RD{vid}"
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False) or {}
+        except Exception as exc:  # noqa: BLE001
+            log.info("YouTube-Mix zu %s nicht ladbar: %s", vid, exc)
+            return []
+        out = []
+        for e in info.get("entries") or []:
+            if not e or not e.get("id") or e["id"] == vid:
+                continue
+            out.append({"key": f"youtube:{e['id']}", "url": f"https://www.youtube.com/watch?v={e['id']}",
+                        "title": str(e.get("title") or e["id"]),
+                        "artist": str(e.get("channel") or e.get("uploader") or ""),
+                        "duration": float(e.get("duration") or 0),
+                        "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"})
+        return out
+
+    async def similar_async(self, key: str, title: str = "", artist: str = "") -> list[dict]:
+        return await asyncio.to_thread(self.similar, key, title, artist)
+
     async def search_async(self, query: str, limit: int = 8) -> list[dict]:
         return await asyncio.to_thread(self.search, query, limit)
 

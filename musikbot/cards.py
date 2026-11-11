@@ -185,7 +185,8 @@ HELP_GROUPS = [
     _g("Warteschlange",
        ("!queue · !clear", "anzeigen · leeren"),
        ("!shuffle", "mischen"),
-       ("!loop on|off", "aktuellen Titel wiederholen")),
+       ("!loop on|off", "aktuellen Titel wiederholen"),
+       ("!autoplay on|off", "danach automatisch ähnliche Musik")),
     _g("Ton und Bild",
        ("!volume <0-300 | +10 | -10>", "Lautstärke (60 = Original, darüber Boost), +/- relativ"),
        ("!video on|off", "Video im Call")),
@@ -214,6 +215,7 @@ COMMANDS_EVENT = "dev.diddy.commands"
 COMMAND_LIST = [
     ("play", "!play <Link oder Suchbegriff>", "Titel abspielen"),
     ("dashboard", "!dashboard", "Web-Dashboard: Link + Passwort per DM"),
+    ("autoplay", "!autoplay on|off", "danach automatisch ähnliche Musik"),
     ("pause", "!pause", "pausieren"),
     ("resume", "!resume", "weiterspielen"),
     ("stop", "!stop", "stoppen"),

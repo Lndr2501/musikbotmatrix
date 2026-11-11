@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 SAMPLE_RATE = 48000
 LEAD_SECONDS = 0.4  # Puffer, damit kleiner Jitter im Call nicht stört
 PREFETCH_SECONDS = 45.0  # so lange vor der Ueberblendung wird der naechste Titel geladen
+NEED_NEXT_SECONDS = 30.0  # noch frueher: "need-next" (z. B. Autoplay sucht einen aehnlichen Titel)
+AUTOPLAY = "autoplay"     # Wunsch-Absender fuer Titel, die Autoplay eingereiht hat
 CUT_FADE = 0.3  # Skip/Stop/Seek: kurz ausblenden statt hart abschneiden (kein Knacken)
 EventHandler = Callable[[str, dict], Awaitable[None]]
 
@@ -153,6 +155,7 @@ class Player:
         self._prefetch_task: asyncio.Task | None = None
         self._fade: _Fade | None = None
         self._force_fade = False       # "Sanft ueberspringen": Ueberblendung sofort starten
+        self._need_next_for: str | None = None   # fuer welchen Titel "need-next" schon gemeldet wurde
         self._bg: set[asyncio.Task] = set()
         # Master-Lautstaerke fuer Ein-/Ausblenden (0..1), aendert sich je Sample um _master_rate
         self._master = 1.0
@@ -387,6 +390,12 @@ class Player:
 
     # ------------------------------------------------------- Warteschlange
     def enqueue(self, key: str, requester: str = "") -> None:
+        """Hinten anstellen – Wuensche von Menschen kommen aber vor die Autoplay-Titel."""
+        if requester != AUTOPLAY:
+            for i, (_, who) in enumerate(self.queue):
+                if who == AUTOPLAY:
+                    self.queue.insert(i, (key, requester))
+                    return
         self.queue.append((key, requester))
 
     def clear_queue(self) -> int:
@@ -459,6 +468,7 @@ class Player:
 
     def _maybe_prefetch(self) -> None:
         """Rechtzeitig vor dem Ende den naechsten Titel laden und den Decoder oeffnen."""
+        self._maybe_need_next()
         if self.cfg.crossfade_seconds <= 0 or not self.queue or self._source is None:
             return
         dur = self._source.duration
@@ -472,6 +482,17 @@ class Player:
         self._discard_prepared()
         self._prefetch_key = key
         self._prefetch_task = asyncio.create_task(self._prefetch(key), name="prefetch")
+
+    def _maybe_need_next(self) -> None:
+        """Einmal pro Titel melden, wenn die Warteschlange kurz vor dem Ende leer ist."""
+        if self.queue or self._source is None or self.current is None:
+            return
+        dur = self._source.duration
+        lead = self.cfg.crossfade_seconds + PREFETCH_SECONDS + NEED_NEXT_SECONDS
+        if not dur or self._pos < dur - lead or self._need_next_for == self.current.key:
+            return
+        self._need_next_for = self.current.key
+        self._emit_bg(("need-next", {"track": self.current}))
 
     async def _prefetch(self, key: str) -> None:
         track = self.store.get(key)

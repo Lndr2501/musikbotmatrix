@@ -152,7 +152,9 @@ function render() {
   const player = $("#player");
   player.classList.toggle("paused", S.state !== "playing");
   $("#title").textContent = t ? t.title : "Nichts läuft";
-  $("#artist").textContent = t ? (t.artist || (t.requester ? `gewünscht von ${t.requester}` : "")) : "Such dir etwas aus – oder starte das 24/7-Radio.";
+  $("#artist").textContent = t
+    ? [t.artist, t.requester === "autoplay" ? "✨ Autoplay" : ""].filter(Boolean).join(" · ") || (t.requester ? `gewünscht von ${t.requester}` : "")
+    : "Such dir etwas aus – oder starte das 24/7-Radio.";
   document.title = t ? `${S.state === "playing" ? "▶" : "⏸"} ${t.title} – Musikbot` : "Musikbot";
 
   const cover = $("#cover"), empty = $("#cover-empty");
@@ -173,6 +175,8 @@ function render() {
   $("#me").title = S.me;
   $("#loop").classList.toggle("on", S.loop);
   $("#video").classList.toggle("on", S.video);
+  $("#autoplay").classList.toggle("on", S.autoplay);
+  $("#autoplay-hint").hidden = !S.autoplay || S.queue.some((t) => t.requester === "autoplay");
   $("#fav").classList.toggle("on", !!(t && S.favs.includes(t.key)));
   setRange($("#volume"), S.volume);
   $("#volume-val").textContent = S.volume;
@@ -185,8 +189,9 @@ function render() {
 }
 
 function setPlayIcon(playing) {
-  $("#ic-play").hidden = playing;
-  $("#ic-pause").hidden = !playing;
+  // SVG-Elemente kennen die Eigenschaft .hidden nicht – das Attribut direkt setzen
+  $("#ic-play").toggleAttribute("hidden", playing);
+  $("#ic-pause").toggleAttribute("hidden", !playing);
 }
 
 function renderChips() {
@@ -231,7 +236,8 @@ function renderQueue() {
   const meShort = S.me.replace(/^@/, "").split(":")[0];
   list.replaceChildren(...q.map((t, i) => {
     const mine = t.requester === meShort;
-    const li = row({ ...t, mine }, subline(t, t.requester && !mine ? `von ${t.requester}` : ""), [
+    const who = t.requester === "autoplay" ? "✨ Autoplay" : (t.requester && !mine ? `von ${t.requester}` : "");
+    const li = row({ ...t, mine }, subline(t, who), [
       button("list", "Zu deiner Playlist", (ev) => playlistMenu(ev, { key: t.key }), "hover-only"),
       i > 0 ? button("top", "Als Nächstes", () => act("/api/queue", { op: "top", index: i }), "hover-only") : "",
       button("remove", "Entfernen", () => act("/api/queue", { op: "remove", index: i })),
@@ -287,6 +293,10 @@ $("#playpause").addEventListener("click", () => {
   else { toast("Die Warteschlange ist leer – such dir etwas aus."); selectTab("search"); }
 });
 $("#loop").addEventListener("click", (ev) => { ev.currentTarget.classList.toggle("on"); cmd("loop", S && S.loop ? "off" : "on"); });
+$("#autoplay").addEventListener("click", (ev) => {
+  ev.currentTarget.classList.toggle("on");
+  cmd("autoplay", S && S.autoplay ? "off" : "on", S && S.autoplay ? "Autoplay aus" : "Autoplay an – danach kommt ähnliche Musik");
+});
 $("#video").addEventListener("click", (ev) => { ev.currentTarget.classList.toggle("on"); cmd("video", S && S.video ? "off" : "on"); });
 $("#to-playlist").addEventListener("click", (ev) => { if (S && S.track) playlistMenu(ev, { key: S.track.key }); });
 $("#fav").addEventListener("click", (ev) => {
