@@ -7,7 +7,9 @@ ueber das Telefon-Icon (Peer-zu-Peer/mesh, klassisches m.call-Signaling).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 import random
 import re
 import time
@@ -28,6 +30,25 @@ from .ytdl import MediaError, MediaResolver
 
 log = logging.getLogger("musikbot")
 
+AUDIO_VIDEO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".flac", ".wav", ".wma",
+                   ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".3gp"}
+
+
+def _write_file(path: str, data: bytes) -> None:
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+def probe_duration(path: str) -> float:
+    """Laenge in Sekunden; wirft, wenn die Datei kein Audio/Video enthaelt."""
+    import av
+    with av.open(path) as c:
+        if not any(s.type in ("audio", "video") for s in c.streams):
+            raise ValueError("kein Audio/Video")
+        return float(c.duration / av.time_base) if c.duration else 0.0
+
+
+RADIO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".flac", ".wav", ".wma"}
 PLAYLIST_NAME = re.compile(r"^[\w.-]{1,32}$")
 MAX_SHOWN = 30
 
@@ -36,7 +57,8 @@ class Bot:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.store = TrackStore(cfg.db_path, cfg.tmp_dir, cfg.cache_dir, cfg.library_dir,
-                               hot_dir=cfg.hot_dir, hot_after=cfg.hot_after, hot_days=cfg.hot_days)
+                               hot_dir=cfg.hot_dir, hot_after=cfg.hot_after, hot_days=cfg.hot_days,
+                               keep_dirs=(cfg.radio_dir,))
         self._fetch_room = ""
         self.hub = Hub()
         self.player = Player(cfg, self.hub, self.store,
@@ -63,10 +85,12 @@ class Bot:
         self._thumb_tasks: dict[str, asyncio.Task] = {}
         # 24/7-Modus: None oder {"kind": "song"|"playlist", "keys": [...], "name": str}
         self._always: dict | None = None
+        self._radio_files: dict[str, str] = {}      # Radio-Key -> Dateipfad
         self.ecall.keep_alive = lambda: self._always is not None
 
         m = self.matrix
         m.on_text = self._on_text
+        m.on_media = self._on_media
         m.on_call = self.calls.handle_event
         m.on_member_join = self.calls.on_member_joined
         m.on_room_left = self.calls.on_room_left
@@ -277,6 +301,31 @@ class Bot:
         if room:
             await self.matrix.send_notice(room, text)
 
+    def _radio_scan(self) -> list[str]:
+        """Radio-Ordner einlesen (jedes Mal neu: neue Dateien sind sofort dabei)."""
+        root = self.cfg.radio_dir
+        keys: list[str] = []
+        files: dict[str, str] = {}
+        for base, _dirs, names in os.walk(root):
+            for name in sorted(names):
+                if name.startswith(".") or os.path.splitext(name)[1].lower() not in RADIO_EXT:
+                    continue
+                path = os.path.join(base, name)
+                key = "radio:" + hashlib.sha1(os.path.relpath(path, root).encode()).hexdigest()[:16]
+                files[key] = path
+                keys.append(key)
+                self.store.note_request(key, title=os.path.splitext(name)[0][:120],
+                                        url="file://" + path, uploader="Radio")
+        self._radio_files = files
+        return keys
+
+    def _radio_shuffled(self, last: str | None = None) -> list[str]:
+        keys = self._radio_scan()
+        random.shuffle(keys)
+        if len(keys) > 1 and keys[0] == last:      # nicht zweimal hintereinander denselben
+            keys[0], keys[-1] = keys[-1], keys[0]
+        return keys
+
     def _refill_always(self) -> bool:
         """24/7: Warteschlange wieder fuellen. False = nichts (mehr) zu spielen."""
         cfg = self._always
@@ -284,6 +333,8 @@ class Bot:
             return False
         if cfg["kind"] == "playlist":
             keys = self.store.playlist_keys(cfg["name"]) or []
+        elif cfg["kind"] == "radio":
+            keys = self._radio_shuffled(getattr(self.player.current, "key", None))
         else:
             keys = cfg["keys"]
         if not keys:
@@ -463,6 +514,62 @@ class Bot:
         except Exception:
             log.exception("Command %s fehlgeschlagen", cmd.name)
             await self._note(room_id, "Interner Fehler – siehe Log.", "error", "❌")
+
+    async def _on_media(self, room_id: str, sender: str, name: str, mime: str,
+                        data: bytes) -> None:
+        """Angehaengte Audio-/Videodatei direkt abspielen."""
+        ext = os.path.splitext(name)[1].lower()
+        if not (mime.startswith(("audio/", "video/")) or ext in AUDIO_VIDEO_EXT):
+            return                                   # normaler Dateianhang, nicht fuer uns
+        if not self._allowed(sender):
+            await self._note(room_id, "Das darfst du hier nicht.", "warning", "🚫")
+            return
+        if (self.cfg.call_only_control and not await self._in_call(room_id, sender)):
+            await self._note(
+                room_id, "Steuern können nur Leute, die selbst im Call sind. "
+                         "Tritt dem Call bei und schick die Datei nochmal.", "warning", "🔒")
+            return
+        if not data:
+            await self._note(room_id, f"Datei zu groß (maximal {self.cfg.max_upload_mb} MB).",
+                             "error", "❌")
+            return
+        if room_id in self._busy:
+            await self._note(room_id, "Ich lade gerade schon etwas …", "info", "⏳")
+            return
+        self._busy.add(room_id)
+        try:
+            await self._play_upload(room_id, sender, name, data, ext)
+        except MediaError as exc:
+            await self._note(room_id, str(exc), "error", "❌")
+        except Exception:
+            log.exception("Anhang %s fehlgeschlagen", name)
+            await self._note(room_id, "Interner Fehler – siehe Log.", "error", "❌")
+        finally:
+            self._busy.discard(room_id)
+
+    async def _play_upload(self, room_id: str, sender: str, name: str, data: bytes,
+                           ext: str) -> None:
+        key = "upload:" + hashlib.sha1(data).hexdigest()[:16]
+        os.makedirs(self.cfg.tmp_dir, exist_ok=True)
+        path = os.path.join(self.cfg.tmp_dir, key.replace(":", "_") + (ext or ".bin"))
+        await asyncio.to_thread(_write_file, path, data)
+        try:
+            duration = await asyncio.to_thread(probe_duration, path)
+        except Exception as exc:
+            os.remove(path)
+            raise MediaError("Diese Datei kann ich nicht abspielen.") from exc
+        limit = self.cfg.max_song_seconds
+        if limit and duration > limit:
+            os.remove(path)
+            raise MediaError(f"Zu lang ({fmt_time(duration)}). Maximal {fmt_time(limit)}.")
+        title = os.path.splitext(name)[0][:120] or "Datei"
+        track = self.store.note_request(key, title=title, duration=duration,
+                                        uploader=self._who(sender))
+        self.store.set_file(key, path)
+        self._fetch_room = room_id
+        self._history.append(key)
+        del self._history[:-20]
+        await self._start_key(room_id, key, sender, announce=True)
 
     async def _in_call(self, room_id: str, sender: str) -> bool:
         """Ist der Absender gerade selbst im Call dieses Raums?"""
@@ -656,14 +763,42 @@ class Bot:
             await self._note(room_id, "Wiederholung eingeplant.", "info", "🔁")
             return
 
+        # Laeuft schon etwas (oder wird gerade geladen): hinten anstellen statt abloesen.
+        if self.player.state in ("playing", "paused") or self.player._lock.locked():
+            self.player.enqueue(track.key, sender)
+            pos = len(self.player.queue)
+            eid = self._card_pending.pop(room_id, None)
+            card = cards.track_card("stopped", track.title or track.key,
+                                    note=f"In der Warteschlange (#{pos})", **self._track_meta(track))
+            await self._put_track_card(room_id, card, eid)
+            return
+
         self._history.append(track.key)
         del self._history[:-20]
         await self._start_key(room_id, track.key, sender, announce=True)
 
-    async def _fetch(self, track) -> None:
-        """Titel fuer die Wiedergabe holen: gemerkt (oft gespielt) oder frisch herunterladen."""
+    async def _fetch(self, track, *, quiet: bool = False) -> None:
+        """Titel fuer die Wiedergabe holen: gemerkt (oft gespielt) oder frisch herunterladen.
+
+        quiet=True: Vorladen fuer den Crossfade, waehrend noch ein Titel laeuft –
+        dann keine "laedt herunter"-Karte im Chat."""
+        if track.key.startswith("radio:"):           # Radio-Ordner: Datei liegt dort
+            path = self._radio_files.get(track.key, "")
+            if not path or not os.path.exists(path):
+                raise MediaError("Radio-Datei ist nicht mehr vorhanden.")
+            if not track.duration:
+                try:
+                    self.store.note_request(track.key, duration=await asyncio.to_thread(probe_duration, path))
+                except Exception as exc:
+                    raise MediaError("Diese Radio-Datei kann ich nicht abspielen.") from exc
+            self.store.set_file(track.key, path)
+            return
+        if track.key.startswith("upload:"):          # Chat-Anhang: Datei liegt schon da
+            if not track.playable:
+                raise MediaError("Die angehängte Datei ist nicht mehr vorhanden – bitte neu senden.")
+            return
         want_video = self.player.video_enabled and self.cfg.enable_video
-        room = self._fetch_room or self._notice_room()
+        room = None if quiet else (self._fetch_room or self._notice_room())
         if room:
             card = cards.track_card("downloading", track.title or track.key,
                                     **self._track_meta(track))
@@ -843,9 +978,13 @@ class Bot:
         sub, _, rest = arg.strip().partition(" ")
         sub, rest = sub.lower(), rest.strip()
         cfg = self._always
-        if sub == "":
+        if sub == "" and not cfg:
+            sub = "radio"                      # nacktes !24/7 startet das Radio
+        if sub in ("", "status"):
             if not cfg:
-                await m.send_notice(room_id, "24/7 ist aus. !24/7 song [Link] · !24/7 playlist <name>")
+                await m.send_notice(room_id, "24/7 ist aus. !24/7 radio · !24/7 song [Link] · !24/7 playlist <name>")
+            elif cfg["kind"] == "radio":
+                await m.send_notice(room_id, "📻 24/7 Radio läuft (zufällig aus dem Radio-Ordner). Beenden: !24/7 off")
             elif cfg["kind"] == "playlist":
                 await m.send_notice(room_id, f"♾ 24/7 läuft: Playlist „{cfg['name']}“. Beenden: !24/7 off")
             else:
@@ -872,6 +1011,16 @@ class Bot:
             await m.send_notice(room_id, f"♾ 24/7: {track.title or track.key} läuft in Dauerschleife.")
             if rest or self.player.state == "stopped":
                 await self._play_keys(room_id, sender, [track.key], replace=True)
+        elif sub in ("radio", "random", "zufall"):
+            keys = await asyncio.to_thread(self._radio_shuffled)
+            if not keys:
+                await m.send_notice(room_id, "📻 Der Radio-Ordner ist leer. Lege MP3-Dateien in den Ordner "
+                                             "`radio/` neben der compose.yaml und versuch es nochmal.")
+                return
+            self._always = {"kind": "radio", "keys": []}
+            self._loop_on = False
+            await m.send_notice(room_id, f"📻 24/7 Radio: {len(keys)} Dateien, zufällige Reihenfolge. Beenden: !24/7 off")
+            await self._play_keys(room_id, sender, keys, replace=True)
         elif sub in ("playlist", "pl"):
             keys = self.store.playlist_keys(rest) if rest else None
             if not keys:
@@ -882,7 +1031,7 @@ class Bot:
             await m.send_notice(room_id, f"♾ 24/7: Playlist „{rest}“ läuft in Dauerschleife.")
             await self._play_keys(room_id, sender, list(keys), replace=True)
         else:
-            await m.send_notice(room_id, "Benutzung: !24/7 song [Link] | playlist <name> | off")
+            await m.send_notice(room_id, "Benutzung: !24/7 radio | song [Link] | playlist <name> | off")
 
     # ------------------------------------------------------------------ Listen
     async def _show_queue(self, room_id: str) -> None:

@@ -77,12 +77,13 @@ unabhängig vom Ordnernamen.)
 | `!playlist add <name> [Link]` · `remove <name> <nr>` | Titel hinzufügen (ohne Link: laufender Titel) / entfernen |
 | `!playlist show <name>` · `list` | Inhalt / alle Playlists |
 | `!playlist play <name> [shuffle]` · `enqueue <name>` | abspielen (ersetzt Queue) / hinten anhängen |
+| `!24/7` · `!24/7 radio` | zufällig die MP3s aus dem Ordner `radio/` (Dauerschleife, neue Dateien sofort dabei) |
 | `!24/7 song [Link]` · `!24/7 playlist <name>` · `!24/7 off` | Dauerschleife, Bot bleibt im Call |
 | `!help` | Kommandoliste |
 
 **Wer darf steuern?** Nur Leute, die selbst im Call sind (Element Call oder
 klassischer Call). `!help`, `!status`, `!queue`, `!playlist list|show` und
-`!24/7` ohne Argument gehen für alle im Raum. Abschaltbar mit
+`!24/7 status` gehen für alle im Raum. Abschaltbar mit
 `CALL_ONLY_CONTROL=false`; `ALLOWED_USERS` gilt zusätzlich.
 
 **Auto-Verlassen:** Ist der Song zu Ende und die Warteschlange leer, verlässt
@@ -92,6 +93,24 @@ Playlists liegen in der SQLite-DB (nur Links/Titel, keine Audiodateien).
 
 Deutsche Aliase funktionieren auch (`!abspielen`, `!pausieren`, `!fortsetzen`,
 `!hilfe`, …). Praefix: `!` (konfigurierbar via `BOT_PREFIXES`).
+
+## Übergänge (Crossfade)
+
+Titel aus der Warteschlange werden weich ineinander übergeblendet – wie bei
+Apple Music. Der nächste Titel wird dafür rund 45 Sekunden vorher schon
+geladen, damit er pünktlich bereitliegt. Länge per `CROSSFADE_SECONDS`
+(Standard 6, `0` = aus; bei kurzen Titeln höchstens ein Drittel der Länge).
+`!skip`, `!stop`, Seek und ein neues `!play` blenden nur kurz (0,3 s) aus,
+damit es nicht knackt. Kein Crossfade gibt es, wenn derselbe Titel direkt
+nochmal kommt (Schleife mit leerer Warteschlange, 24/7 mit einem Song).
+
+## Radio-Ordner
+
+MP3s (auch m4a, ogg, opus, flac, wav; Unterordner gehen) in `radio/` neben der
+`compose.yaml` legen, dann im Raum `!24/7 radio`. Der Ordner ist read-only in den
+Container gemountet, der Bot löscht dort nie etwas. Neue Dateien werden bei jedem
+neuen Durchlauf automatisch mitgenommen; kein Neustart nötig. `MAX_SONG_SECONDS`
+gilt für Radio-Dateien nicht. Nach der Änderung einmal `docker compose up -d --build`.
 
 ## Speicher-Regeln
 

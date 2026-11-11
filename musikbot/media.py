@@ -163,6 +163,37 @@ def apply_gain(block: np.ndarray, gain: float) -> np.ndarray:
     return np.clip(block.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
 
 
+def _progress(n: int, t0: float, t1: float) -> np.ndarray:
+    """Fortschritt t0..t1 je Sample (stereo: jeder Wert doppelt fuer L/R)."""
+    t = t0 + (t1 - t0) * (np.arange(n, dtype=np.float32) / max(1, n))
+    return np.repeat(t, 2)
+
+
+def fade_block(block: np.ndarray, g0: float, g1: float) -> np.ndarray:
+    """Lineare Lautstaerke-Rampe von g0 nach g1 ueber einen Block."""
+    n = block.shape[1] // 2
+    ramp = _progress(n, g0, g1)
+    out = block.astype(np.float32).reshape(-1)[: ramp.size] * ramp[: block.shape[1]]
+    return np.clip(out, -32768, 32767).astype(np.int16).reshape(1, -1)
+
+
+def crossfade_mix(old: np.ndarray | None, new: np.ndarray, t0: float, t1: float,
+                  gain: float = 1.0) -> np.ndarray:
+    """Equal-Power-Ueberblendung fuer einen Block: `old` wird leiser (cos), `new` lauter (sin).
+
+    t0/t1 = Fortschritt der Ueberblendung (0..1) am Anfang/Ende dieses Blocks.
+    `old` darf fehlen (Titel schon zu Ende) oder kuerzer/laenger sein als `new`.
+    """
+    t = _progress(new.shape[1] // 2, t0, t1)[: new.shape[1]]
+    angle = np.clip(t, 0.0, 1.0) * (np.pi / 2)
+    mixed = new.astype(np.float32).reshape(-1) * np.sin(angle)
+    if old is not None:
+        a = old.astype(np.float32).reshape(-1)
+        a = np.pad(a, (0, mixed.size - a.size)) if a.size < mixed.size else a[: mixed.size]
+        mixed += a * np.cos(angle)
+    return np.clip(mixed * gain, -32768, 32767).astype(np.int16).reshape(1, -1)
+
+
 def silence_block(samples: int = FRAME_SAMPLES) -> np.ndarray:
     return np.zeros((1, samples * 2), dtype=np.int16)
 

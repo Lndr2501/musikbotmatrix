@@ -42,6 +42,7 @@ COMMANDS: tuple[str, ...] = tuple(sorted(ALIASES))
 HELP = """Kommandos:
 !play <Link oder Suchbegriff> – Link von praktisch jeder Video-/Audioseite (yt-dlp), sonst YouTube-Suche
     Suche woanders: !play sc: <Begriff> (SoundCloud) · bili: · nico:
+Audio-/Videodatei an die Nachricht anhängen – der Bot spielt sie direkt ab
 !pause – pausieren · !resume – weiter
 !stop – stoppen · !skip – nächster Titel · !previous – vorheriger
 !queue – Warteschlange · !clear – Warteschlange leeren
@@ -55,6 +56,7 @@ HELP = """Kommandos:
     (ohne Link bei add: der laufende Titel)
 !fav – laufenden Titel merken · !fav list · !fav remove <nr> · !fav play [shuffle] (deine Favoriten)
 !stats – meistgespielte Titel und wer am meisten Musik hört
+!24/7 (oder !24/7 radio) – zufällig die MP3s aus dem Radio-Ordner, Dauerschleife
 !24/7 song [Link] · !24/7 playlist <name> · !24/7 off – Dauerschleife, Bot bleibt im Call
 !hilfe – diese Liste
 Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue,
@@ -100,5 +102,5 @@ def is_read_only(name: str, arg: str = "") -> bool:
     if name == "fav":                      # merken/ansehen darf jeder, abspielen steuert
         return sub != "play"
     if name == "always":
-        return sub == ""
+        return sub == "status"
     return False

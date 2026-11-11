@@ -87,9 +87,12 @@ class Track:
 
 class TrackStore:
     def __init__(self, db_path: str, tmp_dir: str, *legacy_dirs: str,
-                 hot_dir: str = "", hot_after: int = 5, hot_days: float = 3.0) -> None:
+                 hot_dir: str = "", hot_after: int = 5, hot_days: float = 3.0,
+                 keep_dirs: tuple[str, ...] = ()) -> None:
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.tmp_dir = tmp_dir
+        # Eigene Ordner (z. B. Radio): Dateien darin werden nie geloescht.
+        self.keep_dirs = tuple(os.path.abspath(d) for d in keep_dirs if d)
         self.hot_dir = hot_dir if hot_after > 0 else ""
         self.hot_after = hot_after
         self.hot_seconds = int(hot_days * 86400)
@@ -152,6 +155,10 @@ class TrackStore:
     # ------------------------------------------------- oft gespielt: behalten
     def _in_hot(self, path: str) -> bool:
         return bool(self.hot_dir) and os.path.dirname(os.path.abspath(path)) == os.path.abspath(self.hot_dir)
+
+    def _in_keep(self, path: str) -> bool:
+        full = os.path.abspath(path)
+        return any(full.startswith(d + os.sep) for d in self.keep_dirs)
 
     def hot_path(self, key: str, want_video: bool = False) -> str | None:
         """Gemerkte Datei des Titels (und Nutzung vermerken), sonst None. Ohne Video reicht jede Datei."""
@@ -231,7 +238,7 @@ class TrackStore:
             if track is None or not track.abs_path:
                 return
             path, track.abs_path = track.abs_path, ""
-        if self._in_hot(path) or self._keep_hot(key, path):
+        if self._in_keep(path) or self._in_hot(path) or self._keep_hot(key, path):
             return
         try:
             os.remove(path)

@@ -153,3 +153,48 @@ def test_player_shows_cover_only_for_tracks_without_video():
     p._source = SimpleNamespace(has_video=True)                 # echtes Video: kein Titelbild
     p.set_cover("k2", cover_frame(_jpeg(64, 64), 64, 36))
     assert sink.take_video() is None
+
+
+def test_pick_lyric_entry_requires_matching_song():
+    from musikbot.ytdl import pick_lyric_entry
+    # Echter Fall: Suche nach Pashanim lieferte ein SXTN-Lyric-Video -> darf nicht genommen werden
+    wrong = [{"title": "SXTN - Von Party zu Party (lyrics)", "channel": "Melerah"}]
+    assert pick_lyric_entry(wrong, "mittelmeer pashanim goth remix") is None
+    good = wrong + [{"title": "Pashanim - Mittelmeer (Goth Remix) [Lyrics]", "channel": "x"}]
+    assert pick_lyric_entry(good, "mittelmeer pashanim goth remix")["title"].startswith("Pashanim")
+
+
+def test_pick_lyric_entry_prefers_lyric_titles():
+    from musikbot.ytdl import pick_lyric_entry
+    entries = [
+        {"title": "Song (Official Video)"},
+        None,
+        {"title": "Song (Lyric Video)"},
+        {"title": "Song - Lyrics"},
+    ]
+    assert pick_lyric_entry(entries, "song")["title"] == "Song (Lyric Video)"
+    assert pick_lyric_entry([{"title": "Song (Official Video)"}], "song") is None
+    assert pick_lyric_entry([], "song") is None
+
+
+def test_choose_entry_prefers_soundcloud_remix_over_youtube_original():
+    from musikbot.ytdl import choose_entry
+    yt = [{"title": "Pashanim - Mittelmeer", "channel": "Pashanim Nulldreinull"}]
+    sc = [{"title": "Mittelmeer (Goth Remix)", "uploader": "fantemix"}]
+    got = choose_entry(yt, [], sc, "mittelmeer pashanim goth remix")
+    assert got["title"] == "Mittelmeer (Goth Remix)"
+
+
+def test_choose_entry_prefers_original_and_lyrics_without_remix_in_query():
+    from musikbot.ytdl import choose_entry
+    yt = [{"title": "Pashanim - Mittelmeer", "channel": "Pashanim"}]
+    ly = [{"title": "Pashanim - Mittelmeer (Lyrics)", "channel": "x"}]
+    sc = [{"title": "Mittelmeer (Goth Remix)", "uploader": "fantemix"}]
+    assert choose_entry(yt, ly, sc, "pashanim mittelmeer")["title"] == "Pashanim - Mittelmeer (Lyrics)"
+    assert choose_entry(yt, [], sc, "pashanim mittelmeer")["title"] == "Pashanim - Mittelmeer"
+
+
+def test_choose_entry_falls_back_to_first_youtube_hit():
+    from musikbot.ytdl import choose_entry
+    yt = [{"title": "Etwas ganz anderes"}]
+    assert choose_entry(yt, [], [{"title": "auch nicht"}], "xyz qwe")["title"] == "Etwas ganz anderes"

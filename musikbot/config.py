@@ -59,6 +59,8 @@ class Config:
 
     # --- Dateien -----------------------------------------------------------
     data_dir: str = "/data"
+    # Radio-Ordner (eigene MP3s fuer !24/7 radio); wird nie veraendert oder geloescht.
+    radio_dir: str = "/radio"
 
     # --- Medien ------------------------------------------------------------
     # Wer oft gespielt wird, bleibt gespeichert: ab `hot_after` Downloads (0 = nie speichern),
@@ -67,11 +69,15 @@ class Config:
     hot_days: float = 3.0
     # Laengere Titel werden abgelehnt (0 = kein Limit).
     max_song_seconds: int = 600
+    # Groesste Datei, die als Anhang abgespielt wird (MB).
+    max_upload_mb: int = 100
     enable_video: bool = True
     video_height: int = 480
     video_fps: float = 24.0
     video_bitrate: int = 600_000
     default_volume: int = 60
+    # Ueberblendung zwischen zwei Titeln aus der Warteschlange (Sekunden, 0 = aus).
+    crossfade_seconds: float = 6.0
     # Call automatisch verlassen, wenn so lange nichts spielt (0 = nie).
     idle_leave_seconds: int = 60
     # Call verlassen, sobald der letzte Titel zu Ende ist und die Warteschlange leer.
@@ -115,6 +121,8 @@ class Config:
             raise ConfigError(f"MESH_INVITE muss auto|all|off sein, ist {self.mesh_invite!r}")
         if not (0 <= self.default_volume <= 300):
             raise ConfigError("DEFAULT_VOLUME muss zwischen 0 und 300 liegen")
+        if not (0 <= self.crossfade_seconds <= 20):
+            raise ConfigError("CROSSFADE_SECONDS muss zwischen 0 und 20 liegen")
 
     @property
     def use_turn(self) -> bool:
@@ -170,7 +178,9 @@ class Config:
             prefixes=_list("BOT_PREFIXES", ("!",)),
             auto_join_invites=_bool("AUTO_JOIN_INVITES", True),
             data_dir=_str("DATA_DIR", "/data"),
+            radio_dir=_str("RADIO_DIR", "/radio"),
             max_song_seconds=_int("MAX_SONG_SECONDS", 600),
+            max_upload_mb=_int("MAX_UPLOAD_MB", 100),
             hot_after=_int("HOT_AFTER", 5),
             hot_days=_float("HOT_DAYS", 3.0),
             enable_video=_bool("ENABLE_VIDEO", True),
@@ -178,6 +188,7 @@ class Config:
             video_fps=_float("VIDEO_FPS", 24.0),
             video_bitrate=_int("VIDEO_BITRATE", 600_000),
             default_volume=_int("DEFAULT_VOLUME", 60),
+            crossfade_seconds=_float("CROSSFADE_SECONDS", 6.0),
             idle_leave_seconds=_int("IDLE_LEAVE_SECONDS", 60),
             leave_when_done=_bool("LEAVE_WHEN_DONE", True),
             call_only_control=_bool("CALL_ONLY_CONTROL", True),

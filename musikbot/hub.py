@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 import av
 import numpy as np
 
+from .media import fade_block
+
 MAX_AUDIO_BLOCKS = 75  # 75 * 20 ms = 1,5 s
 MAX_VIDEO_FRAMES = 4
 
@@ -54,6 +56,20 @@ class Sink:
         self.audio.clear()
         self.video.clear()
 
+    def fade_out(self, seconds: float) -> float:
+        """Statt hart abzuschneiden (Knacken): die naechsten `seconds` im Puffer
+        ausblenden, den Rest verwerfen. Gibt die Laenge des Rests in Sekunden zurueck."""
+        keep = list(self.audio)[: max(0, int(round(seconds / 0.02)))]
+        self.audio.clear()
+        self.video.clear()
+        total = sum(b.shape[1] // 2 for b in keep)
+        done = 0
+        for block in keep:
+            n = block.shape[1] // 2
+            self.audio.append(fade_block(block, 1 - done / total, 1 - (done + n) / total))
+            done += n
+        return total / 48000
+
 
 class Hub:
     def __init__(self) -> None:
@@ -89,3 +105,7 @@ class Hub:
     def clear(self) -> None:
         for sink in self.sinks:
             sink.clear()
+
+    def fade_out(self, seconds: float) -> float:
+        """Alle Puffer kurz ausblenden (siehe Sink.fade_out); gibt den laengsten Rest zurueck."""
+        return max((sink.fade_out(seconds) for sink in self.sinks), default=0.0)

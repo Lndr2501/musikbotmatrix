@@ -13,6 +13,7 @@ import os
 from typing import Awaitable, Callable, Optional
 
 import nio
+from nio.crypto.attachments import decrypt_attachment
 from nio.responses import (JoinedMembersResponse, KeysQueryResponse,
                           LoginResponse)
 
@@ -22,6 +23,10 @@ from .config import Config
 log = logging.getLogger("musikbot.matrix")
 
 SYNC_TIMEOUT_MS = 30_000
+
+PLAIN_MEDIA = (nio.RoomMessageAudio, nio.RoomMessageVideo, nio.RoomMessageFile)
+ENCRYPTED_MEDIA = (nio.RoomEncryptedAudio, nio.RoomEncryptedVideo, nio.RoomEncryptedFile)
+MEDIA_EVENTS = PLAIN_MEDIA + ENCRYPTED_MEDIA
 
 
 class Matrix:
@@ -44,6 +49,8 @@ class Matrix:
 
         # Callbacks (von bot.py gesetzt):
         self.on_text: Callable[[str, str, str], Awaitable[None]] | None = None      # room_id, sender, body
+        # room_id, sender, Dateiname, MIME-Typ, Inhalt (bereits entschluesselt)
+        self.on_media: Callable[[str, str, str, str, bytes], Awaitable[None]] | None = None
         self.on_call: Callable[[Optional[str], str, Optional[str], dict], Awaitable[None]] | None = None  # room_id|None, sender, device, content
         self.on_member_join: Callable[[str, str], Awaitable[None]] | None = None    # room_id, user_id
         self.on_joined: Callable[[str], Awaitable[None]] | None = None              # room_id (Bot beigetreten)
@@ -164,6 +171,8 @@ class Matrix:
                      (event.body or "")[:80])
             if self.on_text:
                 await self.on_text(room.room_id, event.sender, event.body or "")
+        elif isinstance(event, MEDIA_EVENTS):
+            await self._media_cb(room, event)
         elif isinstance(event, nio.MegolmEvent):
             # Verschluesseltes Event, dessen Raum-Key fehlt. nio fragt dafuer
             # NICHT automatisch nach (nur bei gezw-Session-Faellen) -> selbst
@@ -185,6 +194,31 @@ class Matrix:
             if self.on_call:
                 await self.on_call(room.room_id, event.sender, None, content)
         await self._membership_cb(room, event)
+
+    async def _media_cb(self, room: nio.MatrixRoom, event) -> None:
+        """Angehaengte Datei laden (ggf. entschluesseln) und an den Bot geben."""
+        if not self.on_media:
+            return
+        content = (getattr(event, "source", {}) or {}).get("content") or {}
+        info = content.get("info") or {}
+        mime = str(info.get("mimetype") or getattr(event, "mimetype", "") or "")
+        name = str(content.get("filename") or event.body or "datei")
+        size = info.get("size")
+        if isinstance(size, int) and size > self.cfg.max_upload_mb * 1024 * 1024:
+            await self.on_media(room.room_id, event.sender, name, mime, b"")
+            return
+        try:
+            resp = await self.client.download(mxc=event.url)
+            if not isinstance(resp, nio.MemoryDownloadResponse):
+                log.warning("Datei-Download fehlgeschlagen: %s", resp)
+                return
+            data = resp.body
+            if isinstance(event, ENCRYPTED_MEDIA):
+                data = decrypt_attachment(data, event.key["k"], event.hashes["sha256"], event.iv)
+        except Exception:
+            log.exception("Datei %s konnte nicht geladen werden", name)
+            return
+        await self.on_media(room.room_id, event.sender, name, mime, data)
 
     async def _request_room_key(self, event: nio.MegolmEvent) -> None:
         """Raum-Key beim Absender anfragen (m.room_key_request als To-Device)."""

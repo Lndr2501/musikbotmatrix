@@ -44,7 +44,7 @@ def test_command_aliases_and_read_only():
     assert is_read_only("playlist", "show foo")
     assert not is_read_only("playlist", "play foo")
     assert not is_read_only("playlist", "add foo http://x")
-    assert is_read_only("always", "") and not is_read_only("always", "off")
+    assert is_read_only("always", "status") and not is_read_only("always", "") and not is_read_only("always", "off")
     for n in ("play", "pause", "skip", "stop", "volume", "joincall", "leavecall", "clear"):
         assert not is_read_only(n)
 

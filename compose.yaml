@@ -14,6 +14,8 @@ services:
       # wird aber mit "compose down -v" bzw. "Delete + Remove volumes" in der UI
       # zuverlaessig mit geloescht – es liegen keine Dateien im Projektordner.
       - data:/data
+      # Radio-Ordner: MP3s hier reinlegen (read-only fuer den Bot), dann !24/7 radio
+      - ./radio:/radio:ro
 
 volumes:
   data:
