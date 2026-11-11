@@ -45,6 +45,7 @@ class Matrix:
         self._room_ids: list[str] = []
         self._devices: dict[str, dict[str, list[str]]] = {}  # room -> user -> devs
         self._key_req: set[str] = set()  # Session-IDs, fuer die Keys schon angefragt wurden
+        self._direct: dict[str, list[str]] = {}   # m.direct: Nutzer -> Privatchat-Raeume
         self._stop = asyncio.Event()
 
         # Callbacks (von bot.py gesetzt):
@@ -114,15 +115,22 @@ class Matrix:
     async def run(self) -> None:
         """Sync-Loop mit automatischem Wiederanlauf."""
         backoff = 1
+        # Erster Sync mit vollem Raumzustand: nio merkt sich Raeume nicht ueber einen
+        # Neustart hinweg – ohne das kennt der Bot alte Raeume (z. B. Privatchats) erst,
+        # wenn dort wieder etwas passiert.
+        full_state = True
         while not self._stop.is_set():
             try:
                 resp = await self.client.sync(
-                    timeout=SYNC_TIMEOUT_MS, since=self.client.next_batch,
-                    set_presence="online")
+                    timeout=0 if full_state else SYNC_TIMEOUT_MS, since=self.client.next_batch,
+                    full_state=full_state, set_presence="online")
             except Exception:
                 log.exception("Sync-Fehler")
                 resp = None
             if isinstance(resp, nio.SyncResponse):
+                if full_state:
+                    full_state = False
+                    log.info("Raeume geladen: %d", len(self.client.rooms))
                 backoff = 1
                 await self._crypto_housekeeping()
                 await self._accept_invites()
@@ -348,18 +356,40 @@ class Matrix:
             log.exception("Senden (%s) fehlgeschlagen", evtype)
             return None
 
-    def find_dm(self, user_id: str) -> Optional[str]:
-        """Bestehender Zweier-Raum mit `user_id` (beigetreten oder eingeladen)."""
+    def _is_dm_with(self, room_id: str, user_id: str) -> bool:
+        room = self.client.rooms.get(room_id)
+        if room is None:
+            return False
         me = (self.cfg.matrix_user_id or self.cfg.user).lower()
         want = user_id.lower()
-        for room_id, room in self.client.rooms.items():
-            members = {u.lower() for u in list(room.users) + list(getattr(room, "invited_users", {}))}
-            if want in members and members <= {me, want}:
+        members = {u.lower() for u in list(room.users) + list(getattr(room, "invited_users", {}))}
+        return want in members and members <= {me, want}
+
+    def find_dm(self, user_id: str) -> Optional[str]:
+        """Bestehender Zweier-Raum mit `user_id` (beigetreten oder eingeladen).
+        Bevorzugt die Raeume aus m.direct (zuletzt angelegter zuerst)."""
+        for room_id in reversed(self._direct.get(user_id.lower(), [])):
+            if self._is_dm_with(room_id, user_id):
+                return room_id
+        for room_id in self.client.rooms:
+            if self._is_dm_with(room_id, user_id):
                 return room_id
         return None
 
+    async def load_direct(self) -> None:
+        """m.direct (Liste der Privatchats je Nutzer) vom Server holen."""
+        from urllib.parse import quote
+        me = self.cfg.matrix_user_id or self.cfg.user
+        try:
+            data = await self.http_json("GET", self._cs(f"/user/{quote(me)}/account_data/m.direct"))
+        except Exception:
+            data = {}
+        self._direct = {u.lower(): list(rooms) for u, rooms in data.items() if isinstance(rooms, list)}
+
     async def send_dm(self, user_id: str, body: str, html: str = "") -> bool:
-        """Direktnachricht schicken; legt den Zweier-Raum bei Bedarf an (verschluesselt)."""
+        """Direktnachricht schicken; legt den Zweier-Raum nur an, wenn es noch keinen gibt."""
+        if not self._direct:
+            await self.load_direct()
         room_id = self.find_dm(user_id)
         if room_id is None:
             state = ([{"type": "m.room.encryption", "state_key": "",
@@ -400,6 +430,7 @@ class Matrix:
             if room_id not in rooms:
                 data[user_id] = rooms + [room_id]
                 await self.http_json("PUT", url, data)
+            self._direct[user_id.lower()] = data[user_id]
         except Exception:
             log.warning("m.direct nicht gesetzt", exc_info=True)
 

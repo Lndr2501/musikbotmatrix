@@ -226,3 +226,25 @@ def test_quick_returns_fast_but_reports_quick_errors():
             await bot._quick(broken())
 
     asyncio.run(go())
+
+
+def test_find_dm_reuses_existing_private_chat():
+    from musikbot.matrix import Matrix
+
+    m = Matrix.__new__(Matrix)
+    m.cfg = SimpleNamespace(matrix_user_id="@bot:x", user="@bot:x")
+    room = lambda users, invited=(): SimpleNamespace(  # noqa: E731
+        users={u: None for u in users}, invited_users={u: None for u in invited})
+    m.client = SimpleNamespace(rooms={
+        "!group": room(["@bot:x", "@lndr:x", "@anna:x"]),
+        "!old": room(["@bot:x", "@lndr:x"]),
+        "!new": room(["@bot:x"], invited=["@lndr:x"]),
+        "!left": room(["@bot:x"]),
+    })
+    m._direct = {}
+    assert m.find_dm("@lndr:x") in ("!old", "!new")          # nie der Gruppenraum
+    m._direct = {"@lndr:x": ["!old", "!gone", "!new"]}
+    assert m.find_dm("@LNDR:x") == "!new"                     # m.direct, neuester zuerst
+    m._direct = {"@lndr:x": ["!left"]}                        # Nutzer hat den Raum verlassen
+    assert m.find_dm("@lndr:x") in ("!old", "!new")
+    assert m.find_dm("@anna:x") is None

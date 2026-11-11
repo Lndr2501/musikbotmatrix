@@ -69,6 +69,7 @@ class Dashboard:
         self.bot = bot
         self.auth = bot.webauth
         self._runner: web.AppRunner | None = None
+        self._index_html = self._build_index()
         self.app = web.Application(middlewares=[_security], client_max_size=64 * 1024)
         r = self.app.router
         r.add_get("/", self.index)
@@ -106,9 +107,24 @@ class Dashboard:
         return user
 
     async def index(self, request: web.Request) -> web.StreamResponse:
-        resp = web.FileResponse(os.path.join(STATIC_DIR, "index.html"))
+        resp = web.Response(text=self._index_html, content_type="text/html")
         resp.headers["Cache-Control"] = "no-cache"
         return resp
+
+    @staticmethod
+    def _build_index() -> str:
+        """index.html mit Versions-Anhang an allen /static/-Links (?v=<Hash der Dateien>), damit
+        Browser und Cloudflare nach einem Update nie alte Dateien ausliefern."""
+        import hashlib
+        import re
+        digest = hashlib.sha256()
+        for name in sorted(os.listdir(STATIC_DIR)):
+            with open(os.path.join(STATIC_DIR, name), "rb") as fh:
+                digest.update(name.encode() + fh.read())
+        version = digest.hexdigest()[:10]
+        with open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8") as fh:
+            html = fh.read()
+        return re.sub(r'(["(])(/static/[\w.-]+)', rf"\1\2?v={version}", html)
 
     async def link(self, request: web.Request) -> web.StreamResponse:
         data = await request.json()

@@ -15,6 +15,7 @@ import re
 import time
 
 import aiohttp
+import nio
 
 from . import cards
 from .calls import CallManager
@@ -117,7 +118,32 @@ class Bot:
         turn = await self.matrix.fetch_turn()
         if turn:
             self.calls.set_turn(turn)
+        await self._ensure_avatar()
         return rooms
+
+    async def _ensure_avatar(self) -> None:
+        """Logo als Profilbild des Bots setzen – nur wenn es sich geaendert hat."""
+        path = os.path.join(os.path.dirname(__file__), "static", "avatar.png")
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return
+        digest = hashlib.sha256(data).hexdigest()
+        if self.store.setting("avatar_sha256") == digest:
+            return
+        try:
+            mxc = await self.matrix.upload_image(data, "image/png", "musikbot.png")
+            if not mxc:
+                return
+            resp = await self.matrix.client.set_avatar(mxc)
+            if isinstance(resp, nio.ErrorResponse):
+                log.warning("Profilbild nicht gesetzt: %s", resp)
+                return
+            self.store.set_setting("avatar_sha256", digest)
+            log.info("Profilbild gesetzt (%s)", mxc)
+        except Exception:
+            log.warning("Profilbild nicht gesetzt", exc_info=True)
 
     async def run(self) -> None:
         rooms = await self.startup()
@@ -1117,6 +1143,7 @@ class Bot:
                 "Nicht weitergeben: wer den Link hat, kann den Bot steuern. "
                 "Neuer Link (der alte wird ungültig): <code>!dashboard</code></p>")
         who = self._who(sender)
+        await self.matrix.load_direct()
         in_dm = self.matrix.find_dm(sender) == room_id
         if in_dm:
             pass                                    # Befehl kam schon im Privatchat: Link kommt hierher
