@@ -32,6 +32,9 @@ from .ytdl import MediaError, MediaResolver
 
 log = logging.getLogger("musikbot")
 
+CALL_CHECK_SECONDS = 10   # so oft wird geprueft, ob noch jemand im Call ist
+EMPTY_GRACE_SECONDS = 20  # so lange darf der Call leer sein, bevor der Bot geht
+
 AUDIO_VIDEO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".flac", ".wav", ".wma",
                    ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".3gp"}
 
@@ -61,6 +64,7 @@ class Bot:
     _autoplay_busy = False
     _last_finished = None
     _recent: tuple | list = ()
+    _alone_since: float | None = None
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -159,11 +163,61 @@ class Bot:
     async def run(self) -> None:
         rooms = await self.startup()
         log.info("Bot bereit. Raeume: %s", ", ".join(rooms) or "(keine konfiguriert)")
-        idle = asyncio.create_task(self._idle_watch(), name="idle-leave")
-        try:
-            await self.matrix.run()
-        finally:
-            idle.cancel()
+        self.start_watchers()
+        await self.matrix.run()
+
+    def start_watchers(self) -> None:
+        """Hintergrund-Waechter: Leerlauf (nichts spielt) und leerer Call (niemand hoert zu)."""
+        for coro, name in ((self._idle_watch(), "idle-leave"), (self._call_watch(), "empty-call")):
+            task = asyncio.create_task(coro, name=name)
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+
+    async def _call_watch(self) -> None:
+        """Verlaesst den Call und stoppt die Musik, wenn niemand mehr zuhoert."""
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(CALL_CHECK_SECONDS)
+            try:
+                await self._check_empty(loop.time())
+            except Exception:
+                log.exception("Leer-Call-Check fehlgeschlagen")
+
+    async def _someone_listening(self) -> bool:
+        ec = self.ecall
+        if ec.active:
+            others = ec.livekit_others()
+            if others is not None:
+                return others > 0
+            await ec.load_members(ec.room_id)
+            return bool(ec.others_in_call(ec.room_id))
+        return any(p.live and p.answered for p in self.calls.peers)
+
+    async def _check_empty(self, now: float) -> bool:
+        """Ein Pruefschritt. True, wenn der Bot gerade wegen eines leeren Calls gegangen ist."""
+        in_call = self.ecall.active or bool(self.calls.peers)
+        if self._always or not (in_call or self.player.state == "playing") \
+                or await self._someone_listening():
+            self._alone_since = None
+            return False
+        if self._alone_since is None:
+            self._alone_since = now
+            return False
+        if now - self._alone_since < EMPTY_GRACE_SECONDS:
+            return False
+        self._alone_since = None
+        room = self.ecall.room_id or self.calls.active_room or self._notice_room()
+        log.info("Niemand mehr im Call – verlasse ihn und stoppe die Musik")
+        await self.ecall.leave()
+        await self.calls.hangup_all("empty")
+        playing = self.player.state != "stopped"
+        if playing:
+            await self.player.stop()
+        if room:
+            await self._finish_now_card(room)
+            await self._note(room, "Niemand mehr im Call – "
+                             + ("Musik gestoppt und " if playing else "") + "ich bin raus.", "info", "👋")
+        return True
 
     async def _idle_watch(self) -> None:
         """Verlaesst den Call, wenn IDLE_LEAVE_SECONDS lang nichts spielt."""

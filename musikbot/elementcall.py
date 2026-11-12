@@ -92,6 +92,16 @@ class ElementCall:
         return {k: v for k, v in active_members(self.members.get(room_id, {})).items()
                 if k != me}
 
+    def livekit_others(self) -> Optional[int]:
+        """Wie viele andere gerade wirklich mit dem Medienserver verbunden sind (None: nicht verbunden).
+        Verlaesslicher als die call.member-Eintraege, die nach einem Absturz stundenlang stehen bleiben."""
+        if self._lk is None:
+            return None
+        try:
+            return len(self._lk.remote_participants)
+        except Exception:  # noqa: BLE001
+            return None
+
     def users_in_call(self, room_id: str) -> set[str]:
         """Nutzer-IDs (klein geschrieben) aller aktiven Teilnehmer ausser dem Bot."""
         return {u.lower() for (u, _d) in self.others_in_call(room_id)}

@@ -48,6 +48,7 @@ async def amain() -> int:
             await run_check(bot)
             return 0
         await bot.start_web()
+        bot.start_watchers()
         log = logging.getLogger("musikbot")
         log.info("Bot laeuft. Raeume: %s", ", ".join(rooms) or "(keine)")
         sync = asyncio.create_task(bot.matrix.run())
