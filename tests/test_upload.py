@@ -25,3 +25,16 @@ def test_probe_rejects_non_media(tmp_path):
     f.write_bytes(b"das ist kein audio")
     with pytest.raises(Exception):
         probe_duration(str(f))
+
+
+def test_voice_messages_are_not_music_requests():
+    from musikbot.matrix import is_voice_message
+
+    voice = {"msgtype": "m.audio", "body": "Voice message", "url": "mxc://x/y",
+             "org.matrix.msc3245.voice": {},
+             "org.matrix.msc1767.audio": {"duration": 3000, "waveform": [1, 2, 3]}}
+    song = {"msgtype": "m.audio", "body": "song.mp3", "url": "mxc://x/z",
+            "info": {"mimetype": "audio/mpeg"}}
+    assert is_voice_message(voice)
+    assert not is_voice_message(song)
+    assert not is_voice_message({})

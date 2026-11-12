@@ -29,6 +29,14 @@ ENCRYPTED_MEDIA = (nio.RoomEncryptedAudio, nio.RoomEncryptedVideo, nio.RoomEncry
 MEDIA_EVENTS = PLAIN_MEDIA + ENCRYPTED_MEDIA
 
 
+VOICE_FLAG = "org.matrix.msc3245.voice"   # so markieren Element und Diddy Sprachnachrichten
+
+
+def is_voice_message(content: dict) -> bool:
+    """True fuer Sprachnachrichten (MSC3245) – die sind kein Musikwunsch."""
+    return isinstance(content, dict) and VOICE_FLAG in content
+
+
 class Matrix:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -208,6 +216,8 @@ class Matrix:
         if not self.on_media:
             return
         content = (getattr(event, "source", {}) or {}).get("content") or {}
+        if is_voice_message(content):
+            return                   # Sprachnachricht unter Menschen – nicht fuer den Bot
         info = content.get("info") or {}
         mime = str(info.get("mimetype") or getattr(event, "mimetype", "") or "")
         name = str(content.get("filename") or event.body or "datei")
