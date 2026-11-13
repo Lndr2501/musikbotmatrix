@@ -94,6 +94,9 @@ class ElementCall:
         self._lock = asyncio.Lock()
         # Wird vom Bot gesetzt: True = nicht verlassen, auch wenn der Call leer ist (24/7).
         self.keep_alive = None
+        # Vom Bot gesetzt: wird aufgerufen, wenn in einem Raum, in dem wir (noch) nicht
+        # im Call sind, jemand dem Call beitritt (Play kam vor dem Call).
+        self.on_call_started = None
 
     # ------------------------------------------------------------ Zustand
     @property
@@ -131,6 +134,8 @@ class ElementCall:
             c["_sender"] = sender
         self.members.setdefault(room_id, {})[state_key] = c
         if self.room_id != room_id:
+            if self.on_call_started and self.others_in_call(room_id):
+                asyncio.ensure_future(self.on_call_started(room_id))
             return
         others = self.others_in_call(room_id)
         if not others and not (self.keep_alive and self.keep_alive()):
@@ -183,6 +188,7 @@ class ElementCall:
         room = rtc.Room()
         await room.connect(url, jwt, options)
         self._lk = room
+        room.on("disconnected", lambda *_: self._on_lk_disconnected(room, room_id))
         lid = room.local_participant.identity
         if lid != identity:
             log.warning("LiveKit-Identity %s statt erwartet %s", lid, identity)
@@ -214,6 +220,14 @@ class ElementCall:
         log.info("Element Call beigetreten: %s als %s (E2EE %s, %d andere)",
                  room_id, lid, "an" if encrypted else "aus",
                  len(self.others_in_call(room_id)))
+
+    def _on_lk_disconnected(self, room, room_id: str) -> None:
+        """Medienserver hat die Verbindung beendet: Zustand aufraeumen, sonst haelt sich
+        der Bot fuer 'im Call' und tritt bei !play nie wieder bei."""
+        if self._lk is not room or self.room_id != room_id:
+            return
+        log.warning("LiveKit-Verbindung getrennt in %s – Bot gilt als nicht mehr im Call", room_id)
+        asyncio.ensure_future(self.leave())
 
     async def _resolve_service_url(self, room_id: str) -> Optional[str]:
         if self.cfg.livekit_service_url:

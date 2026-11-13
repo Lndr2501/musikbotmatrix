@@ -104,6 +104,8 @@ class Bot:
         self._always: dict | None = None
         self._radio_files: dict[str, str] = {}      # Radio-Key -> Dateipfad
         self.ecall.keep_alive = lambda: self._always is not None
+        self.ecall.on_call_started = self._on_call_started
+        self._want_call: str | None = None          # Raum: Play kam, Call fehlte noch -> spaeter beitreten
         # Web-Dashboard: Login-Daten liegen in derselben Datenbank
         self.webauth = WebAuth(self.store.db, self.store._lock)
         self.dashboard = None
@@ -448,6 +450,7 @@ class Bot:
         return self.ecall.room_id or self.calls.active_room or self._fetch_room or None
 
     async def _leave_call(self, room: str | None, text: str) -> None:
+        self._want_call = None
         if not (self.ecall.active or self.calls.peers):
             if room:
                 await self.matrix.send_notice(room, "Warteschlange ist leer.")
@@ -878,6 +881,7 @@ class Bot:
             if await self._join_element_call(room_id, force=True):
                 await m.send_notice(room_id, "📞 Bin im Element Call.")
         elif name == "leavecall":
+            self._want_call = None
             await self.ecall.leave()
             await self.calls.hangup_all("user")
             await m.send_notice(room_id, "Call verlassen.")
@@ -957,6 +961,8 @@ class Bot:
 
         # Laeuft schon etwas (oder wird gerade geladen): hinten anstellen statt abloesen.
         if self.player.state in ("playing", "paused") or self.player._lock.locked():
+            if self.player.state in ("playing", "paused") and self.ecall.room_id != room_id:
+                await self._join_element_call(room_id, force=False)
             self.player.enqueue(track.key, sender)
             pos = len(self.player.queue)
             eid = self._card_pending.pop(room_id, None)
@@ -1039,15 +1045,30 @@ class Bot:
         try:
             await self.ecall.load_members(room_id)
             if not force and not self.ecall.others_in_call(room_id):
-                await m.send_notice(room_id, "Kein Call aktiv – starte den Anruf, "
-                                             "dann !joincall (ich spiele trotzdem schon).")
+                # Call evtl. noch nicht gestartet oder Mitgliedschaft noch nicht sichtbar:
+                # merken und automatisch beitreten, sobald jemand im Call auftaucht.
+                self._want_call = room_id
+                log.info("Kein aktiver Call in %s erkannt – trete bei, sobald jemand beitritt", room_id)
+                await m.send_notice(room_id, "Kein Call aktiv – ich spiele schon und trete automatisch "
+                                             "bei, sobald du im Call bist (oder !joincall).")
                 return False
+            self._want_call = None
             await self.ecall.join(room_id)
             return True
         except Exception as exc:
             log.exception("Element Call beitreten fehlgeschlagen")
             await m.send_notice(room_id, f"Call beitreten fehlgeschlagen: {exc}")
             return False
+
+    async def _on_call_started(self, room_id: str) -> None:
+        """Jemand ist einem Call beigetreten, waehrend Musik laeuft/laedt und der Bot noch draussen ist."""
+        if self._want_call != room_id or self.ecall.room_id == room_id:
+            return
+        if self.player.state == "stopped" and not self._fetching and not self.player._lock.locked():
+            self._want_call = None                  # nichts (mehr) zu spielen
+            return
+        log.info("Call in %s gestartet – Bot tritt jetzt bei", room_id)
+        await self._join_element_call(room_id, force=True)
 
     # ------------------------------------------------------------------ Playlists
     async def _resolve_for_list(self, room_id: str, query: str):
