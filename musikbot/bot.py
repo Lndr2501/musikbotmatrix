@@ -419,7 +419,8 @@ class Bot:
             nxt.append({"title": (t.title if t else "") or key, "artist": (t.uploader if t else "") or ""})
         self._card_next[room] = self._next_sig()
         return {"room": getattr(rooms.get(room), "display_name", "") or "", "requested_by": by,
-                "up_next": nxt, "player": cards.player_controls(paused, self._loop_on)}
+                "up_next": nxt, "player": cards.player_controls(
+                    paused, self._loop_on, self._autoplay, bool(getattr(self.player, "video_enabled", False)))}
 
     async def _now_card_state(self, room: str, state: str) -> bool:
         """Karte des laufenden Titels auf "playing"/"paused" setzen. False: es gibt keine Karte."""
@@ -862,6 +863,7 @@ class Bot:
             mode = arg.strip().lower()
             on = p.set_video(True if mode == "on" else False if mode == "off" else None)
             await m.send_notice(room_id, f"Video: {'an' if on else 'aus'}")
+            await self._now_card_state(room_id, "paused" if p.state == "paused" else "playing")
         elif name == "shuffle":
             random.shuffle(p.queue)
             await self._note(room_id, "Warteschlange gemischt." if p.queue else "Warteschlange ist leer.",
@@ -896,6 +898,8 @@ class Bot:
                 p.queue[:] = [(k, r) for k, r in p.queue if r != AUTOPLAY]
             await self._note(room_id, "Autoplay an: Ist die Warteschlange leer, kommt ähnliche Musik."
                              if self._autoplay else "Autoplay aus.", "info", "✨")
+            if p.state in ("playing", "paused"):     # Knopf im Menue "⋯" zeigt den neuen Stand
+                await self._now_card_state(room_id, p.state)
         elif name == "dashboard":
             await self._send_dashboard_login(room_id, sender)
         elif name == "help":

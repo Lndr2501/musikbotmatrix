@@ -76,6 +76,7 @@ def make_bot():
     bot._cmds_failed = {}
     bot._thumb_tasks = {}
     bot._loop_on = False
+    bot._autoplay = False
     bot._always = None
     bot._fetch_room = "!r:x"
     bot.ecall = SimpleNamespace(room_id=None)
@@ -418,8 +419,12 @@ def test_player_layout_fields_and_up_next_refresh():
     first, last = card_of(bot.matrix.events[0]), card_of(bot.matrix.events[-1])
     assert first["room"] == "Lounge" and first["requestedBy"] == "Luis"
     assert first["upNext"] == [{"title": "Paper Planets", "artist": "Moss & Mirrors"}]
-    assert first["controls"] == {"prev": "!previous", "toggle": "!pause", "skip": "!skip", "volume": "!volume"}
-    assert first["volumeMax"] == cards.VOLUME_MAX and any(a["send"] == "!stop" for a in first["more"])
+    assert first["controls"] == {"prev": "!previous", "toggle": "!pause", "skip": "!skip", "volume": "!volume",
+                                 "dashboard": "!dashboard"}
+    sends = [a["send"] for a in first["more"]]
+    assert first["volumeMax"] == cards.VOLUME_MAX and len(sends) <= cards.MORE_MAX
+    for cmd in ("!fav", "!autoplay", "!shuffle", "!video", "!fav list", "!stats", "!stop", "!leavecall", "!help"):
+        assert cmd in sends, cmd
     assert first["actions"][0]["send"] == "!pause"          # alte Diddy-Versionen
     assert [i["title"] for i in last["upNext"]] == ["Paper Planets", "Late Bus Home"]
     assert bot.matrix.events[-1][0] == "edit"
@@ -428,3 +433,10 @@ def test_player_layout_fields_and_up_next_refresh():
 def test_bot_profile_content():
     c = cards.bot_content("x" * 300)
     assert c["v"] == 1 and len(c["about"]) == 200 and c["banner"]["from"].startswith("#")
+
+
+def test_player_more_shows_toggle_states():
+    _, more = cards.player_controls(loop=True, autoplay=True, video=False)
+    labels = [a["label"] for a in more]
+    assert "🔁 Loop: an" in labels and "✨ Autoplay: an" in labels and "🎬 Video" in labels
+    assert all(len(a["label"]) <= 24 for a in more)

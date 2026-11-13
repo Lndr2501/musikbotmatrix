@@ -57,16 +57,30 @@ def controls(paused: bool = False, loop: bool = False) -> tuple:
             action("⏹ Stopp", "!stop"))
 
 
-def player_controls(paused: bool = False, loop: bool = False) -> tuple[dict, list]:
-    """Knoepfe im Player-Layout von Diddy: `controls` (Zurueck, Pause/Weiter, Skip, Lautstaerke) und `more`
-    (Menue "⋯"). Neuere Diddy-Versionen zeichnen damit die kompakte Karte und ignorieren `actions`."""
+def player_controls(paused: bool = False, loop: bool = False, autoplay: bool = False,
+                    video: bool = False) -> tuple[dict, list]:
+    """Knoepfe im Player-Layout von Diddy: `controls` (Zurueck, Pause/Weiter, Skip, Lautstaerke, Dashboard) und
+    `more` (Menue "⋯" mit allen anderen Funktionen). Neuere Diddy-Versionen zeichnen damit die kompakte Karte und
+    ignorieren `actions`."""
     ctl = {"prev": "!previous", "toggle": "!resume" if paused else "!pause", "skip": "!skip",
-           "volume": "!volume"}
-    more = [action("🔁 Loop: an" if loop else "🔁 Loop", "!loop"), action("📜 Warteschlange", "!queue"),
-            action("⏪ 10 s", "!zurueck 10"), action("⏩ 10 s", "!vor 10"), action("⏹ Stopp", "!stop")]
-    return ctl, more
+           "volume": "!volume", "dashboard": "!dashboard"}
+    on = lambda label, flag: f"{label}: an" if flag else label   # noqa: E731
+    more = [action("❤️ Merken", "!fav"),
+            action(on("🔁 Loop", loop), "!loop"),
+            action(on("✨ Autoplay", autoplay), "!autoplay"),
+            action("🔀 Mischen", "!shuffle"),
+            action("📜 Warteschlange", "!queue"),
+            action("⏪ 10 s", "!zurueck 10"), action("⏩ 10 s", "!vor 10"),
+            action(on("🎬 Video", video), "!video"),
+            action("⭐ Favoriten", "!fav list"),
+            action("📊 Stats", "!stats"),
+            action("⏹ Stopp", "!stop"),
+            action("🚪 Call verlassen", "!leavecall"),
+            action("❓ Hilfe", "!help")]
+    return ctl, more[:MORE_MAX]
 
 
+MORE_MAX = 16           # Diddy zeigt hoechstens so viele Eintraege im Menue "⋯"
 VOLUME_MAX = 150        # Schieberegler in Diddy; der Bot kann bis 300 (!volume 300)
 BOT_EVENT = "dev.diddy.bot"
 
