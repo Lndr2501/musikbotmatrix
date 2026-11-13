@@ -40,6 +40,19 @@ KEYS_EVENT = "io.element.call.encryption_keys"
 EXPIRES_MS = 4 * 60 * 60 * 1000          # wie matrix-js-sdk DEFAULT_EXPIRE_DURATION
 REFRESH_S = 3 * 60 * 60                  # Membership rechtzeitig erneuern
 BLOCK_SAMPLES = 960                      # 20 ms bei 48 kHz
+# Musik statt Sprache: ohne feste Vorgabe nimmt das LiveKit-SDK Sprach-Defaults
+# (niedrige Opus-Bitrate, DTX schneidet leise Stellen weg) -> klingt dumpf/komisch.
+AUDIO_BITRATE = 128_000
+STATS_S = 30                             # Aussetzer-Statistik so oft loggen
+
+
+def audio_publish_options():
+    from livekit import rtc
+    from livekit.rtc._proto import room_pb2
+    return rtc.TrackPublishOptions(
+        source=rtc.TrackSource.SOURCE_MICROPHONE,
+        audio_encoding=room_pb2.AudioEncoding(max_bitrate=AUDIO_BITRATE),
+        dtx=False, red=True)
 
 
 def member_state_key(user_id: str, device_id: str) -> str:
@@ -179,8 +192,7 @@ class ElementCall:
         self._sink = self.player.hub.new_sink()
         audio_src = rtc.AudioSource(SAMPLE_RATE, 2)
         atrack = rtc.LocalAudioTrack.create_audio_track("musik", audio_src)
-        await room.local_participant.publish_track(
-            atrack, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
+        await room.local_participant.publish_track(atrack, audio_publish_options())
         self._tasks = [asyncio.create_task(self._pump_audio(audio_src), name="ec-audio")]
 
         if self.player.video_enabled:
@@ -269,10 +281,14 @@ class ElementCall:
         from livekit import rtc
         loop = asyncio.get_running_loop()
         anchor = loop.time()
+        stats_at = anchor + STATS_S
+        gaps = late = 0
         try:
             while True:
                 block = self._sink.take_audio() if self._sink else None
                 if block is None:
+                    if getattr(self.player, "state", "") == "playing":
+                        gaps += 1               # Puffer leer, obwohl Musik laeuft
                     block = silence_block()
                 block = np.ascontiguousarray(block, dtype=np.int16)
                 samples = block.shape[-1] // 2
@@ -284,6 +300,17 @@ class ElementCall:
                     await asyncio.sleep(delay)
                 elif delay < -1.0:
                     anchor = loop.time()
+                    late += 1
+                now = loop.time()
+                if now >= stats_at:
+                    dropped = self._sink.dropped_audio if self._sink else 0
+                    if gaps or late or dropped:
+                        log.warning("Audio-Aussetzer in %ds: %d leere Bloecke (je 20 ms), "
+                                    "%d Takt-Spruenge, %d verworfen", STATS_S, gaps, late, dropped)
+                        if self._sink:
+                            self._sink.dropped_audio = 0
+                    gaps = late = 0
+                    stats_at = now + STATS_S
         except asyncio.CancelledError:
             raise
         except Exception:
