@@ -67,6 +67,8 @@ def make_bot():
     bot.matrix = FakeMatrix()
     bot._card_pending = {}
     bot._card_now = {}
+    bot._card_next = {}
+    bot._names = {}
     bot._thumb_url = {}
     bot._thumb_mxc = {}
     bot._cover_frames = {}
@@ -360,6 +362,8 @@ def test_commands_publish_is_retried_after_a_minute_when_it_failed(monkeypatch):
         return {}
 
     async def put_state(room, ev, key, content):
+        if ev != cards.COMMANDS_EVENT:
+            return                                   # Steckbrief (dev.diddy.bot) zaehlt hier nicht
         calls.append(1)
         if len(calls) < 3:
             raise RuntimeError("M_FORBIDDEN")
@@ -390,3 +394,37 @@ def test_loop_button_toggles_and_the_card_shows_the_state():
     assert on["state"] == "playing" and any(a["label"] == "🔁 Loop: an" for a in on["actions"])
     run_cmd(bot, "loop")
     assert any(a["label"] == "🔁 Loop" for a in card_of(bot.matrix.events[-1])["actions"])
+
+
+def test_player_layout_fields_and_up_next_refresh():
+    from musikbot.player import AUTOPLAY
+
+    bot = make_bot()
+    titles = {"n1": track("Paper Planets", "n1", uploader="Moss & Mirrors"),
+              "n2": track("Late Bus Home", "n2", uploader="Kiosk Club")}
+    bot.store = SimpleNamespace(get=titles.get)
+    bot.matrix.client = SimpleNamespace(rooms={"!r:x": SimpleNamespace(display_name="Lounge")})
+    bot.player.requester = "@luis:x"
+    bot._names = {"@luis:x": "Luis"}
+    bot.player.queue = [("n1", "@anna:x")]
+
+    async def flow():
+        await bot._announce(track("Night Drive", "k1", uploader="Neon Harbor"))
+        assert not await bot._refresh_next()                 # nichts geaendert
+        bot.player.queue.append(("n2", AUTOPLAY))
+        assert await bot._refresh_next()                     # neuer Titel -> Karte bearbeiten
+
+    asyncio.run(flow())
+    first, last = card_of(bot.matrix.events[0]), card_of(bot.matrix.events[-1])
+    assert first["room"] == "Lounge" and first["requestedBy"] == "Luis"
+    assert first["upNext"] == [{"title": "Paper Planets", "artist": "Moss & Mirrors"}]
+    assert first["controls"] == {"prev": "!previous", "toggle": "!pause", "skip": "!skip", "volume": "!volume"}
+    assert first["volumeMax"] == cards.VOLUME_MAX and any(a["send"] == "!stop" for a in first["more"])
+    assert first["actions"][0]["send"] == "!pause"          # alte Diddy-Versionen
+    assert [i["title"] for i in last["upNext"]] == ["Paper Planets", "Late Bus Home"]
+    assert bot.matrix.events[-1][0] == "edit"
+
+
+def test_bot_profile_content():
+    c = cards.bot_content("x" * 300)
+    assert c["v"] == 1 and len(c["about"]) == 200 and c["banner"]["from"].startswith("#")

@@ -34,6 +34,9 @@ log = logging.getLogger("musikbot")
 
 CALL_CHECK_SECONDS = 10   # so oft wird geprueft, ob noch jemand im Call ist
 EMPTY_GRACE_SECONDS = 20  # so lange darf der Call leer sein, bevor der Bot geht
+CARD_CHECK_SECONDS = 3    # so oft wird "Up next" auf der laufenden Karte geprueft
+BOT_ABOUT = ("Spielt Musik in Calls – YouTube, Spotify-Links, Dateien. Probier die Knöpfe auf meinen "
+             "Karten oder tippe !help.")
 
 AUDIO_VIDEO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".flac", ".wav", ".wma",
                    ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".3gp"}
@@ -65,6 +68,7 @@ class Bot:
     _last_finished = None
     _recent: tuple | list = ()
     _alone_since: float | None = None
+    _card_next: dict = {}
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -88,6 +92,7 @@ class Bot:
         # Karten (Diddy): Suche/Download-Karte eines Raums und die Karte des laufenden Titels
         self._card_pending: dict[str, str] = {}
         self._card_now: dict[str, tuple[str, object]] = {}
+        self._card_next: dict[str, tuple] = {}     # Raum -> naechste Titel, wie sie auf der Karte stehen
         # Titelbilder: Quelle (http) und die auf den Medien-Server geladene mxc://-Adresse je Titel
         self._thumb_url: dict[str, str] = {}
         self._thumb_mxc: dict[str, str] = {}
@@ -168,7 +173,8 @@ class Bot:
 
     def start_watchers(self) -> None:
         """Hintergrund-Waechter: Leerlauf (nichts spielt) und leerer Call (niemand hoert zu)."""
-        for coro, name in ((self._idle_watch(), "idle-leave"), (self._call_watch(), "empty-call")):
+        for coro, name in ((self._idle_watch(), "idle-leave"), (self._call_watch(), "empty-call"),
+                           (self._card_watch(), "card-next")):
             task = asyncio.create_task(coro, name=name)
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
@@ -182,6 +188,25 @@ class Bot:
                 await self._check_empty(loop.time())
             except Exception:
                 log.exception("Leer-Call-Check fehlgeschlagen")
+
+    async def _card_watch(self) -> None:
+        """Haelt "Up next" auf der laufenden Karte aktuell (Wuensche, Autoplay, Umsortieren im Dashboard)."""
+        while True:
+            await asyncio.sleep(CARD_CHECK_SECONDS)
+            try:
+                await self._refresh_next()
+            except Exception:
+                log.exception("Karte nachziehen fehlgeschlagen")
+
+    async def _refresh_next(self) -> bool:
+        state = self.player.state
+        if state not in ("playing", "paused"):
+            return False
+        for room in list(self._card_now):
+            if self._card_next.get(room) != self._next_sig():
+                await self._now_card_state(room, state)
+                return True
+        return False
 
     async def _someone_listening(self) -> bool:
         ec = self.ecall
@@ -379,6 +404,23 @@ class Bot:
         card = cards.track_card(state, track.title or track.key, **self._track_meta(track))
         await self._put_track_card(room, card, eid)
 
+    def _next_sig(self) -> tuple:
+        return tuple(k for k, _ in list(self.player.queue)[:3])
+
+    async def _player_extras(self, room: str, paused: bool) -> dict:
+        """Zusatzfelder fuer das Player-Layout von Diddy: Raum, Wunsch von, Up next, Knoepfe."""
+        rooms = getattr(getattr(self.matrix, "client", None), "rooms", None) or {}
+        who = getattr(self.player, "requester", "") or ""
+        by = ("Autoplay" if who == AUTOPLAY else "24/7" if who == "24/7"
+              else await self._display_name(who) if who.startswith("@") else "")
+        nxt = []
+        for key, _ in list(self.player.queue)[:3]:
+            t = self.store.get(key)
+            nxt.append({"title": (t.title if t else "") or key, "artist": (t.uploader if t else "") or ""})
+        self._card_next[room] = self._next_sig()
+        return {"room": getattr(rooms.get(room), "display_name", "") or "", "requested_by": by,
+                "up_next": nxt, "player": cards.player_controls(paused, self._loop_on)}
+
     async def _now_card_state(self, room: str, state: str) -> bool:
         """Karte des laufenden Titels auf "playing"/"paused" setzen. False: es gibt keine Karte."""
         entry = self._card_now.get(room)
@@ -386,15 +428,16 @@ class Bot:
             return False
         eid, track = entry
         pos = self.player.position
+        extras = await self._player_extras(room, state != "playing")
         if state == "playing":
             card = cards.track_card("playing", track.title or track.key, position=pos,
                                     started_at_ms=now_ms(), actions=cards.controls(False, self._loop_on),
                                     seek=cards.SEEK_COMMAND, volume=self.player.volume,
-                                    **self._track_meta(track))
+                                    **self._track_meta(track), **extras)
         else:
             card = cards.track_card("paused", track.title or track.key, position=pos,
                                     actions=cards.controls(True, self._loop_on), seek=cards.SEEK_COMMAND,
-                                    volume=self.player.volume, **self._track_meta(track))
+                                    volume=self.player.volume, **self._track_meta(track), **extras)
         content = cards.card_content(cards.track_body(card), card)
         return await self.matrix.edit_card(room, eid, content)
 
@@ -513,7 +556,7 @@ class Bot:
         card = cards.track_card(
             "playing", track.title or track.key, position=0.0, started_at_ms=now_ms(),
             actions=cards.controls(False, self._loop_on), seek=cards.SEEK_COMMAND, volume=self.player.volume,
-            **self._track_meta(track))
+            **self._track_meta(track), **await self._player_extras(room, False))
         eid = await self._put_track_card(room, card, pending)
         if eid:
             self._card_now[room] = (eid, track)
@@ -614,6 +657,11 @@ class Bot:
             have = {k: v for k, v in (current.get(uid) or {}).items() if k != "_sender"}
             if have != want:
                 await self.matrix.put_state(room_id, cards.COMMANDS_EVENT, uid, want)
+            # Steckbrief fuer Diddy (BOT-Abzeichen, Info-Text, Banner); state_key = eigene ID
+            current = await self.matrix.get_state_events(room_id, cards.BOT_EVENT)
+            want = cards.bot_content(BOT_ABOUT)
+            if {k: v for k, v in (current.get(uid) or {}).items() if k != "_sender"} != want:
+                await self.matrix.put_state(room_id, cards.BOT_EVENT, uid, want)
             self._cmds_done.add(room_id)
         except Exception as exc:
             self._cmds_failed[room_id] = time.monotonic()
@@ -1203,8 +1251,10 @@ class Bot:
         acts = cards.controls(state == "paused", self._loop_on) if state in ("playing", "paused") else ()
         meta = self._track_meta(t) if t else {}
         meta["duration"] = s["duration"] or meta.get("duration", 0.0)
+        extras = (await self._player_extras(room_id, state == "paused")
+                  if state in ("playing", "paused") else {})
         card = cards.track_card(
-            state, title, position=s["position"], seek=cards.SEEK_COMMAND if t else "",
+            state, title, position=s["position"], seek=cards.SEEK_COMMAND if t else "", **extras,
             volume=s["volume"], started_at_ms=now_ms() if state == "playing" else None, actions=acts,
             note=f"Lautstärke {s['volume']} · Video {'an' if s['video'] else 'aus'} · "
                  f"Peers im Call: {s['peers']} · Warteschlange: {len(s['queue'])}", **meta)

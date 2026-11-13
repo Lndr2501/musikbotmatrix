@@ -57,6 +57,26 @@ def controls(paused: bool = False, loop: bool = False) -> tuple:
             action("⏹ Stopp", "!stop"))
 
 
+def player_controls(paused: bool = False, loop: bool = False) -> tuple[dict, list]:
+    """Knoepfe im Player-Layout von Diddy: `controls` (Zurueck, Pause/Weiter, Skip, Lautstaerke) und `more`
+    (Menue "⋯"). Neuere Diddy-Versionen zeichnen damit die kompakte Karte und ignorieren `actions`."""
+    ctl = {"prev": "!previous", "toggle": "!resume" if paused else "!pause", "skip": "!skip",
+           "volume": "!volume"}
+    more = [action("🔁 Loop: an" if loop else "🔁 Loop", "!loop"), action("📜 Warteschlange", "!queue"),
+            action("⏪ 10 s", "!zurueck 10"), action("⏩ 10 s", "!vor 10"), action("⏹ Stopp", "!stop")]
+    return ctl, more
+
+
+VOLUME_MAX = 150        # Schieberegler in Diddy; der Bot kann bis 300 (!volume 300)
+BOT_EVENT = "dev.diddy.bot"
+
+
+def bot_content(about: str, banner: tuple[str, str] = ("#FF80CA", "#7C5CFF"), accent: str = "#E6457A") -> dict:
+    """Raum-Zustand `dev.diddy.bot` (state_key = Bot-ID): Diddy zeigt BOT-Abzeichen, Info-Text und Banner."""
+    return {"v": VERSION, "about": about[:200], "banner": {"from": banner[0], "to": banner[1], "angle": 135},
+            "accent": accent}
+
+
 CONTROLS_PLAYING = controls(False)
 CONTROLS_PAUSED = controls(True)
 SEEK_COMMAND = "!seek"
@@ -85,6 +105,10 @@ def track_card(
     volume: Optional[float] = None,
     thumbnail: str = "",
     actions=(),
+    room: str = "",
+    requested_by: str = "",
+    up_next=(),
+    player: Optional[tuple[dict, list]] = None,
 ) -> dict:
     """Karte eines Titels. `position` (s) gilt zum Zeitpunkt `started_at_ms` (Bot-Uhr).
     `seek`: Befehl fuer die Zeitleiste (Klick = "<seek> mm:ss"), `volume`: aktuelle Lautstaerke."""
@@ -94,6 +118,10 @@ def track_card(
         "duration": duration or None, "position": position, "startedAt": started_at_ms,
         "url": url or None, "note": note or None, "seek": seek or None, "volume": volume,
         "thumbnail": thumbnail or None, "actions": list(actions),
+        "room": room[:80] or None, "requestedBy": requested_by[:80] or None,
+        "upNext": [{k: v for k, v in i.items() if v} for i in list(up_next)[:3]] or None,
+        "controls": player[0] if player else None, "more": player[1] if player else None,
+        "volumeMax": VOLUME_MAX if player else None,
     }
 
 
