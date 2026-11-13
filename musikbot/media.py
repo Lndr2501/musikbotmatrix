@@ -8,6 +8,7 @@ Audio normalisieren wir auf 48 kHz stereo/s16, weil WebRTC/Opus genau das will.
 from __future__ import annotations
 
 import logging
+import threading
 from fractions import Fraction
 from typing import Iterator
 
@@ -43,6 +44,9 @@ class MediaSource:
         self._video_container: av.InputContainer | None = None
         self._audio_stream = None
         self._video_stream = None
+        # Dekodieren (Wiedergabe-Thread) und Schliessen/Spulen (anderer Thread) duerfen nie
+        # gleichzeitig am selben Container arbeiten – sonst stuerzt PyAV/FFmpeg ab (Segfault).
+        self._lock = threading.RLock()
 
     # ---------------------------------------------------------------- open
     def open(self) -> None:
@@ -70,6 +74,10 @@ class MediaSource:
         self._reopen(0.0)
 
     def _reopen(self, start: float) -> None:
+        with self._lock:
+            self._reopen_locked(start)
+
+    def _reopen_locked(self, start: float) -> None:
         self.close()
         self._audio_container = av.open(self.path)
         self._audio_stream = next(iter(self._audio_container.streams.audio))
@@ -80,6 +88,10 @@ class MediaSource:
             self.seek(start)
 
     def close(self) -> None:
+        with self._lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
         for container in (self._audio_container, self._video_container):
             if container is not None:
                 try:
@@ -91,6 +103,10 @@ class MediaSource:
 
     # --------------------------------------------------------------- seek
     def seek(self, seconds: float) -> None:
+        with self._lock:
+            self._seek_locked(seconds)
+
+    def _seek_locked(self, seconds: float) -> None:
         seconds = max(0.0, seconds)
         offset = int(seconds * 1_000_000)
         for container in (self._audio_container, self._video_container):
@@ -109,43 +125,60 @@ class MediaSource:
     # -------------------------------------------------------------- audio
     def audio_blocks(self, start: float = 0.0) -> Iterator[np.ndarray]:
         """Liefert (1, n*2) int16-Blöcke à 20 ms, 48 kHz stereo, lückenlos."""
-        if self._audio_container is None:
-            self._reopen(start)
-        assert self._audio_container is not None and self._audio_stream is not None
-        if start > 0:
-            self.seek(start)
+        with self._lock:
+            if self._audio_container is None:
+                self._reopen(start)
+            assert self._audio_container is not None and self._audio_stream is not None
+            if start > 0:
+                self.seek(start)
+            container = self._audio_container
+            frames = container.decode(self._audio_stream)
         resampler = av.AudioResampler(
             format="s16", layout="stereo", rate=SAMPLE_RATE, frame_size=FRAME_SAMPLES)
-        for frame in self._audio_container.decode(self._audio_stream):
-            for out in resampler.resample(frame):
-                arr = out.to_ndarray()
+        while True:
+            with self._lock:
+                if self._audio_container is not container:   # geschlossen oder neu geoeffnet
+                    return
+                frame = next(frames, None)
+                if frame is None:
+                    return
+                outs = [out.to_ndarray() for out in resampler.resample(frame)]
+            for arr in outs:
                 if arr.dtype != np.int16:
                     arr = arr.astype(np.int16)
                 if arr.ndim == 2 and arr.shape[0] == 1:
                     yield arr
                 else:  # Sicherheitsnetz für exotische Layouts
-                    flat = np.ascontiguousarray(arr).reshape(1, -1)
-                    yield flat
+                    yield np.ascontiguousarray(arr).reshape(1, -1)
 
     # --------------------------------------------------------------- video
     def video_frames(self, start: float = 0.0) -> Iterator[tuple[float, av.VideoFrame]]:
         """Liefert (zeit, frame) mit maximal video_fps Bildern pro Sekunde."""
-        if not self.has_video or self._video_container is None or self._video_stream is None:
-            return
-        if start > 0:
-            self.seek(start)
+        with self._lock:
+            if not self.has_video or self._video_container is None or self._video_stream is None:
+                return
+            if start > 0:
+                self.seek(start)
+            container = self._video_container
+            frames = container.decode(self._video_stream)
         step = 1.0 / max(1.0, self.video_fps)
         next_at = -1e9
-        for frame in self._video_container.decode(self._video_stream):
-            when = _frame_time(frame)
-            if when + 1e-6 < next_at:
-                continue
-            next_at = when + step
-            if self.video_size:
-                width, height = self.video_size
-                if (frame.width, frame.height) != (width, height):
-                    frame = frame.reformat(width=width, height=height,
-                                           format="yuv420p")
+        while True:
+            with self._lock:
+                if self._video_container is not container:   # geschlossen oder neu geoeffnet
+                    return
+                frame = next(frames, None)
+                if frame is None:
+                    return
+                when = _frame_time(frame)
+                if when + 1e-6 < next_at:
+                    continue
+                next_at = when + step
+                if self.video_size:
+                    width, height = self.video_size
+                    if (frame.width, frame.height) != (width, height):
+                        frame = frame.reformat(width=width, height=height,
+                                               format="yuv420p")
             yield when, frame
 
 

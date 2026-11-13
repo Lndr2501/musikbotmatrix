@@ -209,14 +209,19 @@ class Player:
                     await self._on_track_end()
                     continue
                 if self._pos < target + LEAD_SECONDS:
+                    it = self._audio_iter
                     try:
-                        block = await _next_async(self._audio_iter)
+                        block = await _next_async(it)
                     except _Exhausted:
+                        if it is not self._audio_iter:   # inzwischen gestoppt/gespult/gewechselt
+                            continue
                         await self._on_track_end()
                         continue
                     except Exception:  # noqa: BLE001
                         log.exception("Dekoder abgestürzt")
                         await self._on_track_end()
+                        continue
+                    if it is not self._audio_iter:            # Block gehoert zum alten Titel
                         continue
                     if self._fade is not None:
                         block = await self._mix_fade(block)

@@ -198,3 +198,33 @@ def test_choose_entry_falls_back_to_first_youtube_hit():
     from musikbot.ytdl import choose_entry
     yt = [{"title": "Etwas ganz anderes"}]
     assert choose_entry(yt, [], [{"title": "auch nicht"}], "xyz qwe")["title"] == "Etwas ganz anderes"
+
+
+def test_close_while_decoding_in_other_threads_never_crashes(tmp_path):
+    """stop()/seek() schliessen den Container, waehrend die Wiedergabe im Thread dekodiert.
+    Ohne Sperre stuerzt FFmpeg dabei ab (Segfault, Exit 139)."""
+    import threading
+
+    from musikbot.media import MediaSource
+
+    path = str(tmp_path / "clip.mkv")
+    _make_clip(path, seconds=4.0)
+    for _ in range(20):
+        src = MediaSource(path)
+        src.open()
+        audio, video = src.audio_blocks(0.0), src.video_frames(0.0)
+        got = []
+
+        def decode(it):
+            for item in it:
+                got.append(item)
+
+        threads = [threading.Thread(target=decode, args=(it,)) for it in (audio, video)]
+        for t in threads:
+            t.start()
+        src.seek(1.0)
+        src.close()
+        for t in threads:
+            t.join(5)
+            assert not t.is_alive()
+    assert got
