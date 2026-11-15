@@ -12,6 +12,7 @@ import logging
 import os
 import random
 import re
+import tempfile
 import time
 
 import aiohttp
@@ -47,6 +48,14 @@ def _write_file(path: str, data: bytes) -> None:
         fh.write(data)
 
 
+def safe_radio_name(filename: str) -> str:
+    """Dateiname aus dem Upload: nur der Name (kein Pfad), keine Steuerzeichen, max. 120 Zeichen."""
+    name = os.path.basename((filename or "").replace("\\", "/"))
+    name = re.sub(r"[\x00-\x1f\x7f/\\:*?\"<>|]", "", name).strip().lstrip(".").strip()
+    stem, ext = os.path.splitext(name)
+    return (stem[:120].strip() or "upload") + ext.lower()
+
+
 def probe_duration(path: str) -> float:
     """Laenge in Sekunden; wirft, wenn die Datei kein Audio/Video enthaelt."""
     import av
@@ -57,6 +66,7 @@ def probe_duration(path: str) -> float:
 
 
 RADIO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".flac", ".wav", ".wma"}
+MAX_RADIO_UPLOAD = 100 * 1024 * 1024        # pro Datei (Cloudflare erlaubt ohnehin max. 100 MB)
 PLAYLIST_NAME = re.compile(r"^[\w.-]{1,32}$")
 MAX_SHOWN = 30
 
@@ -477,6 +487,51 @@ class Bot:
                                         url="file://" + path, uploader="Radio")
         self._radio_files = files
         return keys
+
+    async def web_radio_upload(self, user: str, filename: str, part) -> str:
+        """Eine Audiodatei aus dem Dashboard in den Radio-Ordner legen (`part`: aiohttp-Multipart).
+
+        Ueberschreibt nie etwas: bei gleichem Namen wird " (2)" angehaengt. Geschrieben wird erst in
+        eine versteckte Temp-Datei, die per Probe als Audio bestaetigt werden muss."""
+        root = self.cfg.radio_dir
+        name = safe_radio_name(filename)
+        if os.path.splitext(name)[1] not in RADIO_EXT:
+            raise MediaError("Nur Audiodateien (mp3, m4a, ogg, opus, flac, wav, aac, wma).")
+        if not os.path.isdir(root) or not os.access(root, os.W_OK):
+            raise MediaError("Der Radio-Ordner ist auf dem Server schreibgeschützt.")
+        fd, tmp = tempfile.mkstemp(prefix=".upload-", dir=root)
+        try:
+            size = 0
+            with os.fdopen(fd, "wb") as fh:
+                while True:
+                    chunk = await part.read_chunk(1 << 20)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_RADIO_UPLOAD:
+                        raise MediaError(f"Die Datei ist zu groß (max. {MAX_RADIO_UPLOAD >> 20} MB).")
+                    await asyncio.to_thread(fh.write, chunk)
+            try:
+                await asyncio.to_thread(probe_duration, tmp)
+            except Exception as exc:  # noqa: BLE001
+                raise MediaError("Das ist keine lesbare Audiodatei.") from exc
+            stem, ext = os.path.splitext(name)
+            for n in range(1, 1000):
+                final = os.path.join(root, name if n == 1 else f"{stem} ({n}){ext}")
+                try:
+                    os.link(tmp, final)            # schlaegt fehl, wenn es die Datei schon gibt
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                raise MediaError("Zu viele Dateien mit demselben Namen.")
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        log.info("Radio-Upload von %s: %s (%d KB)", user, os.path.basename(final), size >> 10)
+        return os.path.basename(final)
 
     def _radio_shuffled(self, last: str | None = None) -> list[str]:
         keys = self._radio_scan()

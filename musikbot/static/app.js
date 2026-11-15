@@ -395,6 +395,37 @@ async function loadLibrary() {
   renderLibrary();
 }
 
+// Radio-Upload: eine Anfrage pro Datei (XHR wegen Fortschritt), Status steht auf der Karte.
+let uploading = "";
+function uploadRadio(files) {
+  const list = [...files];
+  const one = (file) => new Promise((resolve) => {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/radio/upload");
+    xhr.setRequestHeader("X-Musikbot", "1");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) { uploading = `${file.name}: ${Math.round((e.loaded / e.total) * 100)} %`; renderLibrary(); }
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* leer */ }
+      if (xhr.status === 401) { showLogin(); resolve(false); return; }
+      if (xhr.status >= 200 && xhr.status < 300) toast(`„${(data.saved || [file.name])[0]}“ ist im Radio`);
+      else toast(`${file.name}: ${data.error || "Fehler " + xhr.status}`, true);
+      resolve(xhr.status < 300);
+    };
+    xhr.onerror = () => { toast(`${file.name}: Upload fehlgeschlagen`, true); resolve(false); };
+    xhr.send(fd);
+  });
+  (async () => {
+    for (const f of list) await one(f);
+    uploading = "";
+    await loadLibrary();
+  })();
+}
+
 function renderLibrary() {
   const lib = LIB;
   if (!lib) return;
@@ -422,8 +453,11 @@ function renderLibrary() {
       ? card("24/7 ausschalten", "Dauerschleife beenden", () => cmd("always", "off", "24/7 ist aus"), true)
       : card("24/7 Radio", lib.radio ? `${lib.radio} Dateien, zufällig` : "Radio-Ordner ist leer", () => cmd("always", "radio", "Radio läuft")),
     card("Deine Favoriten", `${lib.favorites.length} Titel gemischt abspielen`, () => cmd("fav", "play shuffle")),
+    card("MP3 hochladen", uploading || "Eigene Songs fürs Radio", () => $("#radio-file").click()),
   );
   $("#fav-play").onclick = () => cmd("fav", "play");
+  const fileInput = $("#radio-file");
+  if (!fileInput.onchange) fileInput.onchange = () => { uploadRadio(fileInput.files); fileInput.value = ""; };
 
   // Eigene Playlists: aufklappbar, mit Titeln
   const box = $("#my-playlists");

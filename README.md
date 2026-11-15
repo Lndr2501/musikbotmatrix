@@ -123,8 +123,10 @@ nochmal kommt (Schleife mit leerer Warteschlange, 24/7 mit einem Song).
 ## Radio-Ordner
 
 MP3s (auch m4a, ogg, opus, flac, wav; Unterordner gehen) in `radio/` neben der
-`compose.yaml` legen, dann im Raum `!24/7 radio`. Der Ordner ist read-only in den
-Container gemountet, der Bot löscht dort nie etwas. Neue Dateien werden bei jedem
+`compose.yaml` legen (oder im Dashboard unter „Meins“ → „MP3 hochladen“, max. 100 MB pro
+Datei), dann im Raum `!24/7 radio`. Der Bot legt dort nur neue Dateien an und löscht oder
+überschreibt nie etwas (gleicher Name → „ (2)“). Der Host-Ordner muss für UID 10000
+beschreibbar sein (`chown 10000 radio`). Neue Dateien werden bei jedem
 neuen Durchlauf automatisch mitgenommen; kein Neustart nötig. `MAX_SONG_SECONDS`
 gilt für Radio-Dateien nicht. Nach der Änderung einmal `docker compose up -d --build`.
 

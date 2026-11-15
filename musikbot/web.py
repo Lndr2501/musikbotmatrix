@@ -84,6 +84,7 @@ class Dashboard:
         r.add_post("/api/queue", self.queue)
         r.add_post("/api/fade", self.fade)
         r.add_post("/api/playlist", self.playlist)
+        r.add_post("/api/radio/upload", self.radio_upload)
 
     # --------------------------------------------------------------- Lifecycle
     async def start(self) -> None:
@@ -194,3 +195,17 @@ class Dashboard:
                                     str(data.get("key", "")), int(data.get("index", 0) or 0),
                                     str(data.get("query", ""))[:500])
         return web.json_response(await self.bot.web_library(user))
+
+    async def radio_upload(self, request: web.Request) -> web.StreamResponse:
+        """Audiodateien (multipart, Feld `file`) in den Radio-Ordner hochladen."""
+        user = self._user(request)
+        saved: list[str] = []
+        reader = await request.multipart()
+        while (part := await reader.next()) is not None:
+            if part.name != "file" or not getattr(part, "filename", None):
+                continue
+            saved.append(await self.bot.web_radio_upload(user, part.filename, part))
+        if not saved:
+            raise MediaError("Keine Datei erhalten.")
+        return web.json_response({"ok": True, "saved": saved,
+                                  "radio": len(self.bot._radio_scan())})
