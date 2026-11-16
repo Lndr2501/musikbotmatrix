@@ -20,7 +20,7 @@ import nio
 
 from . import cards
 from .calls import CallManager
-from .commands import HELP, is_read_only, parse
+from .commands import HELP, LOOKUP, is_read_only, parse
 from .elementcall import ElementCall
 from .config import Config
 from .hub import Hub
@@ -38,6 +38,8 @@ EMPTY_GRACE_SECONDS = 20  # so lange darf der Call leer sein, bevor der Bot geht
 CARD_CHECK_SECONDS = 3    # so oft wird "Up next" auf der laufenden Karte geprueft
 BOT_ABOUT = ("Spielt Musik in Calls – YouTube, Spotify-Links, Dateien. Probier die Knöpfe auf meinen "
              "Karten oder tippe !help.")
+# Steckbrief fuer Diddy (BOT-Abzeichen, Info-Text, Banner); die Library setzt ihn in jedem Raum
+PROFILE = dict(about=BOT_ABOUT, banner=("#FF80CA", "#7C5CFF", 135), accent="#E6457A")
 
 AUDIO_VIDEO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".flac", ".wav", ".wma",
                    ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".3gp"}
@@ -90,7 +92,7 @@ class Bot:
         self.player = Player(cfg, self.hub, self.store,
                              on_event=self._player_event, fetch=self._fetch)
         self.calls = CallManager(cfg, self.player)
-        self.matrix = Matrix(cfg)
+        self.matrix = Matrix(cfg, PROFILE)
         self.ecall = ElementCall(cfg, self.matrix, self.player)
         self.resolver = MediaResolver(cfg)
         # Buchhaltung, welcher Raum welche Liste zuletzt gesehen hat:
@@ -107,8 +109,6 @@ class Bot:
         self._thumb_url: dict[str, str] = {}
         self._thumb_mxc: dict[str, str] = {}
         self._cover_frames: dict[str, object] = {}
-        self._cmds_done: set[str] = set()
-        self._cmds_failed: dict[str, float] = {}
         self._thumb_tasks: dict[str, asyncio.Task] = {}
         # 24/7-Modus: None oder {"kind": "song"|"playlist", "keys": [...], "name": str}
         self._always: dict | None = None
@@ -129,16 +129,15 @@ class Bot:
         self._load_fade_settings()
 
         m = self.matrix
-        m.on_text = self._on_text
         m.on_media = self._on_media
         m.on_call = self.calls.handle_event
         m.on_member_join = self.calls.on_member_joined
         m.on_room_left = self.calls.on_room_left
-        m.on_joined = self._publish_commands
         m.on_rtc_member = self.ecall.on_member_event
         self.calls.send_room_event = m.send_room_event
         self.calls.send_to_device = m.send_to_device
         self.calls.devices_of_room = m.devices_of_room
+        self._register_commands()
 
     # ------------------------------------------------------------------ Start
     async def startup(self) -> list[str]:
@@ -146,7 +145,6 @@ class Bot:
         rooms = await self.matrix.prepare_rooms()
         for rid in rooms:
             await self.matrix.ensure_room_state(rid)
-            await self._publish_commands(rid)
         turn = await self.matrix.fetch_turn()
         if turn:
             self.calls.set_turn(turn)
@@ -700,34 +698,20 @@ class Bot:
             cards.stats_body("Musik-Statistik", charts), cards.stats_card("Musik-Statistik", charts)))
 
     # ------------------------------------------------------------------ Text
-    async def _publish_commands(self, room_id: str) -> None:
-        """Befehle im Raum anmelden (State-Event), damit Clients beim Tippen vorschlagen koennen.
-        Braucht das Recht, Raumzustand zu setzen; fehlt es, bleibt es bei einer Warnung."""
-        if room_id in self._cmds_done:
-            return
-        last = self._cmds_failed.get(room_id, 0.0)
-        if time.monotonic() - last < 60:           # fehlgeschlagen: hoechstens einmal pro Minute neu versuchen
-            return
-        self._cmds_failed.pop(room_id, None)
-        uid = self.cfg.matrix_user_id or self.cfg.user
-        try:
-            current = await self.matrix.get_state_events(room_id, cards.COMMANDS_EVENT)
-            want = cards.commands_content(self.cfg.prefixes[0] if self.cfg.prefixes else "!")
-            have = {k: v for k, v in (current.get(uid) or {}).items() if k != "_sender"}
-            if have != want:
-                await self.matrix.put_state(room_id, cards.COMMANDS_EVENT, uid, want)
-            # Steckbrief fuer Diddy (BOT-Abzeichen, Info-Text, Banner); state_key = eigene ID
-            current = await self.matrix.get_state_events(room_id, cards.BOT_EVENT)
-            want = cards.bot_content(BOT_ABOUT)
-            if {k: v for k, v in (current.get(uid) or {}).items() if k != "_sender"} != want:
-                await self.matrix.put_state(room_id, cards.BOT_EVENT, uid, want)
-            self._cmds_done.add(room_id)
-        except Exception as exc:
-            self._cmds_failed[room_id] = time.monotonic()
-            log.warning("Befehle in %s nicht angemeldet (Rechte?): %s", room_id, exc)
+    def _register_commands(self) -> None:
+        """Alle Befehle an die Library haengen: sie liefert Sync, Entdoppeln, Einladungen und die
+        Befehlsliste fuer Diddy (Vorschlaege beim Tippen). Die Ausfuehrung bleibt `_on_text`, damit
+        Aliase, Rechte und Befehle wie bisher laufen."""
+        dbot = self.matrix.dbot
+        for name, usage, desc in cards.COMMAND_LIST:
+            canon = LOOKUP[name]
+            aliases = [w for w, c in LOOKUP.items() if c == canon and w != name]
+
+            async def run(ctx, *, text: str = "") -> None:
+                await self._on_text(ctx.room_id, ctx.sender, ctx.body)
+            dbot.command(name, desc=desc, usage=usage, aliases=aliases, options=[], group="Musik")(run)
 
     async def _on_text(self, room_id: str, sender: str, body: str) -> None:
-        await self._publish_commands(room_id)
         cmd = parse(body, self.cfg.prefixes)
         if cmd is None:
             return

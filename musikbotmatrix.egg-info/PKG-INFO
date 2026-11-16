@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: musikbotmatrix
+Version: 0.1.0
+Summary: Matrix-Musikbot: spielt YouTube-Titel in klassischen Matrix-Calls ab
+Requires-Python: >=3.11
+Requires-Dist: matrix-nio[e2e]<0.27,>=0.26
+Requires-Dist: aiortc<2,>=1.15
+Requires-Dist: av<18,>=16
+Requires-Dist: numpy>=1.26
+Requires-Dist: yt-dlp[curl-cffi,default]>=2025.1.1
+Requires-Dist: aiohttp>=3.9
+Requires-Dist: livekit<2,>=1.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"

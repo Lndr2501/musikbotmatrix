@@ -39,6 +39,9 @@ for _canon, _names in ALIASES.items():
     for _n in _names:
         _LOOKUP.setdefault(_n, _canon)
 
+#: Wort (Name oder Alias) -> kanonischer Befehl
+LOOKUP = _LOOKUP
+
 COMMANDS: tuple[str, ...] = tuple(sorted(ALIASES))
 
 HELP = """Kommandos:

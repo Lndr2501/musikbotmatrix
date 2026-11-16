@@ -72,8 +72,6 @@ def make_bot():
     bot._thumb_url = {}
     bot._thumb_mxc = {}
     bot._cover_frames = {}
-    bot._cmds_done = set()
-    bot._cmds_failed = {}
     bot._thumb_tasks = {}
     bot._loop_on = False
     bot._autoplay = False
@@ -353,35 +351,40 @@ def test_large_cover_arrives_complete_even_when_the_server_sends_it_in_pieces():
     assert got and got[0] == body
 
 
-def test_commands_publish_is_retried_after_a_minute_when_it_failed(monkeypatch):
-    import musikbot.bot as botmod
-    bot = make_bot()
-    bot.cfg = type("C", (), {"matrix_user_id": "@b:x", "user": "@b:x", "prefixes": ("!",)})()
-    calls = []
+def test_commands_go_through_the_library_and_diddy_gets_the_command_list():
+    """Die Library bekommt jeden Befehl samt Aliasen; Diddy bekommt genau COMMAND_LIST."""
+    from diddybot.testing import TestClient
 
-    async def get_state(room, ev):
-        return {}
+    from musikbot.bot import PROFILE
+    from musikbot.commands import LOOKUP
 
-    async def put_state(room, ev, key, content):
-        if ev != cards.COMMANDS_EVENT:
-            return                                   # Steckbrief (dev.diddy.bot) zaehlt hier nicht
-        calls.append(1)
-        if len(calls) < 3:
-            raise RuntimeError("M_FORBIDDEN")
+    bot = Bot.__new__(Bot)
+    seen = []
 
-    bot.matrix.get_state_events = get_state
-    bot.matrix.put_state = put_state
-    now = [1000.0]
-    monkeypatch.setattr(botmod.time, "monotonic", lambda: now[0])
-    asyncio.run(bot._publish_commands("!r"))
-    asyncio.run(bot._publish_commands("!r"))                    # gleich danach: kein neuer Versuch
-    assert len(calls) == 1
-    now[0] += 61
-    asyncio.run(bot._publish_commands("!r"))                    # nach einer Minute: zweiter Versuch
-    now[0] += 61
-    asyncio.run(bot._publish_commands("!r"))                    # klappt jetzt
-    asyncio.run(bot._publish_commands("!r"))                    # danach nie wieder
-    assert len(calls) == 3
+    async def on_text(room, sender, body):
+        seen.append((room, sender, body))
+    bot._on_text = on_text
+    import diddybot
+    from diddybot.testing import FakeTransport
+    bot.matrix = SimpleNamespace(dbot=diddybot.Bot(transport=FakeTransport("@b:x"), **PROFILE))
+    bot._register_commands()
+    chat = TestClient(bot.matrix.dbot, user="@a:x", room="!r:x", bot_id="@b:x", strict=False)
+
+    async def flow():
+        await chat.start()
+        await chat.say("!24/7 off")
+        await chat.say("!überspringen")           # Alias mit Umlaut
+        await chat.say("!zurück 5")
+        await chat.say("!hallo")                  # kein Befehl: ignoriert
+        return chat.commands()
+
+    content = asyncio.run(flow())
+    expected = cards.commands_content("!")
+    expected.pop("v")                                         # das liefert der TestClient geparst, ohne Version
+    assert content == expected                                # keine "options": die Befehle lesen den Text selbst
+    assert [b for _, _, b in seen] == ["!24/7 off", "!überspringen", "!zurück 5"]
+    assert all(word in LOOKUP for word in ("weiter", "zurueck", "24/7"))
+    assert chat.profile()["accent"] == "#e6457a"          # der Parser schreibt Farben klein
 
 
 def test_loop_button_toggles_and_the_card_shows_the_state():

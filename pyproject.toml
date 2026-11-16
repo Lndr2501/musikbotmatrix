@@ -1,10 +1,11 @@
 [project]
 name = "musikbotmatrix"
-version = "0.1.0"
+version = "0.2.0"
 description = "Matrix-Musikbot: spielt YouTube-Titel in klassischen Matrix-Calls ab"
 requires-python = ">=3.11"
 dependencies = [
-    "matrix-nio[e2e]>=0.26,<0.27",
+    # Bot-Library (Matrix, E2EE, Diddy-Karten); nach dem Merge von Diddy-PR #230 auf @main stellen.
+    "diddy-bot @ git+https://github.com/Lndr2501/diddy.git@feat/bot-sdk#subdirectory=sdk/python",
     "aiortc>=1.15,<2",
     "av>=16,<18",
     "numpy>=1.26",
@@ -14,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -28,3 +29,5 @@ musikbot = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
