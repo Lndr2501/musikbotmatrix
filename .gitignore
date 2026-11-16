@@ -9,3 +9,4 @@ matrix-store/
 radio/*
 !radio/.gitkeep
 .cloudflare/
+*.egg-info/
