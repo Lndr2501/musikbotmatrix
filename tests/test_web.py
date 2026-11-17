@@ -362,7 +362,6 @@ def test_local_library_lists_and_plays_files_without_247(tmp_path):
     bot = _bot_with_store(tmp_path)
     bot.cfg = SimpleNamespace(radio_dir=str(radio))
     bot._radio_files = {}
-    bot._always = None
     bot._web_room = lambda user: "!r:x"
     done = []
 
@@ -382,6 +381,5 @@ def test_local_library_lists_and_plays_files_without_247(tmp_path):
     asyncio.run(asyncio.sleep(0))
     assert done[0] == ("one", first, "next")
     assert done[1][0] == "all" and done[1][2] is True and len(done[1][1]) == 2
-    assert bot._always is None                            # kein 24/7
     with pytest.raises(MediaError):
         asyncio.run(bot.web_local_play("@u:x", "now", "radio:gibtsnicht"))

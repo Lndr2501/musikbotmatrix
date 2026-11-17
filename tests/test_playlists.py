@@ -1,4 +1,4 @@
-"""Playlists, 24/7, Call-Pflicht und Auto-Verlassen (ohne Netzwerk)."""
+"""Playlists, Call-Pflicht und Auto-Verlassen (ohne Netzwerk)."""
 import asyncio
 
 import pytest
@@ -37,14 +37,12 @@ def test_store_playlist_survives_reopen(tmp_path):
 
 def test_command_aliases_and_read_only():
     assert parse("!pl list", ("!",)).name == "playlist"
-    assert parse("!24/7 song x", ("!",)).name == "always"
-    assert parse("!247 off", ("!",)).name == "always"
+    assert parse("!24/7 song x", ("!",)) is None              # 24/7 gibt es nicht mehr
     assert is_read_only("status") and is_read_only("queue") and is_read_only("help")
     assert is_read_only("playlist", "") and is_read_only("playlist", "list")
     assert is_read_only("playlist", "show foo")
     assert not is_read_only("playlist", "play foo")
     assert not is_read_only("playlist", "add foo http://x")
-    assert is_read_only("always", "status") and not is_read_only("always", "") and not is_read_only("always", "off")
     for n in ("play", "pause", "skip", "stop", "volume", "joincall", "leavecall", "clear"):
         assert not is_read_only(n)
 
@@ -142,34 +140,21 @@ def test_no_leave_while_downloading(bot):
     assert bot.left == []
 
 
-def test_playlist_play_and_24_7_refill(bot):
+def test_playlist_play_then_leave_when_done(bot):
     in_call(bot, "!r", "@a:x")
     for k in ("yt:1", "yt:2"):
         bot.store.note_request(k, title=k, url="u")
     bot.store.playlist_create("mix")
     bot.store.playlist_add("mix", "yt:1")
     bot.store.playlist_add("mix", "yt:2")
-    run(bot._on_text("!r", "@a:x", "!24/7 playlist mix"))
+    run(bot._on_text("!r", "@a:x", "!playlist play mix"))
     assert bot.played == ["yt:1"] and bot.player.queue == [("yt:2", "@a:x")]
-    # Titel 1 endet, Queue nicht leer -> kein Refill
-    run(bot._player_event("track-end", {"track": bot.player.current}))
-    assert len(bot.player.queue) == 1
-    # letzter Titel endet -> Playlist wird neu eingereiht, Bot bleibt
     bot.player.queue.clear()
     run(bot._player_event("track-end", {"track": bot.player.current}))
-    assert [k for k, _ in bot.player.queue] == ["yt:1", "yt:2"]
+    assert bot.player.queue == []                              # kein Nachfuellen mehr
     bot.ecall.room_id = "!r"
     run(bot._player_event("queue-empty", {"auto": True}))
-    assert bot.left == []                                      # 24/7 -> nie verlassen
-    run(bot._on_text("!r", "@a:x", "!24/7 off"))
-    assert bot._always is None
-    run(bot._player_event("queue-empty", {"auto": True}))
     assert bot.left == ["ecall"]
-
-
-def test_24_7_stays_in_empty_call(bot):
-    bot._always = {"kind": "song", "keys": ["yt:1"]}
-    assert bot.ecall.keep_alive() is True
 
 
 def test_playlist_commands(bot):

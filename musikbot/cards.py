@@ -237,7 +237,7 @@ HELP_GROUPS = [
        ("!joincall · !leavecall", "Bot kommt in den Call · verlässt ihn"),
        ("!rejoin", "Bot verbindet sich neu mit dem Call (hilft, wenn er stumm ist)"),
        ("!dashboard", "Web-Dashboard: Link + persönliches Passwort per Direktnachricht")),
-    _g("Playlists und Dauerbetrieb",
+    _g("Playlists und Favoriten",
        ("!playlist create|delete <name>", "anlegen · löschen"),
        ("!playlist add <name> [Link]", "Titel hinzufügen (ohne Link: der laufende)"),
        ("!playlist remove <name> <nr>", "Titel entfernen"),
@@ -245,12 +245,11 @@ HELP_GROUPS = [
        ("!playlist play <name> [shuffle]", "abspielen · !playlist enqueue <name> einreihen"),
        ("!fav · !fav list · !fav remove <nr>", "laufenden Titel merken · deine Favoriten · entfernen"),
        ("!fav play [shuffle]", "deine Favoriten abspielen (Steuern: nur im Call)"),
-       ("!stats", "Diagramme: meistgespielte Titel, wer am meisten Musik hört"),
-       ("!24/7 song [Link] · playlist <name> · off", "Dauerschleife, Bot bleibt im Call")),
+       ("!stats", "Diagramme: meistgespielte Titel, wer am meisten Musik hört")),
 ]
 HELP_NOTE = ("Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue, "
              "playlist list/show geht immer). Ist die Warteschlange leer und der Song zu Ende, "
-             "verlässt der Bot den Call (außer im 24/7-Modus). Titel werden nur gespeichert, wenn "
+             "verlässt der Bot den Call. Titel werden nur gespeichert, wenn "
              "sie oft gespielt werden (ab 5 Downloads); nach 3 Tagen ohne Wiedergabe wird die Datei gelöscht.")
 
 
@@ -281,7 +280,6 @@ COMMAND_LIST = [
     ("playlist", "!playlist create|add|remove|show|list|play|enqueue|delete", "Playlists"),
     ("fav", "!fav [list | remove <nr> | play [shuffle]]", "deine Favoriten"),
     ("stats", "!stats", "Diagramme: meistgespielt, wer hört am meisten"),
-    ("24/7", "!24/7 song [Link] | playlist <name> | off", "Dauerschleife"),
     ("help", "!help", "alle Befehle"),
 ]
 

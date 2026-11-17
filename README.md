@@ -73,22 +73,20 @@ unabhängig vom Ordnernamen.)
 | `!seek <mm:ss>` · `!volume <0-300>` · `!video on|off` | spulen / lauter / Bild an aus |
 | `!shuffle` · `!loop on|off` | mischen / aktueller Titel in Dauerschleife |
 | `!joincall` · `!leavecall` | Bot ruft alle im Raum an / haengt auf |
+| `!rejoin` | Bot verbindet sich neu mit dem Call (hilft, wenn er stumm ist) |
 | `!playlist create\|delete <name>` | Playlist anlegen / löschen |
 | `!playlist add <name> [Link]` · `remove <name> <nr>` | Titel hinzufügen (ohne Link: laufender Titel) / entfernen |
 | `!playlist show <name>` · `list` | Inhalt / alle Playlists |
 | `!playlist play <name> [shuffle]` · `enqueue <name>` | abspielen (ersetzt Queue) / hinten anhängen |
-| `!24/7` · `!24/7 radio` | zufällig die MP3s aus dem Ordner `radio/` (Dauerschleife, neue Dateien sofort dabei) |
-| `!24/7 song [Link]` · `!24/7 playlist <name>` · `!24/7 off` | Dauerschleife, Bot bleibt im Call |
 | `!help` | Kommandoliste |
 
 **Wer darf steuern?** Nur Leute, die selbst im Call sind (Element Call oder
-klassischer Call). `!help`, `!status`, `!queue`, `!playlist list|show` und
-`!24/7 status` gehen für alle im Raum. Abschaltbar mit
+klassischer Call). `!help`, `!status`, `!queue` und `!playlist list|show`
+gehen für alle im Raum. Abschaltbar mit
 `CALL_ONLY_CONTROL=false`; `ALLOWED_USERS` gilt zusätzlich.
 
 **Auto-Verlassen:** Ist der Song zu Ende und die Warteschlange leer, verlässt
-der Bot sofort den Call (`LEAVE_WHEN_DONE=false` schaltet das ab). Im 24/7-Modus
-bleibt er, auch wenn der Call leer ist; `!stop` oder `!24/7 off` beendet ihn.
+der Bot sofort den Call (`LEAVE_WHEN_DONE=false` schaltet das ab).
 Playlists liegen in der SQLite-DB (nur Links/Titel, keine Audiodateien).
 
 Deutsche Aliase funktionieren auch (`!abspielen`, `!pausieren`, `!fortsetzen`,
@@ -101,10 +99,12 @@ persönlichen Link. Einmal öffnen, danach bleibst du eingeloggt (90 Tage,
 verlängert sich bei jeder Nutzung). Ein neues `!dashboard` macht den alten Link
 ungültig, angemeldete Geräte bleiben drin.
 
-Im Dashboard: Wiedergabe steuern (Play/Pause, Spulen, Lautstärke, Loop,
-Video), Warteschlange sortieren (ziehen), Suche mit Trefferliste („jetzt“,
-„als Nächstes“, „hinten anstellen“), Playlists, Favoriten, 24/7-Radio und die
-Fade-Regler (Crossfade-Länge, Einblenden, sanft stoppen, sofort überblenden).
+Im Dashboard: Wiedergabe steuern (Play/Pause, Spulen, ±10 s, Lautstärke, Loop,
+Video, Autoplay), Call beitreten/verlassen/neu verbinden, Warteschlange sortieren
+(ziehen), Suche mit Trefferliste („jetzt“, „als Nächstes“, „hinten anstellen“),
+Mediathek (eigene Dateien), Datei vom Gerät abspielen, Playlists, Favoriten,
+Statistik und die Fade-Regler (Crossfade-Länge, Einblenden, sanft stoppen,
+sofort überblenden).
 
 Das Dashboard läuft im Bot auf `WEB_PORT` (Standard 8095). Für den Zugriff von
 außen einen Reverse-Proxy oder Cloudflare-Tunnel davor setzen und `PUBLIC_URL`
@@ -118,16 +118,17 @@ geladen, damit er pünktlich bereitliegt. Länge per `CROSSFADE_SECONDS`
 (Standard 6, `0` = aus; bei kurzen Titeln höchstens ein Drittel der Länge).
 `!skip`, `!stop`, Seek und ein neues `!play` blenden nur kurz (0,3 s) aus,
 damit es nicht knackt. Kein Crossfade gibt es, wenn derselbe Titel direkt
-nochmal kommt (Schleife mit leerer Warteschlange, 24/7 mit einem Song).
+nochmal kommt (Schleife mit leerer Warteschlange).
 
-## Radio-Ordner
+## Mediathek (Ordner `radio/`)
 
 MP3s (auch m4a, ogg, opus, flac, wav; Unterordner gehen) in `radio/` neben der
-`compose.yaml` legen (oder im Dashboard unter „Meins“ → „MP3 hochladen“, max. 100 MB pro
-Datei), dann im Raum `!24/7 radio`. Der Bot legt dort nur neue Dateien an und löscht oder
+`compose.yaml` legen (oder im Dashboard unter „Mediathek“ → „Zur Mediathek hinzufügen“,
+max. 100 MB pro Datei). Im Dashboard-Tab „Mediathek“ lassen sie sich einzeln abspielen,
+einreihen oder alle (gemischt) spielen. Der Bot legt dort nur neue Dateien an und löscht oder
 überschreibt nie etwas (gleicher Name → „ (2)“). Der Host-Ordner muss für UID 10000
-beschreibbar sein (`chown 10000 radio`). Neue Dateien werden bei jedem
-neuen Durchlauf automatisch mitgenommen; kein Neustart nötig. `MAX_SONG_SECONDS`
+beschreibbar sein (`chown 10000 radio`). Neue Dateien erscheinen sofort;
+kein Neustart nötig. `MAX_SONG_SECONDS`
 gilt für Radio-Dateien nicht. Nach der Änderung einmal `docker compose up -d --build`.
 
 ## Speicher-Regeln

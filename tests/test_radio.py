@@ -1,4 +1,4 @@
-"""Radio-Ordner: !24/7 radio spielt zufaellig eigene Dateien, loescht aber nie etwas."""
+"""Mediathek (Radio-Ordner): eigene Dateien abspielen, aber nie etwas loeschen."""
 import asyncio
 import os
 
@@ -26,14 +26,6 @@ def test_scan_picks_audio_only_and_picks_up_new_files(tmp_path):
     assert {bot.store.get(k).title for k in keys} == {"a", "b"}
     (radio / "c.ogg").write_bytes(b"x")
     assert len(bot._radio_scan()) == 3
-
-
-def test_shuffle_never_repeats_last_first(tmp_path):
-    bot, radio = _bot(tmp_path)
-    for n in "abc":
-        (radio / f"{n}.mp3").write_bytes(b"x")
-    last = bot._radio_scan()[0]
-    assert all(bot._radio_shuffled(last)[0] != last for _ in range(30))
 
 
 def test_radio_files_are_never_deleted(tmp_path):

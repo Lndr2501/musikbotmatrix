@@ -59,7 +59,7 @@ class Config:
 
     # --- Dateien -----------------------------------------------------------
     data_dir: str = "/data"
-    # Radio-Ordner (eigene MP3s fuer !24/7 radio); wird nie veraendert oder geloescht.
+    # Mediathek: eigene Dateien (Dashboard-Tab "Mediathek"); wird nie veraendert oder geloescht.
     radio_dir: str = "/radio"
 
     # --- Medien ------------------------------------------------------------

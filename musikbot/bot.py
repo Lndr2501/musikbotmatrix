@@ -110,10 +110,7 @@ class Bot:
         self._thumb_mxc: dict[str, str] = {}
         self._cover_frames: dict[str, object] = {}
         self._thumb_tasks: dict[str, asyncio.Task] = {}
-        # 24/7-Modus: None oder {"kind": "song"|"playlist", "keys": [...], "name": str}
-        self._always: dict | None = None
         self._radio_files: dict[str, str] = {}      # Radio-Key -> Dateipfad
-        self.ecall.keep_alive = lambda: self._always is not None
         self.ecall.on_call_started = self._on_call_started
         self._want_call: str | None = None          # Raum: Play kam, Call fehlte noch -> spaeter beitreten
         # Web-Dashboard: Login-Daten liegen in derselben Datenbank
@@ -231,7 +228,7 @@ class Bot:
     async def _check_empty(self, now: float) -> bool:
         """Ein Pruefschritt. True, wenn der Bot gerade wegen eines leeren Calls gegangen ist."""
         in_call = self.ecall.active or bool(self.calls.peers)
-        if self._always or not (in_call or self.player.state == "playing") \
+        if not (in_call or self.player.state == "playing") \
                 or await self._someone_listening():
             self._alone_since = None
             return False
@@ -266,7 +263,7 @@ class Bot:
             try:
                 in_call = self.ecall.active or bool(self.calls.peers)
                 busy = self.player.state == "playing" or self._fetching > 0
-                if not in_call or busy or self._always:
+                if not in_call or busy:
                     idle_since = None
                     continue
                 if idle_since is None:
@@ -421,7 +418,7 @@ class Bot:
         """Zusatzfelder fuer das Player-Layout von Diddy: Raum, Wunsch von, Up next, Knoepfe."""
         rooms = getattr(getattr(self.matrix, "client", None), "rooms", None) or {}
         who = getattr(self.player, "requester", "") or ""
-        by = ("Autoplay" if who == AUTOPLAY else "24/7" if who == "24/7"
+        by = ("Autoplay" if who == AUTOPLAY
               else await self._display_name(who) if who.startswith("@") else "")
         nxt = []
         for key, _ in list(self.player.queue)[:3]:
@@ -531,31 +528,6 @@ class Bot:
         log.info("Radio-Upload von %s: %s (%d KB)", user, os.path.basename(final), size >> 10)
         return os.path.basename(final)
 
-    def _radio_shuffled(self, last: str | None = None) -> list[str]:
-        keys = self._radio_scan()
-        random.shuffle(keys)
-        if len(keys) > 1 and keys[0] == last:      # nicht zweimal hintereinander denselben
-            keys[0], keys[-1] = keys[-1], keys[0]
-        return keys
-
-    def _refill_always(self) -> bool:
-        """24/7: Warteschlange wieder fuellen. False = nichts (mehr) zu spielen."""
-        cfg = self._always
-        if not cfg:
-            return False
-        if cfg["kind"] == "playlist":
-            keys = self.store.playlist_keys(cfg["name"]) or []
-        elif cfg["kind"] == "radio":
-            keys = self._radio_shuffled(getattr(self.player.current, "key", None))
-        else:
-            keys = cfg["keys"]
-        if not keys:
-            self._always = None
-            return False
-        for key in keys:
-            self.player.enqueue(key, "24/7")
-        return True
-
     async def _player_event(self, name: str, data: dict) -> None:
         if name == "need-next":
             if self._autoplay_on() and data.get("track") is not None:
@@ -565,8 +537,6 @@ class Bot:
             self._last_finished = data.get("track")
             if self._loop_on and data.get("track") is not None:
                 self.player.enqueue(data["track"].key, "")
-            elif self._always and not self.player.queue:
-                self._refill_always()
             return
         room = self._notice_room()
         if not room:
@@ -587,11 +557,7 @@ class Bot:
                 task.add_done_callback(self._bg_tasks.discard)
                 return
             await self._finish_now_card(room)
-            if self._always:
-                await self._note(
-                    room, "24/7: Es ließ sich nichts mehr abspielen. "
-                          "Mit !24/7 off beenden oder neu starten.", "warning")
-            elif self.cfg.leave_when_done and not self._busy and not self._fetching:
+            if self.cfg.leave_when_done and not self._busy and not self._fetching:
                 log.info("Warteschlange leer und Titel zu Ende, verlasse den Call")
                 await self._leave_call(
                     room, "👋 Warteschlange leer und Song zu Ende – Call verlassen.")
@@ -620,7 +586,7 @@ class Bot:
 
     # ------------------------------------------------------------ Favoriten / Statistik
     def _log_play(self, track) -> None:
-        """Wiedergabe fuer die Statistik merken (nur echte Nutzer, nicht 24/7 oder Wiederholung)."""
+        """Wiedergabe fuer die Statistik merken (nur echte Nutzer, nicht Autoplay oder Wiederholung)."""
         who = getattr(self.player, "requester", "") or ""
         if who.startswith("@"):
             try:
@@ -833,16 +799,12 @@ class Bot:
                 await self._note(room_id, "weiter." if ok else "Nichts pausiert.",
                                  "info" if ok else "warning", "▶" if ok else "")
         elif name == "stop":
-            was_always, self._always = self._always is not None, None
             await p.stop()
             await self._finish_now_card(room_id)
-            await self._note(room_id, "gestoppt." + (" 24/7 ist aus." if was_always else ""),
-                             "info", "⏹")
+            await self._note(room_id, "gestoppt.", "info", "⏹")
         elif name == "skip":
             if self._loop_on:
                 self._loop_on = False
-            if self._always and not p.queue:
-                self._refill_always()
             seed = p.current if (not p.queue and self._autoplay_on()) else None
             ok = await p.skip()
             if not ok and seed is not None:       # nichts in der Warteschlange: Autoplay springt ein
@@ -932,8 +894,6 @@ class Bot:
             await self._fav(room_id, sender, arg)
         elif name == "stats":
             await self._stats(room_id)
-        elif name == "always":
-            await self._always_cmd(room_id, sender, arg)
         elif name == "autoplay":
             mode = arg.strip().lower()
             self._autoplay = True if mode in ("on", "an") else False if mode in ("off", "aus") \
@@ -1204,8 +1164,6 @@ class Bot:
             return
 
         if sub in ("delete", "loeschen", "löschen"):
-            if self._always and self._always.get("name", "").lower() == name.lower():
-                self._always = None
             st.playlist_delete(name)
             await m.send_notice(room_id, f"🗑 Playlist „{name}“ gelöscht.")
         elif sub in ("add", "hinzufuegen", "hinzufügen"):
@@ -1246,66 +1204,6 @@ class Bot:
                                   replace=sub in ("play", "abspielen"))
         else:
             await m.send_notice(room_id, "Unbekannt. Benutzung: !playlist create|delete|add|remove|show|list|play|enqueue")
-
-    async def _always_cmd(self, room_id: str, sender: str, arg: str) -> None:
-        m = self.matrix
-        sub, _, rest = arg.strip().partition(" ")
-        sub, rest = sub.lower(), rest.strip()
-        cfg = self._always
-        if sub == "" and not cfg:
-            sub = "radio"                      # nacktes !24/7 startet das Radio
-        if sub in ("", "status"):
-            if not cfg:
-                await m.send_notice(room_id, "24/7 ist aus. !24/7 radio · !24/7 song [Link] · !24/7 playlist <name>")
-            elif cfg["kind"] == "radio":
-                await m.send_notice(room_id, "📻 24/7 Radio läuft (zufällig aus dem Radio-Ordner). Beenden: !24/7 off")
-            elif cfg["kind"] == "playlist":
-                await m.send_notice(room_id, f"♾ 24/7 läuft: Playlist „{cfg['name']}“. Beenden: !24/7 off")
-            else:
-                await m.send_notice(room_id, f"♾ 24/7 läuft: {self._title(cfg['keys'][0])}. Beenden: !24/7 off")
-        elif sub in ("off", "aus", "stop"):
-            if cfg:
-                self._always = None
-                await m.send_notice(room_id, "24/7 aus. Der aktuelle Titel läuft zu Ende, "
-                                             "danach verlasse ich den Call.")
-            else:
-                await m.send_notice(room_id, "24/7 war nicht an.")
-        elif sub in ("song", "lied", "titel"):
-            if rest:
-                track = await self._resolve_for_list(room_id, rest)
-                if track is None:
-                    return
-            elif self.player.current is not None:
-                track = self.player.current
-            else:
-                await m.send_notice(room_id, "Benutzung: !24/7 song <Link oder Suchbegriff>")
-                return
-            self._always = {"kind": "song", "keys": [track.key]}
-            self._loop_on = False
-            await m.send_notice(room_id, f"♾ 24/7: {track.title or track.key} läuft in Dauerschleife.")
-            if rest or self.player.state == "stopped":
-                await self._play_keys(room_id, sender, [track.key], replace=True)
-        elif sub in ("radio", "random", "zufall"):
-            keys = await asyncio.to_thread(self._radio_shuffled)
-            if not keys:
-                await m.send_notice(room_id, "📻 Der Radio-Ordner ist leer. Lege MP3-Dateien in den Ordner "
-                                             "`radio/` neben der compose.yaml und versuch es nochmal.")
-                return
-            self._always = {"kind": "radio", "keys": []}
-            self._loop_on = False
-            await m.send_notice(room_id, f"📻 24/7 Radio: {len(keys)} Dateien, zufällige Reihenfolge. Beenden: !24/7 off")
-            await self._play_keys(room_id, sender, keys, replace=True)
-        elif sub in ("playlist", "pl"):
-            keys = self.store.playlist_keys(rest) if rest else None
-            if not keys:
-                await m.send_notice(room_id, "Benutzung: !24/7 playlist <name> (muss existieren und Titel haben)")
-                return
-            self._always = {"kind": "playlist", "name": rest, "keys": []}
-            self._loop_on = False
-            await m.send_notice(room_id, f"♾ 24/7: Playlist „{rest}“ läuft in Dauerschleife.")
-            await self._play_keys(room_id, sender, list(keys), replace=True)
-        else:
-            await m.send_notice(room_id, "Benutzung: !24/7 radio | song [Link] | playlist <name> | off")
 
     # ------------------------------------------------------------------ Listen
     async def _show_queue(self, room_id: str) -> None:
@@ -1421,18 +1319,13 @@ class Bot:
         if track and st["duration"]:
             track["duration"] = st["duration"]
         hist = [k for k in reversed(self._history) if not cur or k != cur.key][:8]
-        always = None
-        if self._always:
-            keys = self._always.get("keys") or []
-            always = {"kind": self._always.get("kind"), "name": self._always.get("name", ""),
-                      "title": self._title(keys[0]) if self._always.get("kind") == "song" and keys else ""}
         call_room = self.ecall.room_id or self.calls.active_room or None
         lk = self.ecall.livekit_others()
         listeners = lk if lk is not None else (len(self.ecall.others_in_call(call_room))
                                                if call_room else 0)
         return {
             "me": user, "state": st["state"], "position": st["position"], "track": track,
-            "volume": st["volume"], "video": st["video"], "loop": self._loop_on, "always": always,
+            "volume": st["volume"], "video": st["video"], "loop": self._loop_on,
             "queue": [self._track_json(k, r) for k, r in st["queue"]],
             "history": [self._track_json(k) for k in hist],
             "peers": st["peers"], "in_call": bool(self.ecall.active or self.calls.peers),
@@ -1520,7 +1413,7 @@ class Bot:
     # Erlaubte Befehle aus dem Dashboard (wie im Chat, gleiche Karten im Raum)
     _WEB_COMMANDS = {"play", "pause", "resume", "stop", "skip", "previous", "clear", "seek", "autoplay",
                      "forward", "rewind", "volume", "video", "shuffle", "loop", "joincall",
-                     "leavecall", "rejoin", "always", "playlist", "fav"}
+                     "leavecall", "rejoin", "playlist", "fav"}
 
     async def web_command(self, user: str, name: str, arg: str) -> None:
         if name == "softskip":
@@ -1584,8 +1477,6 @@ class Bot:
     async def _soft_skip(self, room: str) -> None:
         p = self.player
         self._loop_on = False
-        if self._always and not p.queue:
-            self._refill_always()
         if await p.crossfade_now():
             return
         if p.queue and not await p.fade_out(1.5):
@@ -1686,7 +1577,7 @@ class Bot:
 
     # ------------------------------------------------------------------ Autoplay
     def _autoplay_on(self) -> bool:
-        return self._autoplay and not self._loop_on and not self._always
+        return self._autoplay and not self._loop_on
 
     async def _autoplay_pick(self, seed, *, start: bool, fallback_room: str | None = None) -> bool:
         """Aehnlichen Titel zum `seed` suchen und einreihen (start=False) bzw. sofort spielen."""

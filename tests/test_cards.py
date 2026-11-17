@@ -60,7 +60,7 @@ def test_help_groups_cover_every_command_of_the_text_help():
     usages = " ".join(i["usage"] for g in cards.HELP_GROUPS for i in g["items"])
     for cmd in ("!play", "!pause", "!resume", "!stop", "!skip", "!previous", "!queue", "!clear",
                 "!status", "!seek", "!vor", "!zurueck", "!volume", "!video", "!shuffle", "!loop",
-                "!joincall", "!leavecall", "!playlist", "!24/7"):
+                "!joincall", "!leavecall", "!rejoin", "!playlist"):
         assert cmd in usages, cmd
         assert cmd in HELP, cmd
     card = cards.help_card(cards.HELP_GROUPS, cards.HELP_NOTE)

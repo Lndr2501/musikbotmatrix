@@ -29,7 +29,6 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "playlist": ("playlist", "playlists", "pl", "wiedergabeliste"),
     "fav": ("fav", "favs", "favorit", "favoriten", "favorite", "favorites", "merken"),
     "stats": ("stats", "statistik", "top", "charts"),
-    "always": ("always", "247", "24/7", "24-7", "dauerbetrieb"),
     "autoplay": ("autoplay", "auto", "ähnlich", "aehnlich"),
     "dashboard": ("dashboard", "web", "login", "passwort", "password"),
     "help": ("help", "hilfe", "commands", "befehle"),
@@ -64,13 +63,11 @@ Audio-/Videodatei an die Nachricht anhängen – der Bot spielt sie direkt ab
     (ohne Link bei add: der laufende Titel)
 !fav – laufenden Titel merken · !fav list · !fav remove <nr> · !fav play [shuffle] (deine Favoriten)
 !stats – meistgespielte Titel und wer am meisten Musik hört
-!24/7 (oder !24/7 radio) – zufällig die MP3s aus dem Radio-Ordner, Dauerschleife
-!24/7 song [Link] · !24/7 playlist <name> · !24/7 off – Dauerschleife, Bot bleibt im Call
 !dashboard – Link + persönliches Passwort fürs Web-Dashboard per Direktnachricht
 !hilfe – diese Liste
 Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue,
 playlist list/show geht immer). Ist die Warteschlange leer und der Song zu Ende,
-verlässt der Bot den Call (außer im 24/7-Modus).
+verlässt der Bot den Call.
 Hinweis: Titel werden nur gespeichert, wenn sie oft gespielt werden (ab 5 Downloads);
 nach 3 Tagen ohne Wiedergabe wird die Datei wieder gelöscht."""
 
@@ -110,6 +107,4 @@ def is_read_only(name: str, arg: str = "") -> bool:
         return sub in ("", "list", "show", "liste", "zeige")
     if name == "fav":                      # merken/ansehen darf jeder, abspielen steuert
         return sub != "play"
-    if name == "always":
-        return sub == "status"
     return False
