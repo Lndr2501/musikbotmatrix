@@ -174,6 +174,16 @@ uv venv --python 3.12 && uv pip install -e ".[dev]"
 python -m pytest tests/ -q
 ```
 
+Aufbau der Matrix-Anbindung: `matrix.py` setzt auf die Bot-Library
+[diddybot](https://github.com/Lndr2501/diddy/tree/main/sdk/python). Die Library erledigt Login, Sync, E2EE, Einladungen,
+Entdoppeln der Nachrichten und die Befehlsliste samt Bot-Profil für Diddy; `bot.py` hängt jeden Befehl an die Library und
+führt ihn wie bisher aus (`_on_text`). `matrix.py` behält, was nur der Musikbot braucht: Anruf-Signalisierung, Element
+Call (To-Device, Geräte, OpenID), angehängte Dateien, Direktnachrichten und Karten. Ende-zu-Ende gegen einen Synapse:
+`DIDDY_TEST_HOMESERVER=http://127.0.0.1:8008 pytest tests/test_integration.py`.
+
+Update vom Bot vor Version 0.2: Der alte Token (`/data/matrix-store/access_token`) wird beim ersten Start in die
+`credentials.json` der Library übernommen. Gerät und E2EE-Schlüssel bleiben gleich.
+
 Der Mix-Loop (Dekodieren, Lautstaerke, Synchronisation) laeuft genau einmal
 unabhaengig von der Peer-Zahl; pro Geraet wird nur enkodiert. Audio ist
 immer 48 kHz Stereo (Opus), Video standardmaessig 480p/24fps (VP8).
