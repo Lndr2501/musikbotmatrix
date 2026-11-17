@@ -924,6 +924,8 @@ class Bot:
             await self.ecall.leave()
             await self.calls.hangup_all("user")
             await m.send_notice(room_id, "Call verlassen.")
+        elif name == "rejoin":
+            await self._rejoin(room_id)
         elif name == "playlist":
             await self._playlist(room_id, sender, arg)
         elif name == "fav":
@@ -1098,6 +1100,26 @@ class Bot:
             log.exception("Element Call beitreten fehlgeschlagen")
             await m.send_notice(room_id, f"Call beitreten fehlgeschlagen: {exc}")
             return False
+
+    async def _rejoin(self, room_id: str) -> None:
+        """Element Call verlassen und sofort neu beitreten (neue Verbindung, neuer Schluessel)."""
+        room = self.ecall.room_id or room_id
+        try:
+            await self.ecall.load_members(room)
+        except Exception:
+            log.warning("Call-Mitglieder laden fehlgeschlagen", exc_info=True)
+        if not self.ecall.active and not self.ecall.others_in_call(room):
+            await self._note(room_id, "Gerade läuft kein Call. Starte einen Call, dann hole ich mich "
+                                      "mit !joincall dazu.", "warning", "📞")
+            return
+        self._want_call = None
+        try:
+            await self.ecall.rejoin(room)
+        except Exception as exc:
+            log.exception("Neu verbinden fehlgeschlagen")
+            await self._note(room_id, f"Neu verbinden fehlgeschlagen: {exc}", "error", "❌")
+            return
+        await self._note(room_id, "Neu mit dem Call verbunden.", "success", "🔄")
 
     async def _on_call_started(self, room_id: str) -> None:
         """Jemand ist einem Call beigetreten, waehrend Musik laeuft/laedt und der Bot noch draussen ist."""
@@ -1401,7 +1423,13 @@ class Bot:
         hist = [k for k in reversed(self._history) if not cur or k != cur.key][:8]
         always = None
         if self._always:
-            always = {"kind": self._always.get("kind"), "name": self._always.get("name", "")}
+            keys = self._always.get("keys") or []
+            always = {"kind": self._always.get("kind"), "name": self._always.get("name", ""),
+                      "title": self._title(keys[0]) if self._always.get("kind") == "song" and keys else ""}
+        call_room = self.ecall.room_id or self.calls.active_room or None
+        lk = self.ecall.livekit_others()
+        listeners = lk if lk is not None else (len(self.ecall.others_in_call(call_room))
+                                               if call_room else 0)
         return {
             "me": user, "state": st["state"], "position": st["position"], "track": track,
             "volume": st["volume"], "video": st["video"], "loop": self._loop_on, "always": always,
@@ -1411,6 +1439,8 @@ class Bot:
             "busy": bool(self._fetching or self._busy or p._lock.locked()),
             "crossfade": self.cfg.crossfade_seconds, "fade_in": self.cfg.fade_in_seconds,
             "autoplay": self._autoplay,
+            "call": {"active": bool(call_room), "listeners": listeners,
+                     "waiting": bool(self._want_call), "element": self.ecall.active},
             "room": self._notice_room() or self.webauth.room_of(user),
             "favs": self.store.fav_keys(user),
             "me_name": self._names.get(user) or self._who(user),
@@ -1446,6 +1476,8 @@ class Bot:
             "my_top": [dict(self._track_json(k), plays=n) for k, n in self.store.top_of(user, 10)],
             "my_recent": [self._track_json(k) for k in self.store.recent_of(user, 10)],
             "top": [dict(self._track_json(k), plays=n) for k, n in self.store.top_tracks(10)],
+            "listeners": [{"name": self._who(u), "plays": n, "minutes": round(sec / 60, 1)}
+                          for u, n, sec in self.store.top_listeners(8)],
             "radio": len(self._radio_scan()) if os.path.isdir(self.cfg.radio_dir) else 0,
         }
 
@@ -1488,7 +1520,7 @@ class Bot:
     # Erlaubte Befehle aus dem Dashboard (wie im Chat, gleiche Karten im Raum)
     _WEB_COMMANDS = {"play", "pause", "resume", "stop", "skip", "previous", "clear", "seek", "autoplay",
                      "forward", "rewind", "volume", "video", "shuffle", "loop", "joincall",
-                     "leavecall", "always", "playlist", "fav"}
+                     "leavecall", "rejoin", "always", "playlist", "fav"}
 
     async def web_command(self, user: str, name: str, arg: str) -> None:
         if name == "softskip":
@@ -1509,6 +1541,33 @@ class Bot:
         if name == "playlist" and arg.split(" ", 1)[0] not in ("play", "enqueue"):
             raise MediaError("Playlists bitte im Chat bearbeiten.")
         await self._quick(self._dispatch(self._web_room(user), user, name, arg))
+
+    async def web_upload_play(self, user: str, filename: str, part) -> str:
+        """Audio-/Videodatei aus dem Dashboard sofort abspielen – wie ein Anhang im Chat."""
+        name = os.path.basename(filename or "datei")[:200] or "datei"
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in AUDIO_VIDEO_EXT:
+            raise MediaError("Nur Audio- oder Videodateien (mp3, m4a, ogg, flac, wav, mp4, webm …).")
+        room = self._web_room(user)
+        limit = self.cfg.max_upload_mb * 1024 * 1024
+        chunks: list[bytes] = []
+        size = 0
+        while chunk := await part.read_chunk(1 << 20):
+            size += len(chunk)
+            if size > limit:
+                raise MediaError(f"Datei zu groß (maximal {self.cfg.max_upload_mb} MB).")
+            chunks.append(chunk)
+        if not size:
+            raise MediaError("Die Datei ist leer.")
+        if room in self._busy:
+            raise MediaError("Ich lade gerade schon etwas – gleich nochmal versuchen.")
+        self._busy.add(room)
+        try:
+            await self._play_upload(room, user, name, b"".join(chunks), ext)
+        finally:
+            self._busy.discard(room)
+        log.info("Dashboard-Upload von %s: %s (%d KB)", user, name, size >> 10)
+        return os.path.splitext(name)[0][:120]
 
     async def _quick(self, coro, wait: float = 0.35) -> None:
         """Befehl starten und kurz warten: Der Player reagiert sofort, die Karten im Chat

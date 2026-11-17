@@ -83,6 +83,7 @@ input { font: inherit; color: inherit; }
 .chip:hover { background: rgba(255,255,255,.1); }
 .chip.on { background: var(--accent-soft); border-color: var(--accent); color: #fff; }
 .chip.small { padding: 3px 10px; font-size: 12px; margin-left: 8px; }
+.chip:disabled { opacity: .45; cursor: default; background: transparent; }
 
 /* Login */
 .login { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; }

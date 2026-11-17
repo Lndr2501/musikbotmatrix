@@ -156,6 +156,14 @@ class ElementCall:
                 await self._leave_locked()
             await self._join_locked(room_id)
 
+    async def rejoin(self, room_id: str) -> None:
+        """Call verlassen und sofort neu beitreten (neue LiveKit-Verbindung, neuer E2EE-Schluessel).
+        Hilft, wenn der Bot im Call stumm ist oder nicht mehr entschluesselt wird."""
+        async with self._lock:
+            if self.room_id is not None:
+                await self._leave_locked()
+            await self._join_locked(room_id)
+
     async def _join_locked(self, room_id: str) -> None:
         from livekit import rtc  # erst hier: schwere native Lib
 

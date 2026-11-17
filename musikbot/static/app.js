@@ -14,6 +14,7 @@ const ICONS = {
   shuffle: '<svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>',
   list: '<svg viewBox="0 0 24 24"><path d="M3 6h12M3 12h12M3 18h7M18 13v8M14 17h8"/></svg>',
   trash: '<svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>',
+  always: '<svg viewBox="0 0 24 24"><path d="M18.2 8.4a4.8 4.8 0 1 1 0 7.2L12 12 5.8 8.4a4.8 4.8 0 1 0 0 7.2L12 12l6.2-3.6Z"/></svg>',
 };
 
 let S = null;            // letzter Zustand vom Server
@@ -178,6 +179,10 @@ function render() {
   $("#autoplay").classList.toggle("on", S.autoplay);
   $("#autoplay-hint").hidden = !S.autoplay || S.queue.some((t) => t.requester === "autoplay");
   $("#fav").classList.toggle("on", !!(t && S.favs.includes(t.key)));
+  const inCall = !!(S.call && S.call.active);
+  $("#call-toggle").classList.toggle("on", inCall);
+  $("#call-toggle-text").textContent = inCall ? "Call verlassen" : (S.call && S.call.waiting ? "Warte auf Call …" : "Call beitreten");
+  $("#rejoin").disabled = !(S.call && S.call.element);
   setRange($("#volume"), S.volume);
   $("#volume-val").textContent = S.volume;
 
@@ -205,7 +210,10 @@ function renderChips() {
     chips.append(el);
   };
   if (S.busy) pill("lädt …", "busy");
-  if (S.always) pill(S.always.kind === "radio" ? "24/7 Radio" : "24/7", "live", true);
+  if (S.always) {
+    const a = S.always;
+    pill(a.kind === "radio" ? "24/7 Radio" : a.kind === "playlist" ? `24/7 · ${a.name}` : a.title ? `24/7 · ${a.title}` : "24/7", "live", true);
+  }
   pill(S.in_call ? `im Call · ${S.peers}` : "nicht im Call", S.in_call ? "live" : "");
 }
 
@@ -282,7 +290,7 @@ function renderQueue() {
 $$("[data-cmd]").forEach((b) => b.addEventListener("click", () => {
   const name = b.dataset.cmd;
   if (name === "clear" && !confirm("Warteschlange leeren?")) return;
-  cmd(name);
+  cmd(name, b.dataset.arg || "");
 }));
 
 $("#playpause").addEventListener("click", () => {
@@ -303,6 +311,13 @@ $("#fav").addEventListener("click", (ev) => {
   if (S && S.track) ev.currentTarget.classList.toggle("on");
   if (S && S.track) cmd("favkey", S.track.key, S.favs.includes(S.track.key) ? "Aus Favoriten entfernt" : "Zu Favoriten hinzugefügt");
 });
+$("#call-toggle").addEventListener("click", () => {
+  if (!S) return;
+  if (S.call && S.call.active) {
+    if (confirm("Bot aus dem Call nehmen?")) cmd("leavecall", "", "Call verlassen");
+  } else cmd("joincall", "", "Bot kommt in den Call …");
+});
+$("#rejoin").addEventListener("click", () => cmd("rejoin", "", "Verbinde neu …"));
 const softStop = () => cmd("softstop", $("#softstop-len").value, "Wird ausgeblendet …");
 $("#softstop").addEventListener("click", softStop);
 $("#softstop2").addEventListener("click", softStop);
@@ -370,6 +385,7 @@ function searchActions(url) {
     button("next", "Als Nächstes", add("next", "Als Nächstes eingereiht")),
     button("plus", "Hinten anstellen", add("end", "Eingereiht")),
     button("list", "Zu deiner Playlist", (ev) => playlistMenu(ev, { query: url })),
+    button("always", "24/7: in Dauerschleife", () => cmd("always", `song ${url}`, "Läuft in Dauerschleife"), "hover-only"),
   ];
 }
 
@@ -426,6 +442,29 @@ function uploadRadio(files) {
   })();
 }
 
+// Datei hochladen und sofort abspielen (wie ein Anhang im Chat)
+function uploadPlay(file) {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/upload");
+  xhr.setRequestHeader("X-Musikbot", "1");
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) { uploading = `${file.name}: ${Math.round((e.loaded / e.total) * 100)} %`; renderLibrary(); }
+  };
+  const done = () => { uploading = ""; renderLibrary(); };
+  xhr.onload = () => {
+    let data = {};
+    try { data = JSON.parse(xhr.responseText); } catch { /* leer */ }
+    done();
+    if (xhr.status === 401) { showLogin(); return; }
+    if (xhr.status >= 200 && xhr.status < 300) { toast(`„${data.title || file.name}“ läuft`); if (data.queue) apply(data); }
+    else toast(`${file.name}: ${data.error || "Fehler " + xhr.status}`, true);
+  };
+  xhr.onerror = () => { done(); toast(`${file.name}: Upload fehlgeschlagen`, true); };
+  xhr.send(fd);
+}
+
 function renderLibrary() {
   const lib = LIB;
   if (!lib) return;
@@ -452,9 +491,15 @@ function renderLibrary() {
     always
       ? card("24/7 ausschalten", "Dauerschleife beenden", () => cmd("always", "off", "24/7 ist aus"), true)
       : card("24/7 Radio", lib.radio ? `${lib.radio} Dateien, zufällig` : "Radio-Ordner ist leer", () => cmd("always", "radio", "Radio läuft")),
+    !always && S && S.track
+      ? card("24/7 dieser Titel", "Laufenden Titel in Dauerschleife", () => cmd("always", "song", "Läuft in Dauerschleife"))
+      : "",
     card("Deine Favoriten", `${lib.favorites.length} Titel gemischt abspielen`, () => cmd("fav", "play shuffle")),
+    card("Datei abspielen", uploading || "Audio/Video vom Gerät, läuft sofort", () => $("#play-file").click()),
     card("MP3 hochladen", uploading || "Eigene Songs fürs Radio", () => $("#radio-file").click()),
   );
+  const playInput = $("#play-file");
+  if (!playInput.onchange) playInput.onchange = () => { if (playInput.files[0]) uploadPlay(playInput.files[0]); playInput.value = ""; };
   $("#fav-play").onclick = () => cmd("fav", "play");
   const fileInput = $("#radio-file");
   if (!fileInput.onchange) fileInput.onchange = () => { uploadRadio(fileInput.files); fileInput.value = ""; };
@@ -472,6 +517,7 @@ function renderLibrary() {
       button("play", "Abspielen", () => cmd("playlist", `play ${p.name}`)),
       button("shuffle", "Gemischt abspielen", () => cmd("playlist", `play ${p.name} shuffle`)),
       button("plus", "Einreihen", () => cmd("playlist", `enqueue ${p.name}`, "Eingereiht")),
+      button("always", "24/7: in Dauerschleife", () => cmd("always", `playlist ${p.name}`, `„${p.name}“ läuft 24/7`), "hover-only"),
       button("trash", "Playlist löschen", () => {
         if (confirm(`Playlist „${p.name}“ löschen?`)) playlistOp({ op: "delete", name: p.name }, "Gelöscht");
       }, "hover-only"));
@@ -511,8 +557,13 @@ function renderLibrary() {
       button("play", "Abspielen", () => cmd("playlist", `play ${p.name}`)),
       button("shuffle", "Gemischt abspielen", () => cmd("playlist", `play ${p.name} shuffle`)),
       button("plus", "Einreihen", () => cmd("playlist", `enqueue ${p.name}`, "Eingereiht")),
+      button("always", "24/7: in Dauerschleife", () => cmd("always", `playlist ${p.name}`, `„${p.name}“ läuft 24/7`), "hover-only"),
     ])));
   $("#top").replaceChildren(...simple(lib.top, (t) => `${t.plays}× gespielt`));
+  const people = lib.listeners || [];
+  $("#listeners-head").hidden = people.length === 0;
+  $("#listeners").replaceChildren(...people.map((u, i) =>
+    row({ title: `${i + 1}. ${u.name}` }, `${u.minutes} min · ${u.plays} Titel`)));
 }
 
 $("#pl-new").addEventListener("click", () => {
