@@ -154,7 +154,7 @@ function render() {
   $("#title").textContent = t ? t.title : "Nichts läuft";
   $("#artist").textContent = t
     ? [t.artist, t.requester === "autoplay" ? "✨ Autoplay" : ""].filter(Boolean).join(" · ") || (t.requester ? `gewünscht von ${t.requester}` : "")
-    : "Such dir etwas aus – oder spiel etwas aus der Mediathek.";
+    : "Such dir etwas aus.";
   document.title = t ? `${S.state === "playing" ? "▶" : "⏸"} ${t.title} – Musikbot` : "Musikbot";
 
   const cover = $("#cover"), empty = $("#cover-empty");
