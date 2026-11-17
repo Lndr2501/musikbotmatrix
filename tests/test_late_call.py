@@ -58,7 +58,6 @@ def test_member_event_triggers_callback_only_when_outside_call():
         matrix_user_id, user, device_id = "@bot:x", "@bot:x", "BOT"
     ec = ElementCall.__new__(ElementCall)
     ec.cfg, ec.members, ec.room_id, ec._key, ec._keyed = Cfg, {}, None, None, set()
-    ec.keep_alive = None
     seen = []
 
     async def cb(room):

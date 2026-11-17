@@ -92,8 +92,6 @@ class ElementCall:
         self._tasks: list[asyncio.Task] = []
         self._service_url: Optional[str] = None
         self._lock = asyncio.Lock()
-        # Wird vom Bot gesetzt: True = nicht verlassen, auch wenn der Call leer ist (24/7).
-        self.keep_alive = None
         # Vom Bot gesetzt: wird aufgerufen, wenn in einem Raum, in dem wir (noch) nicht
         # im Call sind, jemand dem Call beitritt (Play kam vor dem Call).
         self.on_call_started = None
@@ -138,7 +136,7 @@ class ElementCall:
                 asyncio.ensure_future(self.on_call_started(room_id))
             return
         others = self.others_in_call(room_id)
-        if not others and not (self.keep_alive and self.keep_alive()):
+        if not others:
             log.info("Element Call in %s leer – Bot verlaesst den Call", room_id)
             asyncio.ensure_future(self.leave())
             return
@@ -152,6 +150,14 @@ class ElementCall:
         async with self._lock:
             if self.room_id == room_id:
                 return
+            if self.room_id is not None:
+                await self._leave_locked()
+            await self._join_locked(room_id)
+
+    async def rejoin(self, room_id: str) -> None:
+        """Call verlassen und sofort neu beitreten (neue LiveKit-Verbindung, neuer E2EE-Schluessel).
+        Hilft, wenn der Bot im Call stumm ist oder nicht mehr entschluesselt wird."""
+        async with self._lock:
             if self.room_id is not None:
                 await self._leave_locked()
             await self._join_locked(room_id)

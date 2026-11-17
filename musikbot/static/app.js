@@ -154,7 +154,7 @@ function render() {
   $("#title").textContent = t ? t.title : "Nichts läuft";
   $("#artist").textContent = t
     ? [t.artist, t.requester === "autoplay" ? "✨ Autoplay" : ""].filter(Boolean).join(" · ") || (t.requester ? `gewünscht von ${t.requester}` : "")
-    : "Such dir etwas aus – oder starte das 24/7-Radio.";
+    : "Such dir etwas aus – oder spiel etwas aus der Mediathek.";
   document.title = t ? `${S.state === "playing" ? "▶" : "⏸"} ${t.title} – Musikbot` : "Musikbot";
 
   const cover = $("#cover"), empty = $("#cover-empty");
@@ -178,11 +178,19 @@ function render() {
   $("#autoplay").classList.toggle("on", S.autoplay);
   $("#autoplay-hint").hidden = !S.autoplay || S.queue.some((t) => t.requester === "autoplay");
   $("#fav").classList.toggle("on", !!(t && S.favs.includes(t.key)));
+  const call = S.call || {};
+  const inCall = !!call.active;
+  $("#call-bar").classList.toggle("live", inCall);
+  $("#call-text").textContent = inCall
+    ? (call.listeners ? `Im Call · ${call.listeners} hör${call.listeners === 1 ? "t" : "en"} zu` : "Im Call")
+    : call.waiting ? "Wartet auf den Call …" : "Nicht im Call";
+  $("#call-toggle-text").textContent = inCall ? "Verlassen" : "Beitreten";
+  $("#rejoin").hidden = !call.element;
   setRange($("#volume"), S.volume);
   $("#volume-val").textContent = S.volume;
 
   // Status oben rechts
-  if (changed("chips", [S.busy, S.always, S.in_call, S.peers])) renderChips();
+  if (changed("chips", [S.busy, S.in_call, S.peers])) renderChips();
   if (changed("queue", [S.queue, S.history, S.me])) renderQueue();
   if (changed("fades", [S.crossfade, S.fade_in])) renderFades();
   tick();
@@ -205,7 +213,6 @@ function renderChips() {
     chips.append(el);
   };
   if (S.busy) pill("lädt …", "busy");
-  if (S.always) pill(S.always.kind === "radio" ? "24/7 Radio" : "24/7", "live", true);
   pill(S.in_call ? `im Call · ${S.peers}` : "nicht im Call", S.in_call ? "live" : "");
 }
 
@@ -282,7 +289,7 @@ function renderQueue() {
 $$("[data-cmd]").forEach((b) => b.addEventListener("click", () => {
   const name = b.dataset.cmd;
   if (name === "clear" && !confirm("Warteschlange leeren?")) return;
-  cmd(name);
+  cmd(name, b.dataset.arg || "");
 }));
 
 $("#playpause").addEventListener("click", () => {
@@ -303,6 +310,13 @@ $("#fav").addEventListener("click", (ev) => {
   if (S && S.track) ev.currentTarget.classList.toggle("on");
   if (S && S.track) cmd("favkey", S.track.key, S.favs.includes(S.track.key) ? "Aus Favoriten entfernt" : "Zu Favoriten hinzugefügt");
 });
+$("#call-toggle").addEventListener("click", () => {
+  if (!S) return;
+  if (S.call && S.call.active) {
+    if (confirm("Bot aus dem Call nehmen?")) cmd("leavecall", "", "Call verlassen");
+  } else cmd("joincall", "", "Bot kommt in den Call …");
+});
+$("#rejoin").addEventListener("click", () => cmd("rejoin", "", "Verbinde neu …"));
 const softStop = () => cmd("softstop", $("#softstop-len").value, "Wird ausgeblendet …");
 $("#softstop").addEventListener("click", softStop);
 $("#softstop2").addEventListener("click", softStop);
@@ -339,6 +353,7 @@ function selectTab(name) {
   $$(".tabs [role=tab]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === name)));
   $$(".tab").forEach((t) => { t.hidden = t.id !== `tab-${name}`; });
   if (name === "library") loadLibrary();
+  if (name === "local") loadLocal();
   if (name === "search") $("#search-q").focus();
   try { localStorage.setItem("musikbot-tab", name); } catch { /* egal */ }
 }
@@ -396,7 +411,7 @@ async function loadLibrary() {
 }
 
 // Radio-Upload: eine Anfrage pro Datei (XHR wegen Fortschritt), Status steht auf der Karte.
-let uploading = "";
+const setUploading = (text) => { $("#upload-status").textContent = text; };
 function uploadRadio(files) {
   const list = [...files];
   const one = (file) => new Promise((resolve) => {
@@ -406,13 +421,13 @@ function uploadRadio(files) {
     xhr.open("POST", "/api/radio/upload");
     xhr.setRequestHeader("X-Musikbot", "1");
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) { uploading = `${file.name}: ${Math.round((e.loaded / e.total) * 100)} %`; renderLibrary(); }
+      if (e.lengthComputable) setUploading(`${file.name}: ${Math.round((e.loaded / e.total) * 100)} %`);
     };
     xhr.onload = () => {
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch { /* leer */ }
       if (xhr.status === 401) { showLogin(); resolve(false); return; }
-      if (xhr.status >= 200 && xhr.status < 300) toast(`„${(data.saved || [file.name])[0]}“ ist im Radio`);
+      if (xhr.status >= 200 && xhr.status < 300) toast(`„${(data.saved || [file.name])[0]}“ ist in der Mediathek`);
       else toast(`${file.name}: ${data.error || "Fehler " + xhr.status}`, true);
       resolve(xhr.status < 300);
     };
@@ -421,10 +436,73 @@ function uploadRadio(files) {
   });
   (async () => {
     for (const f of list) await one(f);
-    uploading = "";
-    await loadLibrary();
+    setUploading("");
+    await loadLocal();
   })();
 }
+
+// Datei hochladen und sofort abspielen (wie ein Anhang im Chat)
+function uploadPlay(file) {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/upload");
+  xhr.setRequestHeader("X-Musikbot", "1");
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) setUploading(`${file.name}: ${Math.round((e.loaded / e.total) * 100)} %`);
+  };
+  const done = () => setUploading("");
+  xhr.onload = () => {
+    let data = {};
+    try { data = JSON.parse(xhr.responseText); } catch { /* leer */ }
+    done();
+    if (xhr.status === 401) { showLogin(); return; }
+    if (xhr.status >= 200 && xhr.status < 300) { toast(`„${data.title || file.name}“ läuft`); if (data.queue) apply(data); }
+    else toast(`${file.name}: ${data.error || "Fehler " + xhr.status}`, true);
+  };
+  xhr.onerror = () => { done(); toast(`${file.name}: Upload fehlgeschlagen`, true); };
+  xhr.send(fd);
+}
+
+// ---------------------------------------------------------------- Mediathek (lokale Dateien)
+let LOCAL = null;
+async function loadLocal() {
+  try { LOCAL = await api("/api/local"); } catch { return; }
+  renderLocal();
+}
+function renderLocal() {
+  if (!LOCAL) return;
+  const q = $("#local-q").value.trim().toLowerCase();
+  const all = LOCAL.tracks;
+  const items = q ? all.filter((t) => t.title.toLowerCase().includes(q)) : all;
+  const total = all.reduce((a, t) => a + (t.duration || 0), 0);
+  $("#local-sum").textContent = all.length ? `${all.length} Titel · ${fmt(total)}` : "";
+  $("#local-all").hidden = $("#local-shuffle").hidden = all.length === 0;
+  $("#local-add").hidden = !LOCAL.writable;
+  const empty = $("#local-empty");
+  empty.hidden = items.length > 0;
+  empty.textContent = all.length ? "Nichts gefunden." : "Die Mediathek ist leer. Füge unten eigene Dateien hinzu.";
+  const play = (op, key, text) => () => act("/api/local", { op, key }, text);
+  $("#local").replaceChildren(...items.map((t) => {
+    const li = row(t, subline(t), [
+      button("play", "Jetzt spielen", play("now", t.key, "Kommt jetzt …")),
+      button("next", "Als Nächstes", play("next", t.key, "Als Nächstes eingereiht"), "hover-only"),
+      button("plus", "Hinten anstellen", play("end", t.key, "Eingereiht")),
+      button("list", "Zu deiner Playlist", (ev) => playlistMenu(ev, { key: t.key }), "hover-only"),
+    ]);
+    li.classList.add("clickable");
+    li.addEventListener("dblclick", play("now", t.key, "Kommt jetzt …"));
+    return li;
+  }));
+}
+$("#local-form").addEventListener("submit", (ev) => ev.preventDefault());
+$("#local-q").addEventListener("input", renderLocal);
+$("#local-all").addEventListener("click", () => act("/api/local", { op: "all" }, "Mediathek läuft"));
+$("#local-shuffle").addEventListener("click", () => act("/api/local", { op: "shuffle" }, "Mediathek läuft gemischt"));
+$("#local-add").addEventListener("click", () => $("#radio-file").click());
+$("#play-file-btn").addEventListener("click", () => $("#play-file").click());
+$("#radio-file").addEventListener("change", (ev) => { uploadRadio(ev.target.files); ev.target.value = ""; });
+$("#play-file").addEventListener("change", (ev) => { if (ev.target.files[0]) uploadPlay(ev.target.files[0]); ev.target.value = ""; });
 
 function renderLibrary() {
   const lib = LIB;
@@ -447,17 +525,11 @@ function renderLibrary() {
     b.addEventListener("click", onClick);
     return b;
   };
-  const always = S && S.always;
   cards.replaceChildren(
-    always
-      ? card("24/7 ausschalten", "Dauerschleife beenden", () => cmd("always", "off", "24/7 ist aus"), true)
-      : card("24/7 Radio", lib.radio ? `${lib.radio} Dateien, zufällig` : "Radio-Ordner ist leer", () => cmd("always", "radio", "Radio läuft")),
     card("Deine Favoriten", `${lib.favorites.length} Titel gemischt abspielen`, () => cmd("fav", "play shuffle")),
-    card("MP3 hochladen", uploading || "Eigene Songs fürs Radio", () => $("#radio-file").click()),
+    card("Mediathek", "Lokale Dateien abspielen", () => selectTab("local")),
   );
   $("#fav-play").onclick = () => cmd("fav", "play");
-  const fileInput = $("#radio-file");
-  if (!fileInput.onchange) fileInput.onchange = () => { uploadRadio(fileInput.files); fileInput.value = ""; };
 
   // Eigene Playlists: aufklappbar, mit Titeln
   const box = $("#my-playlists");
@@ -513,6 +585,10 @@ function renderLibrary() {
       button("plus", "Einreihen", () => cmd("playlist", `enqueue ${p.name}`, "Eingereiht")),
     ])));
   $("#top").replaceChildren(...simple(lib.top, (t) => `${t.plays}× gespielt`));
+  const people = lib.listeners || [];
+  $("#listeners-head").hidden = people.length === 0;
+  $("#listeners").replaceChildren(...people.map((u, i) =>
+    row({ title: `${i + 1}. ${u.name}` }, `${u.minutes} min · ${u.plays} Titel`)));
 }
 
 $("#pl-new").addEventListener("click", () => {

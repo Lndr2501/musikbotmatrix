@@ -70,6 +70,7 @@ class Dashboard:
         self.auth = bot.webauth
         self._runner: web.AppRunner | None = None
         self._index_html = self._build_index()
+        # client_max_size gilt nur fuer request.json()/post(); Uploads lesen per Multipart-Stream.
         self.app = web.Application(middlewares=[_security], client_max_size=64 * 1024)
         r = self.app.router
         r.add_get("/", self.index)
@@ -85,6 +86,9 @@ class Dashboard:
         r.add_post("/api/fade", self.fade)
         r.add_post("/api/playlist", self.playlist)
         r.add_post("/api/radio/upload", self.radio_upload)
+        r.add_post("/api/upload", self.upload_play)
+        r.add_get("/api/local", self.local)
+        r.add_post("/api/local", self.local_play)
 
     # --------------------------------------------------------------- Lifecycle
     async def start(self) -> None:
@@ -209,3 +213,23 @@ class Dashboard:
             raise MediaError("Keine Datei erhalten.")
         return web.json_response({"ok": True, "saved": saved,
                                   "radio": len(self.bot._radio_scan())})
+
+    async def local(self, request: web.Request) -> web.StreamResponse:
+        user = self._user(request)
+        return web.json_response(await self.bot.web_local(user))
+
+    async def local_play(self, request: web.Request) -> web.StreamResponse:
+        user = self._user(request)
+        data = await request.json()
+        await self.bot.web_local_play(user, str(data.get("op", "")), str(data.get("key", ""))[:100])
+        return web.json_response(self.bot.web_state(user))
+
+    async def upload_play(self, request: web.Request) -> web.StreamResponse:
+        """Eine Audio-/Videodatei (multipart, Feld `file`) hochladen und sofort abspielen."""
+        user = self._user(request)
+        reader = await request.multipart()
+        while (part := await reader.next()) is not None:
+            if part.name == "file" and getattr(part, "filename", None):
+                title = await self.bot.web_upload_play(user, part.filename, part)
+                return web.json_response({"ok": True, "title": title, **self.bot.web_state(user)})
+        raise MediaError("Keine Datei erhalten.")

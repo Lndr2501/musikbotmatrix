@@ -248,3 +248,138 @@ def test_find_dm_reuses_existing_private_chat():
     m._direct = {"@lndr:x": ["!left"]}                        # Nutzer hat den Raum verlassen
     assert m.find_dm("@lndr:x") in ("!old", "!new")
     assert m.find_dm("@anna:x") is None
+
+
+def test_rejoin_is_a_command_in_chat_cards_and_dashboard():
+    from musikbot import cards
+    from musikbot.bot import Bot
+    from musikbot.commands import is_read_only, parse
+
+    assert parse("!rejoin", ("!",)).name == "rejoin"
+    assert parse("!neuverbinden", ("!",)).name == "rejoin"
+    assert not is_read_only("rejoin")                     # steuert: nur wer im Call ist
+    _, more = cards.player_controls()
+    assert "!rejoin" in [a["send"] for a in more] and len(more) <= cards.MORE_MAX
+    assert "rejoin" in [n for n, _u, _d in cards.COMMAND_LIST]
+    assert "rejoin" in Bot._WEB_COMMANDS
+
+
+def _rejoin_bot(active: bool, others: dict):
+    from musikbot.bot import Bot
+
+    bot = Bot.__new__(Bot)
+    bot._want_call = "!r:x"
+    bot.notes = []
+    calls = []
+
+    async def note(room, text, tone="info", icon=""):
+        bot.notes.append((room, tone, text))
+
+    async def load_members(room):
+        calls.append(("load", room))
+
+    async def rejoin(room):
+        calls.append(("rejoin", room))
+
+    bot._note = note
+    bot.matrix = bot.player = None
+    bot.ecall = SimpleNamespace(room_id="!call:x" if active else None, active=active,
+                                load_members=load_members, rejoin=rejoin,
+                                others_in_call=lambda room: others)
+    return bot, calls
+
+
+def test_rejoin_reconnects_the_running_call():
+    bot, calls = _rejoin_bot(active=True, others={})
+    asyncio.run(bot._dispatch("!chat:x", "@u:x", "rejoin", ""))
+    assert ("rejoin", "!call:x") in calls                 # Raum des laufenden Calls, nicht der Chat
+    assert bot._want_call is None and bot.notes[-1][1] == "success"
+
+
+def test_rejoin_without_call_only_warns():
+    bot, calls = _rejoin_bot(active=False, others={})
+    asyncio.run(bot._dispatch("!chat:x", "@u:x", "rejoin", ""))
+    assert not any(c[0] == "rejoin" for c in calls)
+    assert bot.notes[-1][1] == "warning"
+
+
+def test_rejoin_joins_a_call_the_bot_is_not_in_yet():
+    bot, calls = _rejoin_bot(active=False, others={("@u:x", "D"): {}})
+    asyncio.run(bot._dispatch("!chat:x", "@u:x", "rejoin", ""))
+    assert ("rejoin", "!chat:x") in calls
+
+
+class _Part:
+    def __init__(self, data: bytes):
+        self._data = [data[i:i + 4] for i in range(0, len(data), 4)]
+
+    async def read_chunk(self, size):
+        return self._data.pop(0) if self._data else b""
+
+
+def test_upload_play_checks_type_size_and_plays(tmp_path):
+    from musikbot.bot import Bot
+    from musikbot.ytdl import MediaError
+
+    bot = Bot.__new__(Bot)
+    bot.cfg = SimpleNamespace(max_upload_mb=1)
+    bot._busy = set()
+    bot._web_room = lambda user: "!r:x"
+    played = []
+
+    async def play_upload(room, sender, name, data, ext):
+        played.append((room, sender, name, data, ext))
+    bot._play_upload = play_upload
+
+    with pytest.raises(MediaError):
+        asyncio.run(bot.web_upload_play("@u:x", "virus.exe", _Part(b"xx")))
+    with pytest.raises(MediaError):
+        asyncio.run(bot.web_upload_play("@u:x", "leer.mp3", _Part(b"")))
+    bot.cfg.max_upload_mb = 0
+    with pytest.raises(MediaError):
+        asyncio.run(bot.web_upload_play("@u:x", "gross.mp3", _Part(b"12345")))
+    bot.cfg.max_upload_mb = 1
+    title = asyncio.run(bot.web_upload_play("@u:x", "../Mein Song.MP3", _Part(b"ID3-daten")))
+    assert title == "Mein Song"
+    assert played == [("!r:x", "@u:x", "Mein Song.MP3", b"ID3-daten", ".mp3")]
+    assert bot._busy == set()
+
+
+def test_local_library_lists_and_plays_files_without_247(tmp_path):
+    import wave
+
+    from musikbot.ytdl import MediaError
+
+    radio = tmp_path / "radio"
+    radio.mkdir()
+    for name in ("b-Song.wav", "A-Song.wav"):
+        with wave.open(str(radio / name), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(b"\x00\x00" * 8000)
+    (radio / "notiz.txt").write_text("x")
+    bot = _bot_with_store(tmp_path)
+    bot.cfg = SimpleNamespace(radio_dir=str(radio))
+    bot._radio_files = {}
+    bot._web_room = lambda user: "!r:x"
+    done = []
+
+    async def enqueue(room, user, key, mode):
+        done.append(("one", key, mode))
+
+    async def play_keys(room, user, keys, *, replace):
+        done.append(("all", tuple(keys), replace))
+    bot._web_enqueue, bot._play_keys = enqueue, play_keys
+
+    lib = asyncio.run(bot.web_local("@u:x"))
+    assert [t["title"] for t in lib["tracks"]] == ["A-Song", "b-Song"]
+    assert all(abs(t["duration"] - 1) < 0.1 for t in lib["tracks"])
+    first = lib["tracks"][0]["key"]
+    asyncio.run(bot.web_local_play("@u:x", "next", first))
+    asyncio.run(bot.web_local_play("@u:x", "all"))
+    asyncio.run(asyncio.sleep(0))
+    assert done[0] == ("one", first, "next")
+    assert done[1][0] == "all" and done[1][2] is True and len(done[1][1]) == 2
+    with pytest.raises(MediaError):
+        asyncio.run(bot.web_local_play("@u:x", "now", "radio:gibtsnicht"))

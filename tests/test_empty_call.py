@@ -42,7 +42,6 @@ def _bot(others, state="playing"):
     async def stop():
         bot.player.state = "stopped"
     bot.player.stop = stop
-    bot._always = None
     bot._fetch_room = ""
     bot.notes = []
 
@@ -73,13 +72,6 @@ def test_stays_while_someone_is_connected_and_resets_the_timer():
     assert _steps(bot, [EMPTY_GRACE_SECONDS + 5]) == [False]
     bot.ecall.others = 0
     assert _steps(bot, [100, 110]) == [False, False]   # Frist beginnt neu
-    assert not bot.ecall.left
-
-
-def test_24_7_stays_even_when_empty():
-    bot = _bot(others=0)
-    bot._always = {"kind": "radio"}
-    assert _steps(bot, [0, 100, 200]) == [False, False, False]
     assert not bot.ecall.left
 
 

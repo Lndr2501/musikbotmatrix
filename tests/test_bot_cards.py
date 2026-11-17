@@ -75,7 +75,6 @@ def make_bot():
     bot._thumb_tasks = {}
     bot._loop_on = False
     bot._autoplay = False
-    bot._always = None
     bot._fetch_room = "!r:x"
     bot.ecall = SimpleNamespace(room_id=None)
     bot.calls = SimpleNamespace(active_room=None)
@@ -372,7 +371,7 @@ def test_commands_go_through_the_library_and_diddy_gets_the_command_list():
 
     async def flow():
         await chat.start()
-        await chat.say("!24/7 off")
+        await chat.say("!rejoin")
         await chat.say("!überspringen")           # Alias mit Umlaut
         await chat.say("!zurück 5")
         await chat.say("!hallo")                  # kein Befehl: ignoriert
@@ -382,8 +381,9 @@ def test_commands_go_through_the_library_and_diddy_gets_the_command_list():
     expected = cards.commands_content("!")
     expected.pop("v")                                         # das liefert der TestClient geparst, ohne Version
     assert content == expected                                # keine "options": die Befehle lesen den Text selbst
-    assert [b for _, _, b in seen] == ["!24/7 off", "!überspringen", "!zurück 5"]
-    assert all(word in LOOKUP for word in ("weiter", "zurueck", "24/7"))
+    assert [b for _, _, b in seen] == ["!rejoin", "!überspringen", "!zurück 5"]
+    assert all(word in LOOKUP for word in ("weiter", "zurueck", "neuverbinden"))
+    assert "24/7" not in LOOKUP and "247" not in LOOKUP
     assert chat.profile()["accent"] == "#e6457a"          # der Parser schreibt Farben klein
 
 

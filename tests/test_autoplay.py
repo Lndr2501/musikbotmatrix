@@ -56,7 +56,7 @@ def _bot(tmp_path, found):
     bot.player = SimpleNamespace(queue=[], state="playing",
                                  enqueue=lambda k, r: bot.player.queue.append((k, r)))
     bot.resolver = SimpleNamespace(similar_async=lambda *a: _done(found))
-    bot._autoplay, bot._autoplay_busy, bot._loop_on, bot._always = True, False, False, None
+    bot._autoplay, bot._autoplay_busy, bot._loop_on = True, False, False
     bot._recent, bot._history, bot._thumb_url, bot._thumb_mxc, bot._thumb_tasks = [], [], {}, {}, {}
     bot._prefetch_thumb = lambda key: None
     return bot
@@ -87,9 +87,7 @@ def test_autoplay_does_nothing_when_off_loop_or_someone_wished(tmp_path):
     bot = _bot(tmp_path, [_cand("youtube:new")])
     bot._loop_on = True
     assert not bot._autoplay_on()
-    bot._loop_on, bot._always = False, {"kind": "radio"}
-    assert not bot._autoplay_on()
-    bot._always = None
+    bot._loop_on = False
     bot.player.queue.append(("wunsch", "@lndr:x"))      # Warteschlange inzwischen nicht leer
     assert not asyncio.run(bot._autoplay_pick(seed, start=False))
     assert bot.player.queue == [("wunsch", "@lndr:x")]
