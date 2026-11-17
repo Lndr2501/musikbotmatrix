@@ -4,8 +4,8 @@ version = "0.2.0"
 description = "Matrix-Musikbot: spielt YouTube-Titel in klassischen Matrix-Calls ab"
 requires-python = ">=3.11"
 dependencies = [
-    # Bot-Library (Matrix, E2EE, Diddy-Karten); nach dem Merge von Diddy-PR #230 auf @main stellen.
-    "diddy-bot @ git+https://github.com/Lndr2501/diddy.git@feat/bot-sdk#subdirectory=sdk/python",
+    # Bot-Library (Matrix, E2EE, diddy.git@main-Karten); nach dem Merge von Diddy-PR #230 auf @main stellen.
+    "diddy-bot @ git+https://github.com/Lndr2501/diddy.git@main#subdirectory=sdk/python",
     "aiortc>=1.15,<2",
     "av>=16,<18",
     "numpy>=1.26",
