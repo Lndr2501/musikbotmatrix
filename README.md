@@ -77,12 +77,13 @@ unabhängig vom Ordnernamen.)
 | `!playlist add <name> [Link]` · `remove <name> <nr>` | Titel hinzufügen (ohne Link: laufender Titel) / entfernen |
 | `!playlist show <name>` · `list` | Inhalt / alle Playlists |
 | `!playlist play <name> [shuffle]` · `enqueue <name>` | abspielen (ersetzt Queue) / hinten anhängen |
+| `!24/7` · `!24/7 radio` | zufällig die MP3s aus dem Ordner `radio/` (Dauerschleife, neue Dateien sofort dabei) |
 | `!24/7 song [Link]` · `!24/7 playlist <name>` · `!24/7 off` | Dauerschleife, Bot bleibt im Call |
 | `!help` | Kommandoliste |
 
 **Wer darf steuern?** Nur Leute, die selbst im Call sind (Element Call oder
 klassischer Call). `!help`, `!status`, `!queue`, `!playlist list|show` und
-`!24/7` ohne Argument gehen für alle im Raum. Abschaltbar mit
+`!24/7 status` gehen für alle im Raum. Abschaltbar mit
 `CALL_ONLY_CONTROL=false`; `ALLOWED_USERS` gilt zusätzlich.
 
 **Auto-Verlassen:** Ist der Song zu Ende und die Warteschlange leer, verlässt
@@ -92,6 +93,42 @@ Playlists liegen in der SQLite-DB (nur Links/Titel, keine Audiodateien).
 
 Deutsche Aliase funktionieren auch (`!abspielen`, `!pausieren`, `!fortsetzen`,
 `!hilfe`, …). Praefix: `!` (konfigurierbar via `BOT_PREFIXES`).
+
+## Web-Dashboard
+
+`!dashboard` im Chat: Der Bot schickt dir per Direktnachricht einen
+persönlichen Link. Einmal öffnen, danach bleibst du eingeloggt (90 Tage,
+verlängert sich bei jeder Nutzung). Ein neues `!dashboard` macht den alten Link
+ungültig, angemeldete Geräte bleiben drin.
+
+Im Dashboard: Wiedergabe steuern (Play/Pause, Spulen, Lautstärke, Loop,
+Video), Warteschlange sortieren (ziehen), Suche mit Trefferliste („jetzt“,
+„als Nächstes“, „hinten anstellen“), Playlists, Favoriten, 24/7-Radio und die
+Fade-Regler (Crossfade-Länge, Einblenden, sanft stoppen, sofort überblenden).
+
+Das Dashboard läuft im Bot auf `WEB_PORT` (Standard 8095). Für den Zugriff von
+außen einen Reverse-Proxy oder Cloudflare-Tunnel davor setzen und `PUBLIC_URL`
+eintragen.
+
+## Übergänge (Crossfade)
+
+Titel aus der Warteschlange werden weich ineinander übergeblendet – wie bei
+Apple Music. Der nächste Titel wird dafür rund 45 Sekunden vorher schon
+geladen, damit er pünktlich bereitliegt. Länge per `CROSSFADE_SECONDS`
+(Standard 6, `0` = aus; bei kurzen Titeln höchstens ein Drittel der Länge).
+`!skip`, `!stop`, Seek und ein neues `!play` blenden nur kurz (0,3 s) aus,
+damit es nicht knackt. Kein Crossfade gibt es, wenn derselbe Titel direkt
+nochmal kommt (Schleife mit leerer Warteschlange, 24/7 mit einem Song).
+
+## Radio-Ordner
+
+MP3s (auch m4a, ogg, opus, flac, wav; Unterordner gehen) in `radio/` neben der
+`compose.yaml` legen (oder im Dashboard unter „Meins“ → „MP3 hochladen“, max. 100 MB pro
+Datei), dann im Raum `!24/7 radio`. Der Bot legt dort nur neue Dateien an und löscht oder
+überschreibt nie etwas (gleicher Name → „ (2)“). Der Host-Ordner muss für UID 10000
+beschreibbar sein (`chown 10000 radio`). Neue Dateien werden bei jedem
+neuen Durchlauf automatisch mitgenommen; kein Neustart nötig. `MAX_SONG_SECONDS`
+gilt für Radio-Dateien nicht. Nach der Änderung einmal `docker compose up -d --build`.
 
 ## Speicher-Regeln
 
@@ -136,6 +173,16 @@ legen und `YTDLP_COOKIES_FILE=/data/cookies.txt` setzen.
 uv venv --python 3.12 && uv pip install -e ".[dev]"
 python -m pytest tests/ -q
 ```
+
+Aufbau der Matrix-Anbindung: `matrix.py` setzt auf die Bot-Library
+[diddybot](https://github.com/Lndr2501/diddy/tree/main/sdk/python). Die Library erledigt Login, Sync, E2EE, Einladungen,
+Entdoppeln der Nachrichten und die Befehlsliste samt Bot-Profil für Diddy; `bot.py` hängt jeden Befehl an die Library und
+führt ihn wie bisher aus (`_on_text`). `matrix.py` behält, was nur der Musikbot braucht: Anruf-Signalisierung, Element
+Call (To-Device, Geräte, OpenID), angehängte Dateien, Direktnachrichten und Karten. Ende-zu-Ende gegen einen Synapse:
+`DIDDY_TEST_HOMESERVER=http://127.0.0.1:8008 pytest tests/test_integration.py`.
+
+Update vom Bot vor Version 0.2: Der alte Token (`/data/matrix-store/access_token`) wird beim ersten Start in die
+`credentials.json` der Library übernommen. Gerät und E2EE-Schlüssel bleiben gleich.
 
 Der Mix-Loop (Dekodieren, Lautstaerke, Synchronisation) laeuft genau einmal
 unabhaengig von der Peer-Zahl; pro Geraet wird nur enkodiert. Audio ist

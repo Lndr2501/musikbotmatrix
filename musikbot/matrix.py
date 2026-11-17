@@ -1,19 +1,22 @@
-"""Matrix-Anbindung: Login, Sync-Loop, Empfinden/Senden von Events.
-
-Duenn um matrix-nio: Der Bot laeuft als normaler Nutzer, verschluesselt
-(E2EE) nach Moeglichkeit, versteht Textbefehle und m.call.*-Signaling
-sowohl als Raum-Event als auch als To-Device-Nachricht.
+"""Matrix-Anbindung. Login, Sync, E2EE-Pflege, Einladungen, Raum-Schluessel-Anfragen, Befehlsliste
+und Bot-Profil fuer Diddy uebernimmt die Bot-Library diddybot (`self.dbot`). Hier bleibt, was nur der
+Musikbot braucht: m.call.*-Signaling und Element Call (To-Device, Geraete, OpenID, State), angehaengte
+Dateien, Direktnachrichten und Karten. Die Aufrufe von bot.py, calls.py und elementcall.py sind
+unveraendert.
 """
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import logging
 import os
 from typing import Awaitable, Callable, Optional
 
+import diddybot
 import nio
-from nio.responses import (JoinedMembersResponse, KeysQueryResponse,
-                          LoginResponse)
+from nio.crypto.attachments import decrypt_attachment
+from nio.responses import JoinedMembersResponse
 
 from . import cards
 from .config import Config
@@ -22,128 +25,95 @@ log = logging.getLogger("musikbot.matrix")
 
 SYNC_TIMEOUT_MS = 30_000
 
+PLAIN_MEDIA = (nio.RoomMessageAudio, nio.RoomMessageVideo, nio.RoomMessageFile)
+ENCRYPTED_MEDIA = (nio.RoomEncryptedAudio, nio.RoomEncryptedVideo, nio.RoomEncryptedFile)
+MEDIA_EVENTS = PLAIN_MEDIA + ENCRYPTED_MEDIA
+
+
+VOICE_FLAG = "org.matrix.msc3245.voice"   # so markieren Element und Diddy Sprachnachrichten
+
+
+def is_voice_message(content: dict) -> bool:
+    """True fuer Sprachnachrichten (MSC3245) – die sind kein Musikwunsch."""
+    return isinstance(content, dict) and VOICE_FLAG in content
+
+
+def adopt_legacy_token(cfg: Config) -> bool:
+    """Update vom Bot vor diddybot: dessen Token (Datei `access_token` im Store) wird in die
+    `credentials.json` der Library uebernommen. Gleiches Geraet, gleiche E2EE-Schluessel, kein neues
+    Geraet. Ist der Token ungueltig, meldet sich der Bot mit dem Passwort neu an."""
+    legacy = os.path.join(cfg.store_path, "access_token")
+    target = os.path.join(cfg.store_path, "credentials.json")
+    if cfg.token or os.path.exists(target) or not os.path.exists(legacy):
+        return False
+    with open(legacy, encoding="utf-8") as fh:
+        token = fh.read().strip()
+    if not token:
+        return False
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"homeserver": cfg.homeserver.rstrip("/"), "user_id": cfg.user,
+                   "device_id": cfg.device_id, "access_token": token}, fh)
+    log.info("Token des frueheren Bots uebernommen (Geraet %s)", cfg.device_id)
+    return True
+
 
 class Matrix:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, profile: Optional[dict] = None):
         self.cfg = cfg
-        # nio nutzt store_path als VERZEICHNIS und legt dort die E2EE-DBs ab;
-        # das Verzeichnis wird von nio nicht selbst angelegt.
         os.makedirs(cfg.store_path, exist_ok=True)
-        config = nio.AsyncClientConfig(
-            encryption_enabled=cfg.encryption_enabled,
-            store_sync_tokens=True,
-        )
-        self.client = nio.AsyncClient(
-            cfg.homeserver, cfg.user, device_id=cfg.device_id,
-            store_path=cfg.store_path, config=config)
+        adopt_legacy_token(cfg)
+        # Die Library: Login, Sync, E2EE, Einladungen, Befehlsliste + Profil fuer Diddy.
+        # `help_command=False`: bot.py hat eine eigene Hilfe-Karte.
+        self.dbot = diddybot.Bot(
+            cfg.homeserver, cfg.user, password=cfg.password, access_token=cfg.token,
+            device_id=cfg.device_id, store_path=cfg.store_path,
+            prefix=cfg.prefixes[0] if cfg.prefixes else "!", encryption=cfg.encryption_enabled,
+            auto_join=cfg.auto_join_invites, help_command=False, **(profile or {}))
         self._room_ids: list[str] = []
         self._devices: dict[str, dict[str, list[str]]] = {}  # room -> user -> devs
-        self._key_req: set[str] = set()  # Session-IDs, fuer die Keys schon angefragt wurden
-        self._stop = asyncio.Event()
+        self._direct: dict[str, list[str]] = {}   # m.direct: Nutzer -> Privatchat-Raeume
 
         # Callbacks (von bot.py gesetzt):
-        self.on_text: Callable[[str, str, str], Awaitable[None]] | None = None      # room_id, sender, body
+        # room_id, sender, Dateiname, MIME-Typ, Inhalt (bereits entschluesselt)
+        self.on_media: Callable[[str, str, str, str, bytes], Awaitable[None]] | None = None
         self.on_call: Callable[[Optional[str], str, Optional[str], dict], Awaitable[None]] | None = None  # room_id|None, sender, device, content
         self.on_member_join: Callable[[str, str], Awaitable[None]] | None = None    # room_id, user_id
         self.on_room_left: Callable[[str], Awaitable[None]] | None = None           # room_id (Bot verlassen)
         # Element Call: room_id, sender, state_key, content
         self.on_rtc_member: Callable[[str, str, str, dict], Awaitable[None]] | None = None
 
-        self.client.add_event_callback(self._event_cb, nio.Event)
-        self.client.add_to_device_callback(self._to_device_cb, nio.ToDeviceEvent)
-        self.client.add_response_callback(self._login_cb, LoginResponse)
+        # Rohe nio-Ereignisse, die die Library nicht kennt (Anrufe, Dateien, Mitglieder)
+        self.dbot.add_event_callback(self._event_cb, nio.Event)
+        self.dbot.add_to_device_callback(self._to_device_cb, nio.ToDeviceEvent)
 
-    # ------------------------------------------------------------------ login
+    @property
+    def client(self) -> nio.AsyncClient:
+        """Der nio-Client (existiert nach `login()`)."""
+        return self._client if self._client is not None else self.dbot.client
+
+    @client.setter
+    def client(self, value: object) -> None:      # nur fuer Tests: Attrappe statt Verbindung
+        self._client = value
+
+    _client = None
+
+    # ------------------------------------------------------------------ login / sync
     async def login(self) -> None:
-        cfg = self.cfg
-        if cfg.token:
-            self.client.restore_login(cfg.user, cfg.device_id, cfg.token)
-            me = await self.client.whoami()
-            if isinstance(me, nio.WhoamiResponse):
-                cfg.matrix_user_id = me.user_id
-                log.info("Eingeloggt (Token) als %s", me.user_id)
-            else:
-                raise RuntimeError(f"Token-Login ungueltig: {me}")
-        else:
-            # Token aus frueherem Passwort-Login wiederverwenden: kein neuer
-            # Login pro Neustart (Homeserver drosselt sonst mit HTTP 429).
-            token_file = os.path.join(cfg.store_path, "access_token")
-            restored = False
-            if os.path.exists(token_file):
-                with open(token_file) as fh:
-                    saved = fh.read().strip()
-                if saved:
-                    self.client.restore_login(cfg.user, cfg.device_id, saved)
-                    me = await self.client.whoami()
-                    if isinstance(me, nio.WhoamiResponse):
-                        cfg.matrix_user_id = me.user_id
-                        restored = True
-                        log.info("Eingeloggt als %s (gespeicherter Token, Geraet %s)",
-                                 me.user_id, cfg.device_id)
-                    else:
-                        log.warning("Gespeicherter Token ungueltig, Passwort-Login: %s", me)
-            if not restored:
-                resp = await self.client.login(password=cfg.password,
-                                               device_name="musikbot")
-                if not isinstance(resp, LoginResponse):
-                    raise RuntimeError(f"Login fehlgeschlagen: {resp}")
-                cfg.matrix_user_id = resp.user_id
-                with open(token_file, "w") as fh:
-                    fh.write(resp.access_token)
-                os.chmod(token_file, 0o600)
-                log.info("Eingeloggt als %s (Geraet %s)", resp.user_id, resp.device_id)
-        if cfg.matrix_user_id != cfg.user and cfg.user.startswith("@"):
-            # ggf. anderer mxid -- Gleichstand fuer Filter verwenden
-            cfg.user = cfg.matrix_user_id or cfg.user
+        await self.dbot.login()
+        uid = self.dbot.user_id
+        self.cfg.matrix_user_id = uid
+        if uid != self.cfg.user and self.cfg.user.startswith("@"):
+            self.cfg.user = uid or self.cfg.user     # ggf. anderer mxid -- Gleichstand fuer Filter
         if self.cfg.encryption_enabled and self.client.olm is not None:
             log.info("E2EE aktiv (Geraeteschluessel werden hochgeladen)")
 
-    def _login_cb(self, room, response) -> None:  # noqa: ARG002
-        pass
-
-    # ------------------------------------------------------------------ sync
     async def run(self) -> None:
-        """Sync-Loop mit automatischem Wiederanlauf."""
-        backoff = 1
-        while not self._stop.is_set():
-            try:
-                resp = await self.client.sync(
-                    timeout=SYNC_TIMEOUT_MS, since=self.client.next_batch,
-                    set_presence="online")
-            except Exception:
-                log.exception("Sync-Fehler")
-                resp = None
-            if isinstance(resp, nio.SyncResponse):
-                backoff = 1
-                await self._crypto_housekeeping()
-                await self._accept_invites()
-            elif resp is not None:
-                log.warning("Sync-Fehler: %s", resp)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
-
-    async def _crypto_housekeeping(self) -> None:
-        """Was nio.sync_forever() sonst automatisch macht: eigene Geraete-
-        schluessel hochladen, fremde Geraete abfragen, Olm-Sessions claimen,
-        ausstehende To-Device-Nachrichten senden. Ohne das kennt der Server
-        keine Bot-Schluessel und niemand kann an den Bot verschluesseln."""
-        c = self.client
-        if not self.cfg.encryption_enabled or c.olm is None:
-            return
-        try:
-            if c.should_upload_keys:
-                r = await c.keys_upload()
-                log.info("Geraeteschluessel hochgeladen: %s", type(r).__name__)
-            if c.should_query_keys:
-                await c.keys_query()
-            if c.should_claim_keys:
-                await c.keys_claim(c.get_users_for_key_claiming())
-            await c.send_to_device_messages()
-        except Exception:
-            log.exception("E2EE-Schluesselpflege fehlgeschlagen")
+        """Sync-Loop (mit Wiederanlauf) bis `stop()`; `login()` ist schon gelaufen."""
+        await self.dbot.start(login=False)
 
     def stop(self) -> None:
-        self._stop.set()
+        self.dbot.stop()
 
     # ------------------------------------------------------------------ callbacks
     async def _event_cb(self, room: nio.MatrixRoom, event) -> None:
@@ -155,19 +125,8 @@ class Matrix:
             return
         if getattr(event, "sender", None) in (self.cfg.user, self.cfg.matrix_user_id):
             return
-        if isinstance(event, nio.RoomMessageText):
-            if event.sender == self.cfg.user or event.sender == self.cfg.matrix_user_id:
-                return
-            log.info("Text von %s in %s: %s", event.sender, room.room_id,
-                     (event.body or "")[:80])
-            if self.on_text:
-                await self.on_text(room.room_id, event.sender, event.body or "")
-        elif isinstance(event, nio.MegolmEvent):
-            # Verschluesseltes Event, dessen Raum-Key fehlt. nio fragt dafuer
-            # NICHT automatisch nach (nur bei gezw-Session-Faellen) -> selbst
-            # beim Absender anfragen. Element teilt Keys aber nur, wenn das
-            # Bot-Geraet verifiziert ist oder Schluesselteilung aktiviert wurde.
-            await self._request_room_key(event)
+        if isinstance(event, MEDIA_EVENTS):
+            await self._media_cb(room, event)
         elif isinstance(event, nio.UnknownEncryptedEvent):
             log.warning("Verschluesseltes Event in %s nicht entschluesselbar "
                         "(Room-Key fehlt).", room.room_id)
@@ -184,24 +143,32 @@ class Matrix:
                 await self.on_call(room.room_id, event.sender, None, content)
         await self._membership_cb(room, event)
 
-    async def _request_room_key(self, event: nio.MegolmEvent) -> None:
-        """Raum-Key beim Absender anfragen (m.room_key_request als To-Device)."""
-        session_id = getattr(event, "session_id", None)
-        if not session_id or session_id in self._key_req:
+    async def _media_cb(self, room: nio.MatrixRoom, event) -> None:
+        """Angehaengte Datei laden (ggf. entschluesseln) und an den Bot geben."""
+        if not self.on_media:
             return
-        self._key_req.add(session_id)
+        content = (getattr(event, "source", {}) or {}).get("content") or {}
+        if is_voice_message(content):
+            return                   # Sprachnachricht unter Menschen – nicht fuer den Bot
+        info = content.get("info") or {}
+        mime = str(info.get("mimetype") or getattr(event, "mimetype", "") or "")
+        name = str(content.get("filename") or event.body or "datei")
+        size = info.get("size")
+        if isinstance(size, int) and size > self.cfg.max_upload_mb * 1024 * 1024:
+            await self.on_media(room.room_id, event.sender, name, mime, b"")
+            return
         try:
-            msg = event.as_key_request(event.sender, self.cfg.device_id)
+            resp = await self.client.download(mxc=event.url)
+            if not isinstance(resp, nio.MemoryDownloadResponse):
+                log.warning("Datei-Download fehlgeschlagen: %s", resp)
+                return
+            data = resp.body
+            if isinstance(event, ENCRYPTED_MEDIA):
+                data = decrypt_attachment(data, event.key["k"], event.hashes["sha256"], event.iv)
         except Exception:
-            log.exception("Key-Request bauen fehlgeschlagen")
+            log.exception("Datei %s konnte nicht geladen werden", name)
             return
-        resp = await self.client.to_device(msg)
-        if isinstance(resp, nio.ToDeviceResponse):
-            log.info("Raum-Key angefragt bei %s (Session %s).",
-                     event.sender, session_id[:12])
-        else:
-            self._key_req.discard(session_id)
-            log.warning("Key-Request an %s fehlgeschlagen: %s", event.sender, resp)
+        await self.on_media(room.room_id, event.sender, name, mime, data)
 
     async def _membership_cb(self, room: nio.MatrixRoom, event) -> None:
         source = getattr(event, "source", {}) or {}
@@ -211,9 +178,7 @@ class Matrix:
         state_key = source.get("state_key", "")
         membership = (source.get("content") or {}).get("membership", "")
         me = self.cfg.user
-        if state_key == me and membership == "invite" and self.cfg.auto_join_invites:
-            asyncio.ensure_future(self._join(room.room_id))
-        elif state_key == me and membership in ("leave", "ban"):
+        if state_key == me and membership in ("leave", "ban"):
             if self.on_room_left:
                 await self.on_room_left(room.room_id)
         elif state_key and membership == "join" and state_key != me:
@@ -240,19 +205,6 @@ class Matrix:
         else:
             log.warning("Raum-Beitritt %s fehlgeschlagen: %s", room_id, resp)
 
-    async def _accept_invites(self) -> None:
-        """Offene Einladungen annehmen.
-
-        nio behandelt Einladungen im /sync separat als 'invited room' und feuert
-        dafuer KEINE Event-Callbacks -- daher explizit nach jedem Sync pruefen.
-        """
-        if not self.cfg.auto_join_invites:
-            return
-        # nio pflegt offene Einladungen separat in client.invited_rooms.
-        for room in list(self.client.invited_rooms.values()):
-            log.info("Einladung erkannt: %s", room.room_id)
-            await self._join(room.room_id)
-
     # ------------------------------------------------------------------ Start
     async def prepare_rooms(self) -> list[str]:
         """Konfigurierte Raeume aufloesen und betreten; liefert Raum-IDs."""
@@ -269,7 +221,6 @@ class Matrix:
             for rid in ids:
                 if rid not in have:
                     await self._join(rid)
-        await self._accept_invites()
         self._room_ids = ids
         return ids
 
@@ -310,9 +261,62 @@ class Matrix:
             log.exception("Senden (%s) fehlgeschlagen", evtype)
             return None
 
+    def _is_dm_with(self, room_id: str, user_id: str) -> bool:
+        room = self.client.rooms.get(room_id)
+        if room is None:
+            return False
+        me = (self.cfg.matrix_user_id or self.cfg.user).lower()
+        want = user_id.lower()
+        members = {u.lower() for u in list(room.users) + list(getattr(room, "invited_users", {}))}
+        return want in members and members <= {me, want}
+
+    def find_dm(self, user_id: str) -> Optional[str]:
+        """Bestehender Zweier-Raum mit `user_id` (beigetreten oder eingeladen).
+        Bevorzugt die Raeume aus m.direct (zuletzt angelegter zuerst)."""
+        for room_id in reversed(self._direct.get(user_id.lower(), [])):
+            if self._is_dm_with(room_id, user_id):
+                return room_id
+        for room_id in self.client.rooms:
+            if self._is_dm_with(room_id, user_id):
+                return room_id
+        return None
+
+    async def load_direct(self) -> None:
+        """m.direct (Liste der Privatchats je Nutzer) vom Server holen."""
+        from urllib.parse import quote
+        me = self.cfg.matrix_user_id or self.cfg.user
+        try:
+            data = await self.http_json("GET", self._cs(f"/user/{quote(me)}/account_data/m.direct"))
+        except Exception:
+            data = {}
+        self._direct = {u.lower(): list(rooms) for u, rooms in data.items() if isinstance(rooms, list)}
+
+    async def send_dm(self, user_id: str, body: str, html: str = "") -> bool:
+        """Direktnachricht schicken (nutzt einen vorhandenen Privatchat, sonst legt die Library
+        einen verschluesselten an)."""
+        try:
+            room_id = await self.dbot._t.dm_room(user_id, "Musikbot")
+            await self.dbot.send(room_id, body, html=html or None, notice=False)
+        except Exception:
+            log.exception("Direktnachricht an %s fehlgeschlagen", user_id)
+            return False
+        return True
+
     async def send_card(self, room_id: str, content: dict) -> str | None:
         """Karte fuer Diddy senden (siehe cards.py). event_id oder None."""
         return await self.send_room_event(room_id, "m.room.message", content)
+
+    async def upload_image(self, data: bytes, content_type: str, name: str) -> str | None:
+        """Bild (z. B. Titelbild) auf den Medien-Server laden. mxc://-Adresse oder None."""
+        try:
+            resp, _keys = await self.client.upload(
+                io.BytesIO(data), content_type=content_type, filename=name, filesize=len(data))
+            if isinstance(resp, nio.UploadResponse):
+                return resp.content_uri
+            log.warning("Bild-Upload fehlgeschlagen: %s", resp)
+        except Exception:
+            log.exception("Bild-Upload fehlgeschlagen")
+        return None
 
     async def edit_card(self, room_id: str, event_id: str, content: dict) -> bool:
         """Karte per Bearbeitung (m.replace) aktualisieren. True, wenn gesendet."""

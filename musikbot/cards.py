@@ -42,14 +42,58 @@ def action(label: str, send: str) -> dict:
     return {"label": label, "send": send}
 
 
-# Knopfreihen
-CONTROLS_PLAYING = (
-    action("⏸ Pause", "!pause"), action("⏭ Weiter", "!skip"),
-    action("📜 Warteschlange", "!queue"), action("⏹ Stopp", "!stop"),
+# Knopfreihen: Pause/Weiter, naechster Titel, 10 s zurueck/vor, leiser/lauter (relativ), Rest.
+# Die Zeitleiste der Karte spult per Klick ("seek": "!seek" -> Diddy sendet "!seek 1:23").
+_SEEK_AND_VOLUME = (
+    action("⏪ 10 s", "!zurueck 10"), action("⏩ 10 s", "!vor 10"),
+    action("🔉 −", "!volume -10"), action("🔊 +", "!volume +10"),
 )
-CONTROLS_PAUSED = (
-    action("▶ Weiter", "!resume"), action("⏭ Weiter", "!skip"), action("⏹ Stopp", "!stop"),
-)
+def controls(paused: bool = False, loop: bool = False) -> tuple:
+    """Knopfreihe der Titel-Karte. Der Loop-Knopf zeigt, ob die Schleife gerade an ist."""
+    first = action("▶ Weiter", "!resume") if paused else action("⏸ Pause", "!pause")
+    loop_btn = action("🔁 Loop: an" if loop else "🔁 Loop", "!loop")
+    rest = (action("📜 Warteschlange", "!queue"),) if not paused else ()
+    return (first, action("⏭ Nächster", "!skip"), *_SEEK_AND_VOLUME, loop_btn, *rest,
+            action("⏹ Stopp", "!stop"))
+
+
+def player_controls(paused: bool = False, loop: bool = False, autoplay: bool = False,
+                    video: bool = False) -> tuple[dict, list]:
+    """Knoepfe im Player-Layout von Diddy: `controls` (Zurueck, Pause/Weiter, Skip, Lautstaerke, Dashboard) und
+    `more` (Menue "⋯" mit allen anderen Funktionen). Neuere Diddy-Versionen zeichnen damit die kompakte Karte und
+    ignorieren `actions`."""
+    ctl = {"prev": "!previous", "toggle": "!resume" if paused else "!pause", "skip": "!skip",
+           "volume": "!volume", "dashboard": "!dashboard"}
+    on = lambda label, flag: f"{label}: an" if flag else label   # noqa: E731
+    more = [action("❤️ Merken", "!fav"),
+            action(on("🔁 Loop", loop), "!loop"),
+            action(on("✨ Autoplay", autoplay), "!autoplay"),
+            action("🔀 Mischen", "!shuffle"),
+            action("📜 Warteschlange", "!queue"),
+            action("⏪ 10 s", "!zurueck 10"), action("⏩ 10 s", "!vor 10"),
+            action(on("🎬 Video", video), "!video"),
+            action("⭐ Favoriten", "!fav list"),
+            action("📊 Stats", "!stats"),
+            action("⏹ Stopp", "!stop"),
+            action("🚪 Call verlassen", "!leavecall"),
+            action("❓ Hilfe", "!help")]
+    return ctl, more[:MORE_MAX]
+
+
+MORE_MAX = 16           # Diddy zeigt hoechstens so viele Eintraege im Menue "⋯"
+VOLUME_MAX = 150        # Schieberegler in Diddy; der Bot kann bis 300 (!volume 300)
+BOT_EVENT = "dev.diddy.bot"
+
+
+def bot_content(about: str, banner: tuple[str, str] = ("#FF80CA", "#7C5CFF"), accent: str = "#E6457A") -> dict:
+    """Raum-Zustand `dev.diddy.bot` (state_key = Bot-ID): Diddy zeigt BOT-Abzeichen, Info-Text und Banner."""
+    return {"v": VERSION, "about": about[:200], "banner": {"from": banner[0], "to": banner[1], "angle": 135},
+            "accent": accent}
+
+
+CONTROLS_PLAYING = controls(False)
+CONTROLS_PAUSED = controls(True)
+SEEK_COMMAND = "!seek"
 
 
 def fmt_len(seconds: Optional[float]) -> str:
@@ -71,14 +115,27 @@ def track_card(
     started_at_ms: Optional[int] = None,
     url: str = "",
     note: str = "",
+    seek: str = "",
+    volume: Optional[float] = None,
+    thumbnail: str = "",
     actions=(),
+    room: str = "",
+    requested_by: str = "",
+    up_next=(),
+    player: Optional[tuple[dict, list]] = None,
 ) -> dict:
-    """Karte eines Titels. `position` (s) gilt zum Zeitpunkt `started_at_ms` (Bot-Uhr)."""
+    """Karte eines Titels. `position` (s) gilt zum Zeitpunkt `started_at_ms` (Bot-Uhr).
+    `seek`: Befehl fuer die Zeitleiste (Klick = "<seek> mm:ss"), `volume`: aktuelle Lautstaerke."""
     assert state in TRACK_STATES, state
     return {
         "kind": "track", "state": state, "title": title, "artist": artist or None,
         "duration": duration or None, "position": position, "startedAt": started_at_ms,
-        "url": url or None, "note": note or None, "actions": list(actions),
+        "url": url or None, "note": note or None, "seek": seek or None, "volume": volume,
+        "thumbnail": thumbnail or None, "actions": list(actions),
+        "room": room[:80] or None, "requestedBy": requested_by[:80] or None,
+        "upNext": [{k: v for k, v in i.items() if v} for i in list(up_next)[:3]] or None,
+        "controls": player[0] if player else None, "more": player[1] if player else None,
+        "volumeMax": VOLUME_MAX if player else None,
     }
 
 
@@ -123,6 +180,33 @@ def note_body(text: str, icon: str = "") -> str:
     return f"{icon} {text}".strip()
 
 
+def list_card(title: str, items: list[dict], total: int = 0, actions=(), empty: str = "") -> dict:
+    """Allgemeine Liste (z. B. Favoriten): items = [{title, subtitle?, duration?}]."""
+    return {"kind": "list", "title": title, "items": items[:50], "total": total or len(items),
+            "empty": empty or None, "actions": list(actions)}
+
+
+def list_body(title: str, items: list[dict], empty: str = "") -> str:
+    if not items:
+        return f"{title}: {empty or 'leer'}"
+    return "\n".join([f"{title}:"] + [f"{i}. {it['title']}" for i, it in enumerate(items, 1)])
+
+
+def stats_card(title: str, charts: list[dict], actions=()) -> dict:
+    """Diagramme: charts = [{title, unit?, items: [{label, value, sub?}]}] als Balken."""
+    return {"kind": "stats", "title": title, "charts": charts, "actions": list(actions)}
+
+
+def stats_body(title: str, charts: list[dict]) -> str:
+    lines = [title]
+    for ch in charts:
+        lines.append(f"{ch['title']}:")
+        unit = ch.get("unit") or ""
+        for i, it in enumerate(ch["items"], 1):
+            lines.append(f"{i}. {it['label']} ({it['value']:g}{' ' + unit if unit else ''})")
+    return "\n".join(lines)
+
+
 def help_card(groups: list[dict], note: str = "") -> dict:
     return {"kind": "help", "groups": groups, "note": note or None}
 
@@ -143,21 +227,63 @@ HELP_GROUPS = [
     _g("Warteschlange",
        ("!queue · !clear", "anzeigen · leeren"),
        ("!shuffle", "mischen"),
-       ("!loop on|off", "aktuellen Titel wiederholen")),
+       ("!loop on|off", "aktuellen Titel wiederholen"),
+       ("!autoplay on|off", "danach automatisch ähnliche Musik")),
     _g("Ton und Bild",
-       ("!volume <0-300>", "Lautstärke (60 = Original, darüber Boost)"),
+       ("!volume <0-300 | +10 | -10>", "Lautstärke (60 = Original, darüber Boost), +/- relativ"),
        ("!video on|off", "Video im Call")),
     _g("Call",
-       ("!joincall · !leavecall", "Bot kommt in den Call · verlässt ihn")),
+       ("!joincall · !leavecall", "Bot kommt in den Call · verlässt ihn"),
+       ("!dashboard", "Web-Dashboard: Link + persönliches Passwort per Direktnachricht")),
     _g("Playlists und Dauerbetrieb",
        ("!playlist create|delete <name>", "anlegen · löschen"),
        ("!playlist add <name> [Link]", "Titel hinzufügen (ohne Link: der laufende)"),
        ("!playlist remove <name> <nr>", "Titel entfernen"),
        ("!playlist show <name> · list", "anzeigen · alle Listen"),
        ("!playlist play <name> [shuffle]", "abspielen · !playlist enqueue <name> einreihen"),
+       ("!fav · !fav list · !fav remove <nr>", "laufenden Titel merken · deine Favoriten · entfernen"),
+       ("!fav play [shuffle]", "deine Favoriten abspielen (Steuern: nur im Call)"),
+       ("!stats", "Diagramme: meistgespielte Titel, wer am meisten Musik hört"),
        ("!24/7 song [Link] · playlist <name> · off", "Dauerschleife, Bot bleibt im Call")),
 ]
 HELP_NOTE = ("Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue, "
              "playlist list/show geht immer). Ist die Warteschlange leer und der Song zu Ende, "
-             "verlässt der Bot den Call (außer im 24/7-Modus). Nichts wird gespeichert: jeder "
-             "Titel wird bei jeder Wiedergabe neu geladen.")
+             "verlässt der Bot den Call (außer im 24/7-Modus). Titel werden nur gespeichert, wenn "
+             "sie oft gespielt werden (ab 5 Downloads); nach 3 Tagen ohne Wiedergabe wird die Datei gelöscht.")
+
+
+# Befehlsliste fuer die Eingabe-Vorschlaege der Clients (State-Event dev.diddy.commands, state_key = Bot-ID).
+COMMANDS_EVENT = "dev.diddy.commands"
+COMMAND_LIST = [
+    ("play", "!play <Link oder Suchbegriff>", "Titel abspielen"),
+    ("dashboard", "!dashboard", "Web-Dashboard: Link + Passwort per DM"),
+    ("autoplay", "!autoplay on|off", "danach automatisch ähnliche Musik"),
+    ("pause", "!pause", "pausieren"),
+    ("resume", "!resume", "weiterspielen"),
+    ("stop", "!stop", "stoppen"),
+    ("skip", "!skip", "nächster Titel"),
+    ("previous", "!previous", "vorheriger Titel"),
+    ("queue", "!queue", "Warteschlange anzeigen"),
+    ("clear", "!clear", "Warteschlange leeren"),
+    ("status", "!status", "was läuft gerade?"),
+    ("seek", "!seek <mm:ss | +30 | -30>", "zu einer Stelle springen"),
+    ("vor", "!vor [s]", "vorspulen"),
+    ("zurueck", "!zurueck [s]", "zurückspulen"),
+    ("volume", "!volume <0-300 | +10 | -10>", "Lautstärke"),
+    ("shuffle", "!shuffle", "Warteschlange mischen"),
+    ("loop", "!loop on|off", "Titel wiederholen"),
+    ("video", "!video on|off", "Video im Call"),
+    ("joincall", "!joincall", "Bot kommt in den Call"),
+    ("leavecall", "!leavecall", "Bot verlässt den Call"),
+    ("playlist", "!playlist create|add|remove|show|list|play|enqueue|delete", "Playlists"),
+    ("fav", "!fav [list | remove <nr> | play [shuffle]]", "deine Favoriten"),
+    ("stats", "!stats", "Diagramme: meistgespielt, wer hört am meisten"),
+    ("24/7", "!24/7 song [Link] | playlist <name> | off", "Dauerschleife"),
+    ("help", "!help", "alle Befehle"),
+]
+
+
+def commands_content(prefix: str = "!") -> dict:
+    """Inhalt des State-Events: Praefix plus Befehle (name ohne Praefix, usage, desc)."""
+    return {"v": VERSION, "prefix": prefix,
+            "commands": [{"name": n, "usage": u, "desc": d} for n, u, d in COMMAND_LIST]}

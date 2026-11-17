@@ -40,6 +40,19 @@ KEYS_EVENT = "io.element.call.encryption_keys"
 EXPIRES_MS = 4 * 60 * 60 * 1000          # wie matrix-js-sdk DEFAULT_EXPIRE_DURATION
 REFRESH_S = 3 * 60 * 60                  # Membership rechtzeitig erneuern
 BLOCK_SAMPLES = 960                      # 20 ms bei 48 kHz
+# Musik statt Sprache: ohne feste Vorgabe nimmt das LiveKit-SDK Sprach-Defaults
+# (niedrige Opus-Bitrate, DTX schneidet leise Stellen weg) -> klingt dumpf/komisch.
+AUDIO_BITRATE = 128_000
+STATS_S = 30                             # Aussetzer-Statistik so oft loggen
+
+
+def audio_publish_options():
+    from livekit import rtc
+    from livekit.rtc._proto import room_pb2
+    return rtc.TrackPublishOptions(
+        source=rtc.TrackSource.SOURCE_MICROPHONE,
+        audio_encoding=room_pb2.AudioEncoding(max_bitrate=AUDIO_BITRATE),
+        dtx=False, red=True)
 
 
 def member_state_key(user_id: str, device_id: str) -> str:
@@ -81,6 +94,9 @@ class ElementCall:
         self._lock = asyncio.Lock()
         # Wird vom Bot gesetzt: True = nicht verlassen, auch wenn der Call leer ist (24/7).
         self.keep_alive = None
+        # Vom Bot gesetzt: wird aufgerufen, wenn in einem Raum, in dem wir (noch) nicht
+        # im Call sind, jemand dem Call beitritt (Play kam vor dem Call).
+        self.on_call_started = None
 
     # ------------------------------------------------------------ Zustand
     @property
@@ -91,6 +107,16 @@ class ElementCall:
         me = (self.cfg.matrix_user_id or self.cfg.user, self.cfg.device_id)
         return {k: v for k, v in active_members(self.members.get(room_id, {})).items()
                 if k != me}
+
+    def livekit_others(self) -> Optional[int]:
+        """Wie viele andere gerade wirklich mit dem Medienserver verbunden sind (None: nicht verbunden).
+        Verlaesslicher als die call.member-Eintraege, die nach einem Absturz stundenlang stehen bleiben."""
+        if self._lk is None:
+            return None
+        try:
+            return len(self._lk.remote_participants)
+        except Exception:  # noqa: BLE001
+            return None
 
     def users_in_call(self, room_id: str) -> set[str]:
         """Nutzer-IDs (klein geschrieben) aller aktiven Teilnehmer ausser dem Bot."""
@@ -108,6 +134,8 @@ class ElementCall:
             c["_sender"] = sender
         self.members.setdefault(room_id, {})[state_key] = c
         if self.room_id != room_id:
+            if self.on_call_started and self.others_in_call(room_id):
+                asyncio.ensure_future(self.on_call_started(room_id))
             return
         others = self.others_in_call(room_id)
         if not others and not (self.keep_alive and self.keep_alive()):
@@ -160,6 +188,7 @@ class ElementCall:
         room = rtc.Room()
         await room.connect(url, jwt, options)
         self._lk = room
+        room.on("disconnected", lambda *_: self._on_lk_disconnected(room, room_id))
         lid = room.local_participant.identity
         if lid != identity:
             log.warning("LiveKit-Identity %s statt erwartet %s", lid, identity)
@@ -169,8 +198,7 @@ class ElementCall:
         self._sink = self.player.hub.new_sink()
         audio_src = rtc.AudioSource(SAMPLE_RATE, 2)
         atrack = rtc.LocalAudioTrack.create_audio_track("musik", audio_src)
-        await room.local_participant.publish_track(
-            atrack, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
+        await room.local_participant.publish_track(atrack, audio_publish_options())
         self._tasks = [asyncio.create_task(self._pump_audio(audio_src), name="ec-audio")]
 
         if self.player.video_enabled:
@@ -192,6 +220,14 @@ class ElementCall:
         log.info("Element Call beigetreten: %s als %s (E2EE %s, %d andere)",
                  room_id, lid, "an" if encrypted else "aus",
                  len(self.others_in_call(room_id)))
+
+    def _on_lk_disconnected(self, room, room_id: str) -> None:
+        """Medienserver hat die Verbindung beendet: Zustand aufraeumen, sonst haelt sich
+        der Bot fuer 'im Call' und tritt bei !play nie wieder bei."""
+        if self._lk is not room or self.room_id != room_id:
+            return
+        log.warning("LiveKit-Verbindung getrennt in %s – Bot gilt als nicht mehr im Call", room_id)
+        asyncio.ensure_future(self.leave())
 
     async def _resolve_service_url(self, room_id: str) -> Optional[str]:
         if self.cfg.livekit_service_url:
@@ -259,10 +295,14 @@ class ElementCall:
         from livekit import rtc
         loop = asyncio.get_running_loop()
         anchor = loop.time()
+        stats_at = anchor + STATS_S
+        gaps = late = 0
         try:
             while True:
                 block = self._sink.take_audio() if self._sink else None
                 if block is None:
+                    if getattr(self.player, "state", "") == "playing":
+                        gaps += 1               # Puffer leer, obwohl Musik laeuft
                     block = silence_block()
                 block = np.ascontiguousarray(block, dtype=np.int16)
                 samples = block.shape[-1] // 2
@@ -274,6 +314,17 @@ class ElementCall:
                     await asyncio.sleep(delay)
                 elif delay < -1.0:
                     anchor = loop.time()
+                    late += 1
+                now = loop.time()
+                if now >= stats_at:
+                    dropped = self._sink.dropped_audio if self._sink else 0
+                    if gaps or late or dropped:
+                        log.warning("Audio-Aussetzer in %ds: %d leere Bloecke (je 20 ms), "
+                                    "%d Takt-Spruenge, %d verworfen", STATS_S, gaps, late, dropped)
+                        if self._sink:
+                            self._sink.dropped_audio = 0
+                    gaps = late = 0
+                    stats_at = now + STATS_S
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -296,6 +347,15 @@ class ElementCall:
                                               img.to_ndarray().tobytes())
                     except Exception:
                         log.debug("Videoframe-Konvertierung fehlgeschlagen", exc_info=True)
+                if last is None:                # Beitritt mitten im Titel: Titelbild statt Schwarz
+                    cover = getattr(self.player, "cover_frame", None)
+                    if cover is not None:
+                        try:
+                            img = cover.reformat(width=w, height=h, format="rgba")
+                            last = rtc.VideoFrame(w, h, rtc.VideoBufferType.RGBA,
+                                                  img.to_ndarray().tobytes())
+                        except Exception:
+                            log.debug("Titelbild-Konvertierung fehlgeschlagen", exc_info=True)
                 source.capture_frame(last or black)
                 anchor += 1.0 / fps
                 delay = anchor - loop.time()

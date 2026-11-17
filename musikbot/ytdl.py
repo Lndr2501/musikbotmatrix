@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from typing import Optional
 
 import yt_dlp
 
@@ -41,6 +42,93 @@ def split_search(query: str) -> tuple[str, str]:
     return "ytsearch1", query
 
 
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_IGNORED_WORDS = {"lyric", "lyrics", "video", "official", "audio", "the", "und", "and", "feat", "ft"}
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in _WORD_RE.findall(text.lower()) if len(w) >= 2 and w not in _IGNORED_WORDS}
+
+
+def pick_lyric_entry(entries: list, query: str) -> Optional[dict]:
+    """Erstes Lyric-Video, das wirklich zur Suche passt.
+
+    Der Titel (plus Kanal) muss "lyric" enthalten UND alle Suchwoerter, bei mehr als drei
+    Woertern reicht eins weniger. Sonst None -> normale Suche (lieber richtiger Song ohne
+    Text als falscher Song mit Text)."""
+    wanted = _words(query)
+    if not wanted:
+        return None
+    need = len(wanted) if len(wanted) <= 3 else len(wanted) - 1
+    for e in entries:
+        if not e:
+            continue
+        title = str(e.get("title") or "")
+        if "lyric" not in title.lower():
+            continue
+        have = _words(f"{title} {e.get('channel') or e.get('uploader') or ''}")
+        if len(wanted & have) >= need:
+            return e
+    return None
+
+
+# Woerter, die eine bestimmte Fassung meinen. Steht eins in der Suche, muss es im Treffer
+# stehen; steht keins in der Suche, wird das Original bevorzugt.
+VERSION_WORDS = {"remix", "bootleg", "edit", "sped", "slowed", "nightcore", "mashup", "flip",
+                 "rework", "cover", "live", "acoustic", "instrumental", "reverb", "techno",
+                 "hardstyle", "phonk", "goth", "rmx", "vip"}
+
+
+def score_entry(entry: dict, query: str) -> float:
+    """Wie gut passt ein Suchtreffer zur Anfrage? 0..1 (+ kleine Boni), Fassung beachtet."""
+    wanted = _words(query)
+    if not wanted or not entry:
+        return 0.0
+    title = str(entry.get("title") or "")
+    have = _words(f"{title} {entry.get('channel') or entry.get('uploader') or ''}")
+    score = len(wanted & have) / len(wanted)
+    want_version = wanted & VERSION_WORDS
+    has_version = _words(title) & VERSION_WORDS
+    if want_version and not (want_version & has_version):
+        score -= 0.5            # Remix gesucht, Original gefunden
+    if not want_version and has_version:
+        score -= 0.3            # Original gesucht, Remix gefunden
+    return score
+
+
+def choose_entry(youtube: list, lyrics: list, soundcloud: list, query: str) -> Optional[dict]:
+    """Besten Treffer aus YouTube, YouTube-Lyrics und SoundCloud waehlen.
+
+    Bei gleicher Passung: Lyric-Video > YouTube > SoundCloud. Passt nichts ordentlich
+    (< 0.5), bleibt es beim ersten YouTube-Treffer wie frueher."""
+    best, best_score = None, -9.0
+    pools = ((lyrics, 0.06), (youtube, 0.03), (soundcloud, 0.0))
+    for pool, bonus in pools:
+        for rank, e in enumerate(pool or []):
+            if not e:
+                continue
+            sc = score_entry(e, query)
+            if pool is lyrics and "lyric" not in str(e.get("title") or "").lower():
+                continue
+            sc += bonus - rank * 0.01
+            if sc > best_score:
+                best, best_score = e, sc
+    if best is not None and best_score >= 0.5:
+        return best
+    first = [e for e in (youtube or []) if e]
+    return first[0] if first else best
+
+
+def _thumb_of(info: dict) -> str:
+    """Titelbild-Adresse aus den yt-dlp-Infos (Albumcover oder Video-Vorschaubild), nur http(s)."""
+    url = str(info.get("thumbnail") or "")
+    if not url:
+        thumbs = [t for t in (info.get("thumbnails") or []) if isinstance(t, dict) and t.get("url")]
+        if thumbs:
+            url = str(thumbs[-1]["url"])
+    return url if url.startswith(("http://", "https://")) else ""
+
+
 @dataclass
 class Resolved:
     key: str
@@ -48,6 +136,7 @@ class Resolved:
     url: str
     duration: float
     uploader: str
+    thumbnail: str = ""
 
 
 class MediaResolver:
@@ -91,8 +180,14 @@ class MediaResolver:
                 info = self._extract(query)
             else:
                 key, term = split_search(query)
-                listing = self._extract(f"{key}:{term}", flat=True)
-                entries = [e for e in (listing.get("entries") or []) if e]
+                entries = []
+                if key == "ytsearch1":
+                    entry = self._search_everywhere(term)
+                    if entry:
+                        entries = [entry]
+                else:
+                    listing = self._extract(f"{key}:{term}", flat=True)
+                    entries = [e for e in (listing.get("entries") or []) if e]
                 if not entries:
                     raise MediaError(f"Zu {query!r} wurde nichts gefunden.")
                 url = entries[0].get("url") or entries[0].get("webpage_url")
@@ -105,6 +200,100 @@ class MediaResolver:
             raise MediaError(f"yt-dlp Fehler: {_clean(exc)}") from exc
 
         return self._to_resolved(info)
+
+    def search(self, query: str, limit: int = 8) -> list[dict]:
+        """Trefferliste fuers Dashboard (nur Metadaten, schnell, nichts geladen).
+
+        Gleiche Praefixe wie !play (sc:, bili:, nico:); ohne Praefix YouTube."""
+        query = query.strip()
+        if not query:
+            return []
+        key, term = split_search(query)
+        site = key.rstrip("0123456789") or "ytsearch"
+        try:
+            listing = self._extract(f"{site}{limit}:{term}", flat=True)
+        except yt_dlp.utils.DownloadError as exc:
+            raise MediaError(f"yt-dlp Fehler: {_clean(exc)}") from exc
+        out = []
+        for e in listing.get("entries") or []:
+            if not e:
+                continue
+            url = e.get("url") or e.get("webpage_url") or ""
+            if not url.startswith("http"):
+                vid = e.get("id") or ""
+                url = f"https://www.youtube.com/watch?v={vid}" if site == "ytsearch" and vid else url
+            if not url:
+                continue
+            thumb = _thumb_of(e)
+            if not thumb and site == "ytsearch" and e.get("id"):
+                thumb = f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"
+            out.append({"title": str(e.get("title") or url), "url": url,
+                        "artist": str(e.get("uploader") or e.get("channel") or ""),
+                        "duration": float(e.get("duration") or 0), "thumbnail": thumb})
+        return out
+
+    def similar(self, key: str, title: str = "", artist: str = "", limit: int = 25) -> list[dict]:
+        """Aehnliche Titel ueber den YouTube-Mix ("Radio") zum Titel. Ohne YouTube-ID wird
+        der Titel erst auf YouTube gesucht. Leere Liste, wenn nichts zu finden ist."""
+        site, _, vid = key.partition(":")
+        if site != "youtube" or not vid:
+            term = " ".join(t for t in (artist, title) if t).strip()
+            if not term:
+                return []
+            try:
+                hit = self._extract(f"ytsearch1:{term}", flat=True)
+            except Exception:  # noqa: BLE001
+                return []
+            entries = [e for e in (hit.get("entries") or []) if e and e.get("id")]
+            if not entries:
+                return []
+            vid = entries[0]["id"]
+        opts = self._base_opts()
+        opts.update({"extract_flat": "in_playlist", "playlistend": limit, "noplaylist": False})
+        url = f"https://www.youtube.com/watch?v={vid}&list=RD{vid}"
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False) or {}
+        except Exception as exc:  # noqa: BLE001
+            log.info("YouTube-Mix zu %s nicht ladbar: %s", vid, exc)
+            return []
+        out = []
+        for e in info.get("entries") or []:
+            if not e or not e.get("id") or e["id"] == vid:
+                continue
+            out.append({"key": f"youtube:{e['id']}", "url": f"https://www.youtube.com/watch?v={e['id']}",
+                        "title": str(e.get("title") or e["id"]),
+                        "artist": str(e.get("channel") or e.get("uploader") or ""),
+                        "duration": float(e.get("duration") or 0),
+                        "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"})
+        return out
+
+    async def similar_async(self, key: str, title: str = "", artist: str = "") -> list[dict]:
+        return await asyncio.to_thread(self.similar, key, title, artist)
+
+    async def search_async(self, query: str, limit: int = 8) -> list[dict]:
+        return await asyncio.to_thread(self.search, query, limit)
+
+    def _search_everywhere(self, term: str) -> Optional[dict]:
+        """YouTube, YouTube-Lyrics und SoundCloud parallel durchsuchen, besten Treffer waehlen."""
+        lyric_term = term if "lyric" in term.lower() else f"{term} lyrics"
+        targets = {"youtube": f"ytsearch5:{term}", "lyrics": f"ytsearch5:{lyric_term}",
+                   "soundcloud": f"scsearch5:{term}"}
+
+        def run(target: str) -> list:
+            try:
+                return list(self._extract(target, flat=True).get("entries") or [])
+            except Exception as exc:  # eine Quelle darf ausfallen
+                log.info("Suche %s fehlgeschlagen: %s", target, _clean(exc) if isinstance(exc, yt_dlp.utils.DownloadError) else exc)
+                return []
+
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            found = dict(zip(targets, pool.map(run, targets.values())))
+        entry = choose_entry(found["youtube"], found["lyrics"], found["soundcloud"], term)
+        if entry:
+            log.info("Suche %r -> %s (%s)", term, entry.get("title"), entry.get("ie_key") or entry.get("url"))
+        return entry
 
     def _extract(self, target: str, flat: bool = False) -> dict:
         opts = self._base_opts()
@@ -133,6 +322,7 @@ class MediaResolver:
             url=str(info.get("webpage_url") or info.get("url") or ""),
             duration=float(duration or 0),
             uploader=str(info.get("uploader") or info.get("channel") or info.get("uploader_id") or ""),
+            thumbnail=_thumb_of(info),
         )
 
     # ----------------------------------------------------------- Download

@@ -7,38 +7,92 @@ ueber das Telefon-Icon (Peer-zu-Peer/mesh, klassisches m.call-Signaling).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 import random
 import re
+import tempfile
+import time
+
+import aiohttp
+import nio
 
 from . import cards
 from .calls import CallManager
-from .commands import HELP, is_read_only, parse
+from .commands import HELP, LOOKUP, is_read_only, parse
 from .elementcall import ElementCall
 from .config import Config
 from .hub import Hub
 from .matrix import Matrix
-from .player import Player
+from .player import AUTOPLAY, Player
 from .store import TrackStore
 from .util import fmt_time, now_ms, parse_time
+from .webauth import WebAuth
 from .ytdl import MediaError, MediaResolver
 
 log = logging.getLogger("musikbot")
 
+CALL_CHECK_SECONDS = 10   # so oft wird geprueft, ob noch jemand im Call ist
+EMPTY_GRACE_SECONDS = 20  # so lange darf der Call leer sein, bevor der Bot geht
+CARD_CHECK_SECONDS = 3    # so oft wird "Up next" auf der laufenden Karte geprueft
+BOT_ABOUT = ("Spielt Musik in Calls – YouTube, Spotify-Links, Dateien. Probier die Knöpfe auf meinen "
+             "Karten oder tippe !help.")
+# Steckbrief fuer Diddy (BOT-Abzeichen, Info-Text, Banner); die Library setzt ihn in jedem Raum
+PROFILE = dict(about=BOT_ABOUT, banner=("#FF80CA", "#7C5CFF", 135), accent="#E6457A")
+
+AUDIO_VIDEO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".flac", ".wav", ".wma",
+                   ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".3gp"}
+
+
+def _write_file(path: str, data: bytes) -> None:
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+def safe_radio_name(filename: str) -> str:
+    """Dateiname aus dem Upload: nur der Name (kein Pfad), keine Steuerzeichen, max. 120 Zeichen."""
+    name = os.path.basename((filename or "").replace("\\", "/"))
+    name = re.sub(r"[\x00-\x1f\x7f/\\:*?\"<>|]", "", name).strip().lstrip(".").strip()
+    stem, ext = os.path.splitext(name)
+    return (stem[:120].strip() or "upload") + ext.lower()
+
+
+def probe_duration(path: str) -> float:
+    """Laenge in Sekunden; wirft, wenn die Datei kein Audio/Video enthaelt."""
+    import av
+    with av.open(path) as c:
+        if not any(s.type in ("audio", "video") for s in c.streams):
+            raise ValueError("kein Audio/Video")
+        return float(c.duration / av.time_base) if c.duration else 0.0
+
+
+RADIO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".flac", ".wav", ".wma"}
+MAX_RADIO_UPLOAD = 100 * 1024 * 1024        # pro Datei (Cloudflare erlaubt ohnehin max. 100 MB)
 PLAYLIST_NAME = re.compile(r"^[\w.-]{1,32}$")
 MAX_SHOWN = 30
 
 
 class Bot:
+    # Standardwerte (auch fuer Test-Attrappen, die __init__ ueberspringen)
+    _autoplay = False
+    _autoplay_busy = False
+    _last_finished = None
+    _recent: tuple | list = ()
+    _alone_since: float | None = None
+    _card_next: dict = {}
+
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.store = TrackStore(cfg.db_path, cfg.tmp_dir, cfg.cache_dir, cfg.library_dir)
+        self.store = TrackStore(cfg.db_path, cfg.tmp_dir, cfg.cache_dir, cfg.library_dir,
+                               hot_dir=cfg.hot_dir, hot_after=cfg.hot_after, hot_days=cfg.hot_days,
+                               keep_dirs=(cfg.radio_dir,))
         self._fetch_room = ""
         self.hub = Hub()
         self.player = Player(cfg, self.hub, self.store,
                              on_event=self._player_event, fetch=self._fetch)
         self.calls = CallManager(cfg, self.player)
-        self.matrix = Matrix(cfg)
+        self.matrix = Matrix(cfg, PROFILE)
         self.ecall = ElementCall(cfg, self.matrix, self.player)
         self.resolver = MediaResolver(cfg)
         # Buchhaltung, welcher Raum welche Liste zuletzt gesehen hat:
@@ -50,12 +104,32 @@ class Bot:
         # Karten (Diddy): Suche/Download-Karte eines Raums und die Karte des laufenden Titels
         self._card_pending: dict[str, str] = {}
         self._card_now: dict[str, tuple[str, object]] = {}
+        self._card_next: dict[str, tuple] = {}     # Raum -> naechste Titel, wie sie auf der Karte stehen
+        # Titelbilder: Quelle (http) und die auf den Medien-Server geladene mxc://-Adresse je Titel
+        self._thumb_url: dict[str, str] = {}
+        self._thumb_mxc: dict[str, str] = {}
+        self._cover_frames: dict[str, object] = {}
+        self._thumb_tasks: dict[str, asyncio.Task] = {}
         # 24/7-Modus: None oder {"kind": "song"|"playlist", "keys": [...], "name": str}
         self._always: dict | None = None
+        self._radio_files: dict[str, str] = {}      # Radio-Key -> Dateipfad
         self.ecall.keep_alive = lambda: self._always is not None
+        self.ecall.on_call_started = self._on_call_started
+        self._want_call: str | None = None          # Raum: Play kam, Call fehlte noch -> spaeter beitreten
+        # Web-Dashboard: Login-Daten liegen in derselben Datenbank
+        self.webauth = WebAuth(self.store.db, self.store._lock)
+        self.dashboard = None
+        self._bg_tasks: set[asyncio.Task] = set()
+        self._names: dict[str, str] = {}            # Anzeigenamen fuers Dashboard
+        # Autoplay: ist die Warteschlange leer, kommt ein aehnlicher Titel (YouTube-Mix)
+        self._autoplay = self.store.setting("autoplay", "1") == "1"
+        self._autoplay_busy = False
+        self._recent: list[str] = []                # zuletzt gespielte Titel (keine Wiederholung)
+        self._last_finished = None
+        self._load_fade_settings()
 
         m = self.matrix
-        m.on_text = self._on_text
+        m.on_media = self._on_media
         m.on_call = self.calls.handle_event
         m.on_member_join = self.calls.on_member_joined
         m.on_room_left = self.calls.on_room_left
@@ -63,6 +137,7 @@ class Bot:
         self.calls.send_room_event = m.send_room_event
         self.calls.send_to_device = m.send_to_device
         self.calls.devices_of_room = m.devices_of_room
+        self._register_commands()
 
     # ------------------------------------------------------------------ Start
     async def startup(self) -> list[str]:
@@ -73,16 +148,111 @@ class Bot:
         turn = await self.matrix.fetch_turn()
         if turn:
             self.calls.set_turn(turn)
+        await self._ensure_avatar()
         return rooms
+
+    async def _ensure_avatar(self) -> None:
+        """Logo als Profilbild des Bots setzen – nur wenn es sich geaendert hat."""
+        path = os.path.join(os.path.dirname(__file__), "static", "avatar.png")
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return
+        digest = hashlib.sha256(data).hexdigest()
+        if self.store.setting("avatar_sha256") == digest:
+            return
+        try:
+            mxc = await self.matrix.upload_image(data, "image/png", "musikbot.png")
+            if not mxc:
+                return
+            resp = await self.matrix.client.set_avatar(mxc)
+            if isinstance(resp, nio.ErrorResponse):
+                log.warning("Profilbild nicht gesetzt: %s", resp)
+                return
+            self.store.set_setting("avatar_sha256", digest)
+            log.info("Profilbild gesetzt (%s)", mxc)
+        except Exception:
+            log.warning("Profilbild nicht gesetzt", exc_info=True)
 
     async def run(self) -> None:
         rooms = await self.startup()
         log.info("Bot bereit. Raeume: %s", ", ".join(rooms) or "(keine konfiguriert)")
-        idle = asyncio.create_task(self._idle_watch(), name="idle-leave")
-        try:
-            await self.matrix.run()
-        finally:
-            idle.cancel()
+        self.start_watchers()
+        await self.matrix.run()
+
+    def start_watchers(self) -> None:
+        """Hintergrund-Waechter: Leerlauf (nichts spielt) und leerer Call (niemand hoert zu)."""
+        for coro, name in ((self._idle_watch(), "idle-leave"), (self._call_watch(), "empty-call"),
+                           (self._card_watch(), "card-next")):
+            task = asyncio.create_task(coro, name=name)
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+
+    async def _call_watch(self) -> None:
+        """Verlaesst den Call und stoppt die Musik, wenn niemand mehr zuhoert."""
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(CALL_CHECK_SECONDS)
+            try:
+                await self._check_empty(loop.time())
+            except Exception:
+                log.exception("Leer-Call-Check fehlgeschlagen")
+
+    async def _card_watch(self) -> None:
+        """Haelt "Up next" auf der laufenden Karte aktuell (Wuensche, Autoplay, Umsortieren im Dashboard)."""
+        while True:
+            await asyncio.sleep(CARD_CHECK_SECONDS)
+            try:
+                await self._refresh_next()
+            except Exception:
+                log.exception("Karte nachziehen fehlgeschlagen")
+
+    async def _refresh_next(self) -> bool:
+        state = self.player.state
+        if state not in ("playing", "paused"):
+            return False
+        for room in list(self._card_now):
+            if self._card_next.get(room) != self._next_sig():
+                await self._now_card_state(room, state)
+                return True
+        return False
+
+    async def _someone_listening(self) -> bool:
+        ec = self.ecall
+        if ec.active:
+            others = ec.livekit_others()
+            if others is not None:
+                return others > 0
+            await ec.load_members(ec.room_id)
+            return bool(ec.others_in_call(ec.room_id))
+        return any(p.live and p.answered for p in self.calls.peers)
+
+    async def _check_empty(self, now: float) -> bool:
+        """Ein Pruefschritt. True, wenn der Bot gerade wegen eines leeren Calls gegangen ist."""
+        in_call = self.ecall.active or bool(self.calls.peers)
+        if self._always or not (in_call or self.player.state == "playing") \
+                or await self._someone_listening():
+            self._alone_since = None
+            return False
+        if self._alone_since is None:
+            self._alone_since = now
+            return False
+        if now - self._alone_since < EMPTY_GRACE_SECONDS:
+            return False
+        self._alone_since = None
+        room = self.ecall.room_id or self.calls.active_room or self._notice_room()
+        log.info("Niemand mehr im Call – verlasse ihn und stoppe die Musik")
+        await self.ecall.leave()
+        await self.calls.hangup_all("empty")
+        playing = self.player.state != "stopped"
+        if playing:
+            await self.player.stop()
+        if room:
+            await self._finish_now_card(room)
+            await self._note(room, "Niemand mehr im Call – "
+                             + ("Musik gestoppt und " if playing else "") + "ich bin raus.", "info", "👋")
+        return True
 
     async def _idle_watch(self) -> None:
         """Verlaesst den Call, wenn IDLE_LEAVE_SECONDS lang nichts spielt."""
@@ -113,7 +283,21 @@ class Bot:
             except Exception:
                 log.exception("Idle-Check fehlgeschlagen")
 
+    async def start_web(self) -> None:
+        """Dashboard starten (nach dem Login, nicht im Selbsttest)."""
+        if not self.cfg.web_enabled:
+            return
+        from .web import Dashboard
+        self.dashboard = Dashboard(self)
+        try:
+            await self.dashboard.start()
+        except OSError:
+            log.exception("Dashboard-Port %d belegt – Dashboard aus", self.cfg.web_port)
+            self.dashboard = None
+
     async def shutdown(self) -> None:
+        if self.dashboard is not None:
+            await self.dashboard.stop()
         try:
             await self.ecall.leave()
         except Exception:
@@ -126,7 +310,82 @@ class Bot:
     # ------------------------------------------------------------------ Karten
     def _track_meta(self, track) -> dict:
         return {"artist": getattr(track, "uploader", "") or "", "duration": track.duration or 0.0,
-                "url": getattr(track, "url", "") or ""}
+                "url": getattr(track, "url", "") or "",
+                "thumbnail": self._thumb_mxc.get(track.key, "")}
+
+    # --- Titelbild (Albumcover bzw. Video-Vorschaubild) -------------------------------------
+    def _thumb_source(self, key: str) -> str:
+        """Adresse des Titelbilds: von yt-dlp gemeldet, sonst bei YouTube aus der Video-ID."""
+        url = self._thumb_url.get(key, "")
+        if url:
+            return url
+        ext, _, vid = key.partition(":")
+        if ext == "youtube" and re.fullmatch(r"[\w-]{6,20}", vid):
+            return f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg"      # 16:9, ohne schwarze Balken
+        return ""
+
+    async def _fetch_thumb(self, key: str) -> str:
+        """Titelbild laden und hochladen; mxc://-Adresse oder "" (nie ein Fehler)."""
+        if key in self._thumb_mxc:
+            return self._thumb_mxc[key]
+        url = self._thumb_source(key)
+        if not url:
+            return ""
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as http:
+                async with http.get(url) as resp:
+                    ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                    if resp.status != 200 or not ctype.startswith("image/"):
+                        return ""
+                    # read(n) liefert nur, was gerade im Puffer liegt: in Stuecken bis zum Ende lesen
+                    buf = bytearray()
+                    async for chunk in resp.content.iter_chunked(65536):
+                        buf += chunk
+                        if len(buf) > 3_000_000:
+                            return ""
+                    data = bytes(buf)
+            if not data:
+                return ""
+            ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(ctype, "img")
+            mxc = await self.matrix.upload_image(data, ctype, f"cover.{ext}")
+            self._cover_frame_for(key, data)
+            if mxc:
+                self._thumb_mxc[key] = mxc
+            return mxc or ""
+        except Exception:
+            log.debug("Titelbild nicht verfuegbar (%s)", key, exc_info=True)
+            return ""
+
+    def _cover_frame_for(self, key: str, data: bytes) -> None:
+        """Titelbild als Kamerabild vorbereiten (nur fuer den laufenden Titel noetig)."""
+        from .media import cover_frame
+        try:
+            h = int(self.cfg.video_height) // 2 * 2
+            frame = cover_frame(data, (h * 16 // 9) // 2 * 2, h)
+        except Exception:                      # das Kamerabild darf die Karte nie verhindern
+            log.debug("Titelbild als Kamerabild fehlgeschlagen", exc_info=True)
+            return
+        if frame is not None:
+            self._cover_frames[key] = frame
+            while len(self._cover_frames) > 4:
+                self._cover_frames.pop(next(iter(self._cover_frames)))
+
+    def _prefetch_thumb(self, key: str) -> None:
+        """Titelbild schon waehrend Suche/Download laden, damit es zur Karte fertig ist."""
+        if key in self._thumb_mxc or key in self._thumb_tasks:
+            return
+        self._thumb_tasks[key] = asyncio.create_task(self._fetch_thumb(key))
+
+    async def _thumb_ready(self, key: str, wait: float = 4.0) -> str:
+        """Titelbild fuer die Karte: laeuft das Laden noch, hoechstens `wait` Sekunden darauf warten."""
+        if key in self._thumb_mxc:
+            return self._thumb_mxc[key]
+        self._prefetch_thumb(key)
+        try:
+            return await asyncio.wait_for(asyncio.shield(self._thumb_tasks[key]), wait)
+        except Exception:
+            return ""
 
     async def _note(self, room: str, text: str, tone: str = "info", icon: str = "") -> None:
         """Kurze Meldung als Hinweis-Chip (Diddy); andere Clients sehen den Text."""
@@ -155,6 +414,24 @@ class Bot:
         card = cards.track_card(state, track.title or track.key, **self._track_meta(track))
         await self._put_track_card(room, card, eid)
 
+    def _next_sig(self) -> tuple:
+        return tuple(k for k, _ in list(self.player.queue)[:3])
+
+    async def _player_extras(self, room: str, paused: bool) -> dict:
+        """Zusatzfelder fuer das Player-Layout von Diddy: Raum, Wunsch von, Up next, Knoepfe."""
+        rooms = getattr(getattr(self.matrix, "client", None), "rooms", None) or {}
+        who = getattr(self.player, "requester", "") or ""
+        by = ("Autoplay" if who == AUTOPLAY else "24/7" if who == "24/7"
+              else await self._display_name(who) if who.startswith("@") else "")
+        nxt = []
+        for key, _ in list(self.player.queue)[:3]:
+            t = self.store.get(key)
+            nxt.append({"title": (t.title if t else "") or key, "artist": (t.uploader if t else "") or ""})
+        self._card_next[room] = self._next_sig()
+        return {"room": getattr(rooms.get(room), "display_name", "") or "", "requested_by": by,
+                "up_next": nxt, "player": cards.player_controls(
+                    paused, self._loop_on, self._autoplay, bool(getattr(self.player, "video_enabled", False)))}
+
     async def _now_card_state(self, room: str, state: str) -> bool:
         """Karte des laufenden Titels auf "playing"/"paused" setzen. False: es gibt keine Karte."""
         entry = self._card_now.get(room)
@@ -162,13 +439,16 @@ class Bot:
             return False
         eid, track = entry
         pos = self.player.position
+        extras = await self._player_extras(room, state != "playing")
         if state == "playing":
             card = cards.track_card("playing", track.title or track.key, position=pos,
-                                    started_at_ms=now_ms(), actions=cards.CONTROLS_PLAYING,
-                                    **self._track_meta(track))
+                                    started_at_ms=now_ms(), actions=cards.controls(False, self._loop_on),
+                                    seek=cards.SEEK_COMMAND, volume=self.player.volume,
+                                    **self._track_meta(track), **extras)
         else:
             card = cards.track_card("paused", track.title or track.key, position=pos,
-                                    actions=cards.CONTROLS_PAUSED, **self._track_meta(track))
+                                    actions=cards.controls(True, self._loop_on), seek=cards.SEEK_COMMAND,
+                                    volume=self.player.volume, **self._track_meta(track), **extras)
         content = cards.card_content(cards.track_body(card), card)
         return await self.matrix.edit_card(room, eid, content)
 
@@ -178,6 +458,7 @@ class Bot:
         return self.ecall.room_id or self.calls.active_room or self._fetch_room or None
 
     async def _leave_call(self, room: str | None, text: str) -> None:
+        self._want_call = None
         if not (self.ecall.active or self.calls.peers):
             if room:
                 await self.matrix.send_notice(room, "Warteschlange ist leer.")
@@ -187,6 +468,76 @@ class Bot:
         if room:
             await self.matrix.send_notice(room, text)
 
+    def _radio_scan(self) -> list[str]:
+        """Radio-Ordner einlesen (jedes Mal neu: neue Dateien sind sofort dabei)."""
+        root = self.cfg.radio_dir
+        keys: list[str] = []
+        files: dict[str, str] = {}
+        for base, _dirs, names in os.walk(root):
+            for name in sorted(names):
+                if name.startswith(".") or os.path.splitext(name)[1].lower() not in RADIO_EXT:
+                    continue
+                path = os.path.join(base, name)
+                key = "radio:" + hashlib.sha1(os.path.relpath(path, root).encode()).hexdigest()[:16]
+                files[key] = path
+                keys.append(key)
+                self.store.note_request(key, title=os.path.splitext(name)[0][:120],
+                                        url="file://" + path, uploader="Radio")
+        self._radio_files = files
+        return keys
+
+    async def web_radio_upload(self, user: str, filename: str, part) -> str:
+        """Eine Audiodatei aus dem Dashboard in den Radio-Ordner legen (`part`: aiohttp-Multipart).
+
+        Ueberschreibt nie etwas: bei gleichem Namen wird " (2)" angehaengt. Geschrieben wird erst in
+        eine versteckte Temp-Datei, die per Probe als Audio bestaetigt werden muss."""
+        root = self.cfg.radio_dir
+        name = safe_radio_name(filename)
+        if os.path.splitext(name)[1] not in RADIO_EXT:
+            raise MediaError("Nur Audiodateien (mp3, m4a, ogg, opus, flac, wav, aac, wma).")
+        if not os.path.isdir(root) or not os.access(root, os.W_OK):
+            raise MediaError("Der Radio-Ordner ist auf dem Server schreibgeschützt.")
+        fd, tmp = tempfile.mkstemp(prefix=".upload-", dir=root)
+        try:
+            size = 0
+            with os.fdopen(fd, "wb") as fh:
+                while True:
+                    chunk = await part.read_chunk(1 << 20)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_RADIO_UPLOAD:
+                        raise MediaError(f"Die Datei ist zu groß (max. {MAX_RADIO_UPLOAD >> 20} MB).")
+                    await asyncio.to_thread(fh.write, chunk)
+            try:
+                await asyncio.to_thread(probe_duration, tmp)
+            except Exception as exc:  # noqa: BLE001
+                raise MediaError("Das ist keine lesbare Audiodatei.") from exc
+            stem, ext = os.path.splitext(name)
+            for n in range(1, 1000):
+                final = os.path.join(root, name if n == 1 else f"{stem} ({n}){ext}")
+                try:
+                    os.link(tmp, final)            # schlaegt fehl, wenn es die Datei schon gibt
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                raise MediaError("Zu viele Dateien mit demselben Namen.")
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        log.info("Radio-Upload von %s: %s (%d KB)", user, os.path.basename(final), size >> 10)
+        return os.path.basename(final)
+
+    def _radio_shuffled(self, last: str | None = None) -> list[str]:
+        keys = self._radio_scan()
+        random.shuffle(keys)
+        if len(keys) > 1 and keys[0] == last:      # nicht zweimal hintereinander denselben
+            keys[0], keys[-1] = keys[-1], keys[0]
+        return keys
+
     def _refill_always(self) -> bool:
         """24/7: Warteschlange wieder fuellen. False = nichts (mehr) zu spielen."""
         cfg = self._always
@@ -194,6 +545,8 @@ class Bot:
             return False
         if cfg["kind"] == "playlist":
             keys = self.store.playlist_keys(cfg["name"]) or []
+        elif cfg["kind"] == "radio":
+            keys = self._radio_shuffled(getattr(self.player.current, "key", None))
         else:
             keys = cfg["keys"]
         if not keys:
@@ -204,7 +557,12 @@ class Bot:
         return True
 
     async def _player_event(self, name: str, data: dict) -> None:
+        if name == "need-next":
+            if self._autoplay_on() and data.get("track") is not None:
+                await self._autoplay_pick(data["track"], start=False)
+            return
         if name == "track-end":
+            self._last_finished = data.get("track")
             if self._loop_on and data.get("track") is not None:
                 self.player.enqueue(data["track"].key, "")
             elif self._always and not self.player.queue:
@@ -221,6 +579,13 @@ class Bot:
         elif name == "queue-empty":
             if not data.get("auto"):
                 return
+            if self._autoplay_on() and self._last_finished is not None:
+                # zu spaet fuer die Vorauswahl (z. B. sehr kurzer Titel): jetzt direkt starten
+                seed = self._last_finished
+                task = asyncio.create_task(self._autoplay_pick(seed, start=True, fallback_room=room))
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+                return
             await self._finish_now_card(room)
             if self._always:
                 await self._note(
@@ -234,20 +599,118 @@ class Bot:
                 await self._note(room, "Warteschlange ist leer – ich pausiere.")
 
     async def _announce(self, track) -> None:
+        if track is not None:
+            self._recent = (list(self._recent) + [track.key])[-60:]
         room = self._notice_room()
         if not room or track is None:
             return
+        self._log_play(track)
         pending = self._card_pending.pop(room, None)
         if pending is None:
             await self._finish_now_card(room)       # naechster Titel aus der Warteschlange
+        await self._thumb_ready(track.key)          # Titelbild gehoert in die Karte
+        self.player.set_cover(track.key, self._cover_frames.get(track.key))   # und in die Kamera
         card = cards.track_card(
             "playing", track.title or track.key, position=0.0, started_at_ms=now_ms(),
-            actions=cards.CONTROLS_PLAYING, **self._track_meta(track))
+            actions=cards.controls(False, self._loop_on), seek=cards.SEEK_COMMAND, volume=self.player.volume,
+            **self._track_meta(track), **await self._player_extras(room, False))
         eid = await self._put_track_card(room, card, pending)
         if eid:
             self._card_now[room] = (eid, track)
 
+    # ------------------------------------------------------------ Favoriten / Statistik
+    def _log_play(self, track) -> None:
+        """Wiedergabe fuer die Statistik merken (nur echte Nutzer, nicht 24/7 oder Wiederholung)."""
+        who = getattr(self.player, "requester", "") or ""
+        if who.startswith("@"):
+            try:
+                self.store.play_log(track.key, who, track.duration)
+            except Exception:
+                log.warning("Statistik schreiben fehlgeschlagen", exc_info=True)
+
+    @staticmethod
+    def _who(user: str) -> str:
+        return user[1:].split(":", 1)[0] if user.startswith("@") else user
+
+    def _fav_items(self, keys: list[str]) -> list[dict]:
+        out = []
+        for key in keys:
+            t = self.store.get(key)
+            item = {"title": (t.title if t else "") or key,
+                    "subtitle": (t.uploader if t and t.uploader else None),
+                    "duration": (t.duration if t and t.duration else None)}
+            out.append({k: v for k, v in item.items() if v is not None})
+        return out
+
+    async def _fav(self, room_id: str, sender: str, arg: str) -> None:
+        m, st = self.matrix, self.store
+        sub, _, rest = arg.strip().partition(" ")
+        sub, rest = sub.lower(), rest.strip()
+        if sub == "":
+            cur = self.player.current
+            if cur is None:
+                await self._note(room_id, "Gerade läuft nichts. Mit !fav list siehst du deine Favoriten.",
+                                 "warning", "⭐")
+                return
+            added = st.fav_add(sender, cur.key)
+            await self._note(room_id, (f"„{cur.title or cur.key}“ ist jetzt in deinen Favoriten."
+                                       if added else f"„{cur.title or cur.key}“ ist schon in deinen Favoriten."),
+                             "success" if added else "info", "⭐")
+        elif sub in ("list", "liste", "show"):
+            keys = st.fav_keys(sender)
+            items = self._fav_items(keys)
+            self._listing[room_id] = keys
+            title = f"Favoriten von {self._who(sender)}"
+            acts = (cards.action("▶ Alle abspielen", "!fav play"),
+                    cards.action("🔀 Gemischt", "!fav play shuffle")) if items else ()
+            await m.send_card(room_id, cards.card_content(
+                cards.list_body(title, items, "noch keine"),
+                cards.list_card(title, items[:MAX_SHOWN], len(items), acts,
+                                empty="Noch keine. Mit !fav merkst du dir den laufenden Titel.")))
+        elif sub in ("remove", "rm", "del", "entfernen"):
+            if not rest.isdigit() or st.fav_remove(sender, int(rest)) is None:
+                await self._note(room_id, "Benutzung: !fav remove <nr> (Nummer aus !fav list)", "warning")
+                return
+            await self._note(room_id, "Aus deinen Favoriten entfernt.", "success", "⭐")
+        elif sub in ("play", "spielen"):
+            keys = st.fav_keys(sender)
+            if not keys:
+                await self._note(room_id, "Du hast noch keine Favoriten.", "warning", "⭐")
+                return
+            if rest.lower() in ("shuffle", "mischen"):
+                random.shuffle(keys)
+            await self._play_keys(room_id, sender, keys, replace=True)
+        else:
+            await self._note(room_id, "Benutzung: !fav · !fav list · !fav remove <nr> · !fav play [shuffle]",
+                             "warning")
+
+    async def _stats(self, room_id: str) -> None:
+        st = self.store
+        tracks = [{"label": self._title(k), "value": n} for k, n in st.top_tracks(8)]
+        people = [{"label": self._who(u), "value": round(sec / 60, 1), "sub": f"{n} Titel"}
+                  for u, n, sec in st.top_listeners(8)]
+        if not tracks:
+            await self._note(room_id, "Noch keine Statistik – spiel erst ein paar Titel.", "info", "📊")
+            return
+        charts = [{"title": "Meistgespielte Titel", "unit": "×", "items": tracks},
+                  {"title": "Wer hört am meisten Musik", "unit": "min", "items": people}]
+        await self.matrix.send_card(room_id, cards.card_content(
+            cards.stats_body("Musik-Statistik", charts), cards.stats_card("Musik-Statistik", charts)))
+
     # ------------------------------------------------------------------ Text
+    def _register_commands(self) -> None:
+        """Alle Befehle an die Library haengen: sie liefert Sync, Entdoppeln, Einladungen und die
+        Befehlsliste fuer Diddy (Vorschlaege beim Tippen). Die Ausfuehrung bleibt `_on_text`, damit
+        Aliase, Rechte und Befehle wie bisher laufen."""
+        dbot = self.matrix.dbot
+        for name, usage, desc in cards.COMMAND_LIST:
+            canon = LOOKUP[name]
+            aliases = [w for w, c in LOOKUP.items() if c == canon and w != name]
+
+            async def run(ctx, *, text: str = "") -> None:
+                await self._on_text(ctx.room_id, ctx.sender, ctx.body)
+            dbot.command(name, desc=desc, usage=usage, aliases=aliases, options=[], group="Musik")(run)
+
     async def _on_text(self, room_id: str, sender: str, body: str) -> None:
         cmd = parse(body, self.cfg.prefixes)
         if cmd is None:
@@ -268,6 +731,62 @@ class Bot:
         except Exception:
             log.exception("Command %s fehlgeschlagen", cmd.name)
             await self._note(room_id, "Interner Fehler – siehe Log.", "error", "❌")
+
+    async def _on_media(self, room_id: str, sender: str, name: str, mime: str,
+                        data: bytes) -> None:
+        """Angehaengte Audio-/Videodatei direkt abspielen."""
+        ext = os.path.splitext(name)[1].lower()
+        if not (mime.startswith(("audio/", "video/")) or ext in AUDIO_VIDEO_EXT):
+            return                                   # normaler Dateianhang, nicht fuer uns
+        if not self._allowed(sender):
+            await self._note(room_id, "Das darfst du hier nicht.", "warning", "🚫")
+            return
+        if (self.cfg.call_only_control and not await self._in_call(room_id, sender)):
+            await self._note(
+                room_id, "Steuern können nur Leute, die selbst im Call sind. "
+                         "Tritt dem Call bei und schick die Datei nochmal.", "warning", "🔒")
+            return
+        if not data:
+            await self._note(room_id, f"Datei zu groß (maximal {self.cfg.max_upload_mb} MB).",
+                             "error", "❌")
+            return
+        if room_id in self._busy:
+            await self._note(room_id, "Ich lade gerade schon etwas …", "info", "⏳")
+            return
+        self._busy.add(room_id)
+        try:
+            await self._play_upload(room_id, sender, name, data, ext)
+        except MediaError as exc:
+            await self._note(room_id, str(exc), "error", "❌")
+        except Exception:
+            log.exception("Anhang %s fehlgeschlagen", name)
+            await self._note(room_id, "Interner Fehler – siehe Log.", "error", "❌")
+        finally:
+            self._busy.discard(room_id)
+
+    async def _play_upload(self, room_id: str, sender: str, name: str, data: bytes,
+                           ext: str) -> None:
+        key = "upload:" + hashlib.sha1(data).hexdigest()[:16]
+        os.makedirs(self.cfg.tmp_dir, exist_ok=True)
+        path = os.path.join(self.cfg.tmp_dir, key.replace(":", "_") + (ext or ".bin"))
+        await asyncio.to_thread(_write_file, path, data)
+        try:
+            duration = await asyncio.to_thread(probe_duration, path)
+        except Exception as exc:
+            os.remove(path)
+            raise MediaError("Diese Datei kann ich nicht abspielen.") from exc
+        limit = self.cfg.max_song_seconds
+        if limit and duration > limit:
+            os.remove(path)
+            raise MediaError(f"Zu lang ({fmt_time(duration)}). Maximal {fmt_time(limit)}.")
+        title = os.path.splitext(name)[0][:120] or "Datei"
+        track = self.store.note_request(key, title=title, duration=duration,
+                                        uploader=self._who(sender))
+        self.store.set_file(key, path)
+        self._fetch_room = room_id
+        self._history.append(key)
+        del self._history[:-20]
+        await self._start_key(room_id, key, sender, announce=True)
 
     async def _in_call(self, room_id: str, sender: str) -> bool:
         """Ist der Absender gerade selbst im Call dieses Raums?"""
@@ -324,9 +843,14 @@ class Bot:
                 self._loop_on = False
             if self._always and not p.queue:
                 self._refill_always()
+            seed = p.current if (not p.queue and self._autoplay_on()) else None
             ok = await p.skip()
+            if not ok and seed is not None:       # nichts in der Warteschlange: Autoplay springt ein
+                ok = await self._autoplay_pick(seed, start=True, fallback_room=room_id)
             if not ok:
-                await self._note(room_id, "Warteschlange ist leer.", "warning")
+                # kein naechster Titel: die Wiedergabe ist beendet, die Karte nicht auf "Spielt" stehen lassen
+                await self._finish_now_card(room_id)
+                await self._note(room_id, "Keine weiteren Titel in der Warteschlange.", "warning", "⏭")
         elif name == "previous":
             if len(self._history) >= 2:
                 prev = self._history[-2]
@@ -360,19 +884,28 @@ class Bot:
             if cur["duration"] and target >= cur["duration"] - 1:
                 target = max(0.0, cur["duration"] - 2)
             ok = await p.seek(target)
-            await m.send_notice(room_id, f"⏩ {fmt_time(p.position)}" if ok else "Kann gerade nicht gespult werden.")
+            state = "paused" if p.state == "paused" else "playing"
+            if not (ok and await self._now_card_state(room_id, state)):
+                await self._note(room_id, f"{fmt_time(p.position)}" if ok else "Kann gerade nicht gespult werden.",
+                                 "info" if ok else "warning", "⏩" if ok else "")
         elif name == "volume":
+            a = arg.strip()
             try:
-                value = int(arg.strip())
+                # "+10" / "-10": relativ zur aktuellen Lautstaerke (Knoepfe der Karte), sonst absolut
+                value = p.volume + int(a) if a[:1] in "+-" and a[1:].isdigit() else int(a)
             except ValueError:
-                await m.send_notice(room_id, f"Lautstaerke ist {p.volume}. Benutzung: !volume 0-300 (60 = Original, darueber Boost)")
+                await self._note(room_id, f"Lautstärke ist {p.volume}. Benutzung: !volume 0-300 "
+                                          "(60 = Original, darüber Boost) · !volume +10 / -10", "info", "🔊")
                 return
             v = p.set_volume(value)
-            await self._note(room_id, f"Lautstärke: {v}", "info", "🔊")
+            state = "paused" if p.state == "paused" else "playing"
+            if not await self._now_card_state(room_id, state):
+                await self._note(room_id, f"Lautstärke: {v}", "info", "🔊")
         elif name == "video":
             mode = arg.strip().lower()
             on = p.set_video(True if mode == "on" else False if mode == "off" else None)
             await m.send_notice(room_id, f"Video: {'an' if on else 'aus'}")
+            await self._now_card_state(room_id, "paused" if p.state == "paused" else "playing")
         elif name == "shuffle":
             random.shuffle(p.queue)
             await self._note(room_id, "Warteschlange gemischt." if p.queue else "Warteschlange ist leer.",
@@ -380,18 +913,38 @@ class Bot:
         elif name == "loop":
             mode = arg.strip().lower()
             self._loop_on = True if mode == "on" else False if mode == "off" else not self._loop_on
-            await self._note(room_id, f"Schleife: {'an' if self._loop_on else 'aus'}", "info", "🔁")
+            state = "paused" if self.player.state == "paused" else "playing"
+            if not await self._now_card_state(room_id, state):      # Karte zeigt es selbst im Knopf
+                await self._note(room_id, f"Schleife: {'an' if self._loop_on else 'aus'}", "info", "🔁")
         elif name == "joincall":
             if await self._join_element_call(room_id, force=True):
                 await m.send_notice(room_id, "📞 Bin im Element Call.")
         elif name == "leavecall":
+            self._want_call = None
             await self.ecall.leave()
             await self.calls.hangup_all("user")
             await m.send_notice(room_id, "Call verlassen.")
         elif name == "playlist":
             await self._playlist(room_id, sender, arg)
+        elif name == "fav":
+            await self._fav(room_id, sender, arg)
+        elif name == "stats":
+            await self._stats(room_id)
         elif name == "always":
             await self._always_cmd(room_id, sender, arg)
+        elif name == "autoplay":
+            mode = arg.strip().lower()
+            self._autoplay = True if mode in ("on", "an") else False if mode in ("off", "aus") \
+                else not self._autoplay
+            self.store.set_setting("autoplay", "1" if self._autoplay else "0")
+            if not self._autoplay:      # schon eingereihte Autoplay-Titel wieder raus
+                p.queue[:] = [(k, r) for k, r in p.queue if r != AUTOPLAY]
+            await self._note(room_id, "Autoplay an: Ist die Warteschlange leer, kommt ähnliche Musik."
+                             if self._autoplay else "Autoplay aus.", "info", "✨")
+            if p.state in ("playing", "paused"):     # Knopf im Menue "⋯" zeigt den neuen Stand
+                await self._now_card_state(room_id, p.state)
+        elif name == "dashboard":
+            await self._send_dashboard_login(room_id, sender)
         elif name == "help":
             await m.send_card(room_id, cards.card_content(
                 HELP, cards.help_card(cards.HELP_GROUPS, cards.HELP_NOTE)))
@@ -434,6 +987,9 @@ class Bot:
         track = st.note_request(
             resolved.key, title=resolved.title, url=resolved.url,
             duration=resolved.duration, uploader=resolved.uploader)
+        if getattr(resolved, "thumbnail", ""):
+            self._thumb_url[resolved.key] = resolved.thumbnail
+        self._prefetch_thumb(resolved.key)
         self._fetch_room = room_id
 
         if self._loop_on and self.player.current and self.player.current.key == track.key:
@@ -442,14 +998,44 @@ class Bot:
             await self._note(room_id, "Wiederholung eingeplant.", "info", "🔁")
             return
 
+        # Laeuft schon etwas (oder wird gerade geladen): hinten anstellen statt abloesen.
+        if self.player.state in ("playing", "paused") or self.player._lock.locked():
+            if self.player.state in ("playing", "paused") and self.ecall.room_id != room_id:
+                await self._join_element_call(room_id, force=False)
+            self.player.enqueue(track.key, sender)
+            pos = len(self.player.queue)
+            eid = self._card_pending.pop(room_id, None)
+            card = cards.track_card("stopped", track.title or track.key,
+                                    note=f"In der Warteschlange (#{pos})", **self._track_meta(track))
+            await self._put_track_card(room_id, card, eid)
+            return
+
         self._history.append(track.key)
         del self._history[:-20]
         await self._start_key(room_id, track.key, sender, announce=True)
 
-    async def _fetch(self, track) -> None:
-        """Lädt den Titel für die Wiedergabe neu herunter (nichts bleibt liegen)."""
+    async def _fetch(self, track, *, quiet: bool = False) -> None:
+        """Titel fuer die Wiedergabe holen: gemerkt (oft gespielt) oder frisch herunterladen.
+
+        quiet=True: Vorladen fuer den Crossfade, waehrend noch ein Titel laeuft –
+        dann keine "laedt herunter"-Karte im Chat."""
+        if track.key.startswith("radio:"):           # Radio-Ordner: Datei liegt dort
+            path = self._radio_files.get(track.key, "")
+            if not path or not os.path.exists(path):
+                raise MediaError("Radio-Datei ist nicht mehr vorhanden.")
+            if not track.duration:
+                try:
+                    self.store.note_request(track.key, duration=await asyncio.to_thread(probe_duration, path))
+                except Exception as exc:
+                    raise MediaError("Diese Radio-Datei kann ich nicht abspielen.") from exc
+            self.store.set_file(track.key, path)
+            return
+        if track.key.startswith("upload:"):          # Chat-Anhang: Datei liegt schon da
+            if not track.playable:
+                raise MediaError("Die angehängte Datei ist nicht mehr vorhanden – bitte neu senden.")
+            return
         want_video = self.player.video_enabled and self.cfg.enable_video
-        room = self._fetch_room or self._notice_room()
+        room = None if quiet else (self._fetch_room or self._notice_room())
         if room:
             card = cards.track_card("downloading", track.title or track.key,
                                     **self._track_meta(track))
@@ -459,12 +1045,18 @@ class Bot:
         from .ytdl import Resolved
         resolved = Resolved(key=track.key, title=track.title, url=track.url,
                             duration=track.duration, uploader=track.uploader)
+        cached = self.store.hot_path(track.key, want_video)    # oft gespielt: liegt schon da
+        if cached:
+            self.store.set_file(track.key, cached)
+            return
         self._fetching += 1
         try:
             path = await self.resolver.download_async(resolved, want_video, self.cfg.tmp_dir)
         finally:
             self._fetching -= 1
         self.store.set_file(track.key, path)
+        self.store.note_download(track.key, want_video)
+        self.store.prune_hot()
 
     async def _start_key(self, room_id: str, key: str, sender: str,
                          *, announce: bool = True) -> bool:
@@ -492,15 +1084,30 @@ class Bot:
         try:
             await self.ecall.load_members(room_id)
             if not force and not self.ecall.others_in_call(room_id):
-                await m.send_notice(room_id, "Kein Call aktiv – starte den Anruf, "
-                                             "dann !joincall (ich spiele trotzdem schon).")
+                # Call evtl. noch nicht gestartet oder Mitgliedschaft noch nicht sichtbar:
+                # merken und automatisch beitreten, sobald jemand im Call auftaucht.
+                self._want_call = room_id
+                log.info("Kein aktiver Call in %s erkannt – trete bei, sobald jemand beitritt", room_id)
+                await m.send_notice(room_id, "Kein Call aktiv – ich spiele schon und trete automatisch "
+                                             "bei, sobald du im Call bist (oder !joincall).")
                 return False
+            self._want_call = None
             await self.ecall.join(room_id)
             return True
         except Exception as exc:
             log.exception("Element Call beitreten fehlgeschlagen")
             await m.send_notice(room_id, f"Call beitreten fehlgeschlagen: {exc}")
             return False
+
+    async def _on_call_started(self, room_id: str) -> None:
+        """Jemand ist einem Call beigetreten, waehrend Musik laeuft/laedt und der Bot noch draussen ist."""
+        if self._want_call != room_id or self.ecall.room_id == room_id:
+            return
+        if self.player.state == "stopped" and not self._fetching and not self.player._lock.locked():
+            self._want_call = None                  # nichts (mehr) zu spielen
+            return
+        log.info("Call in %s gestartet – Bot tritt jetzt bei", room_id)
+        await self._join_element_call(room_id, force=True)
 
     # ------------------------------------------------------------------ Playlists
     async def _resolve_for_list(self, room_id: str, query: str):
@@ -623,9 +1230,13 @@ class Bot:
         sub, _, rest = arg.strip().partition(" ")
         sub, rest = sub.lower(), rest.strip()
         cfg = self._always
-        if sub == "":
+        if sub == "" and not cfg:
+            sub = "radio"                      # nacktes !24/7 startet das Radio
+        if sub in ("", "status"):
             if not cfg:
-                await m.send_notice(room_id, "24/7 ist aus. !24/7 song [Link] · !24/7 playlist <name>")
+                await m.send_notice(room_id, "24/7 ist aus. !24/7 radio · !24/7 song [Link] · !24/7 playlist <name>")
+            elif cfg["kind"] == "radio":
+                await m.send_notice(room_id, "📻 24/7 Radio läuft (zufällig aus dem Radio-Ordner). Beenden: !24/7 off")
             elif cfg["kind"] == "playlist":
                 await m.send_notice(room_id, f"♾ 24/7 läuft: Playlist „{cfg['name']}“. Beenden: !24/7 off")
             else:
@@ -652,6 +1263,16 @@ class Bot:
             await m.send_notice(room_id, f"♾ 24/7: {track.title or track.key} läuft in Dauerschleife.")
             if rest or self.player.state == "stopped":
                 await self._play_keys(room_id, sender, [track.key], replace=True)
+        elif sub in ("radio", "random", "zufall"):
+            keys = await asyncio.to_thread(self._radio_shuffled)
+            if not keys:
+                await m.send_notice(room_id, "📻 Der Radio-Ordner ist leer. Lege MP3-Dateien in den Ordner "
+                                             "`radio/` neben der compose.yaml und versuch es nochmal.")
+                return
+            self._always = {"kind": "radio", "keys": []}
+            self._loop_on = False
+            await m.send_notice(room_id, f"📻 24/7 Radio: {len(keys)} Dateien, zufällige Reihenfolge. Beenden: !24/7 off")
+            await self._play_keys(room_id, sender, keys, replace=True)
         elif sub in ("playlist", "pl"):
             keys = self.store.playlist_keys(rest) if rest else None
             if not keys:
@@ -662,7 +1283,7 @@ class Bot:
             await m.send_notice(room_id, f"♾ 24/7: Playlist „{rest}“ läuft in Dauerschleife.")
             await self._play_keys(room_id, sender, list(keys), replace=True)
         else:
-            await m.send_notice(room_id, "Benutzung: !24/7 song [Link] | playlist <name> | off")
+            await m.send_notice(room_id, "Benutzung: !24/7 radio | song [Link] | playlist <name> | off")
 
     # ------------------------------------------------------------------ Listen
     async def _show_queue(self, room_id: str) -> None:
@@ -691,12 +1312,14 @@ class Bot:
         t = s["track"]
         state = s["state"] if s["state"] in ("playing", "paused") else "stopped"
         title = (t.title if t else "") or "kein Titel"
-        acts = cards.CONTROLS_PLAYING if state == "playing" else cards.CONTROLS_PAUSED if state == "paused" else ()
+        acts = cards.controls(state == "paused", self._loop_on) if state in ("playing", "paused") else ()
         meta = self._track_meta(t) if t else {}
         meta["duration"] = s["duration"] or meta.get("duration", 0.0)
+        extras = (await self._player_extras(room_id, state == "paused")
+                  if state in ("playing", "paused") else {})
         card = cards.track_card(
-            state, title, position=s["position"],
-            started_at_ms=now_ms() if state == "playing" else None, actions=acts,
+            state, title, position=s["position"], seek=cards.SEEK_COMMAND if t else "", **extras,
+            volume=s["volume"], started_at_ms=now_ms() if state == "playing" else None, actions=acts,
             note=f"Lautstärke {s['volume']} · Video {'an' if s['video'] else 'aus'} · "
                  f"Peers im Call: {s['peers']} · Warteschlange: {len(s['queue'])}", **meta)
         body = (f"{ {'playing': '▶', 'paused': '⏸', 'stopped': '⏹'}[state] } {title} "
@@ -704,3 +1327,304 @@ class Bot:
                 f"Lautstaerke {s['volume']} · Video {'an' if s['video'] else 'aus'}\n"
                 f"Peers im Call: {s['peers']} · Warteschlange: {len(s['queue'])}")
         await self.matrix.send_card(room_id, cards.card_content(body, card))
+
+    # ------------------------------------------------------------------ Dashboard
+    def _dashboard_url(self) -> str:
+        return self.cfg.public_url or f"http://<server>:{self.cfg.web_port}"
+
+    async def _send_dashboard_login(self, room_id: str, sender: str) -> None:
+        if not self.cfg.web_enabled:
+            await self._note(room_id, "Das Dashboard ist ausgeschaltet (WEB_ENABLED).", "warning")
+            return
+        token = self.webauth.issue_link_token(sender, room_id)
+        url = f"{self._dashboard_url()}/#login={token}"
+        body = (f"🎛 Dein persönlicher Link zum Musikbot-Dashboard:\n{url}\n\n"
+                "Einfach öffnen – du bleibst eingeloggt (auch auf mehreren Geräten). "
+                "Nicht weitergeben: wer den Link hat, kann den Bot steuern. "
+                "Neuer Link (der alte wird ungültig): !dashboard")
+        html = (f"<p>🎛 <b>Dein persönlicher Link zum Musikbot-Dashboard</b></p>"
+                f"<p><a href=\"{url}\">Dashboard öffnen</a></p>"
+                "<p>Einfach öffnen – du bleibst eingeloggt (auch auf mehreren Geräten). "
+                "Nicht weitergeben: wer den Link hat, kann den Bot steuern. "
+                "Neuer Link (der alte wird ungültig): <code>!dashboard</code></p>")
+        who = self._who(sender)
+        await self.matrix.load_direct()
+        in_dm = self.matrix.find_dm(sender) == room_id
+        if in_dm:
+            pass                                    # Befehl kam schon im Privatchat: Link kommt hierher
+        elif self.matrix.find_dm(sender):
+            await self._note(room_id, f"📬 {who}, schau in deine DMs – dein Dashboard-Link ist da.",
+                             "success", "🎛")
+        else:
+            await self._note(room_id, f"📬 {who}, schau in deine DMs: Ich hab dich in einen Privatchat "
+                                      "eingeladen – Einladung annehmen, da steht dein Dashboard-Link.",
+                             "success", "🎛")
+
+        async def deliver() -> None:              # im Hintergrund: der neue Privatchat braucht ein paar Sekunden
+            if not await self.matrix.send_dm(sender, body, html):
+                await self._note(room_id, "Konnte dir keine Direktnachricht schicken – siehe Log.", "error", "❌")
+
+        task = asyncio.create_task(deliver(), name="dashboard-dm")
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    def _load_fade_settings(self) -> None:
+        for name in ("crossfade_seconds", "fade_in_seconds"):
+            raw = self.store.setting(name)
+            if raw:
+                try:
+                    setattr(self.cfg, name, max(0.0, min(20.0, float(raw))))
+                except ValueError:
+                    pass
+
+    def _web_room(self, user: str) -> str:
+        room = self._notice_room() or self.webauth.room_of(user)
+        if not room:
+            raise MediaError("Ich weiß nicht, in welchem Raum ich spielen soll – schreib !dashboard "
+                             "in den Musik-Raum.")
+        return room
+
+    def _track_json(self, key: str, requester: str = "") -> dict:
+        t = self.store.get(key)
+        return {"key": key, "title": (t.title if t else "") or key,
+                "artist": (t.uploader if t else "") or "", "duration": (t.duration if t else 0) or 0,
+                "url": (t.url if t else "") or "", "thumb": self._thumb_source(key),
+                "requester": self._who(requester) if requester else ""}
+
+    def web_state(self, user: str) -> dict:
+        p = self.player
+        st = p.status()
+        cur = st["track"]
+        track = self._track_json(cur.key, p.requester) if cur else None
+        if track and st["duration"]:
+            track["duration"] = st["duration"]
+        hist = [k for k in reversed(self._history) if not cur or k != cur.key][:8]
+        always = None
+        if self._always:
+            always = {"kind": self._always.get("kind"), "name": self._always.get("name", "")}
+        return {
+            "me": user, "state": st["state"], "position": st["position"], "track": track,
+            "volume": st["volume"], "video": st["video"], "loop": self._loop_on, "always": always,
+            "queue": [self._track_json(k, r) for k, r in st["queue"]],
+            "history": [self._track_json(k) for k in hist],
+            "peers": st["peers"], "in_call": bool(self.ecall.active or self.calls.peers),
+            "busy": bool(self._fetching or self._busy or p._lock.locked()),
+            "crossfade": self.cfg.crossfade_seconds, "fade_in": self.cfg.fade_in_seconds,
+            "autoplay": self._autoplay,
+            "room": self._notice_room() or self.webauth.room_of(user),
+            "favs": self.store.fav_keys(user),
+            "me_name": self._names.get(user) or self._who(user),
+        }
+
+    async def _display_name(self, user: str) -> str:
+        if user not in self._names:
+            name = ""
+            try:
+                resp = await self.matrix.client.get_displayname(user)
+                name = getattr(resp, "displayname", "") or ""
+            except Exception:
+                log.debug("Anzeigename von %s nicht ladbar", user, exc_info=True)
+            self._names[user] = name or self._who(user)
+        return self._names[user]
+
+    async def web_library(self, user: str) -> dict:
+        """Persoenliche Bibliothek: eigene Playlists, Favoriten, Verlauf, Statistik – plus die der anderen."""
+        name = await self._display_name(user)
+        lists = self.store.playlists_full()
+        mine = [p for p in lists if p["owner"].lower() == user.lower()]
+        others = [p for p in lists if p["owner"].lower() != user.lower()]
+        for p in others:
+            p["by"] = self._who(p["owner"]) if p["owner"] else ""
+        for p in mine:
+            p["tracks"] = [self._track_json(k) for k in self.store.playlist_keys(p["name"]) or []]
+        totals = self.store.totals_of(user)
+        return {
+            "me": {"id": user, "name": name, **totals},
+            "my_playlists": mine,
+            "playlists": others,
+            "favorites": [self._track_json(k) for k in self.store.fav_keys(user)],
+            "my_top": [dict(self._track_json(k), plays=n) for k, n in self.store.top_of(user, 10)],
+            "my_recent": [self._track_json(k) for k in self.store.recent_of(user, 10)],
+            "top": [dict(self._track_json(k), plays=n) for k, n in self.store.top_tracks(10)],
+            "radio": len(self._radio_scan()) if os.path.isdir(self.cfg.radio_dir) else 0,
+        }
+
+    async def web_playlist(self, user: str, op: str, name: str, key: str = "", index: int = 0,
+                           query: str = "") -> None:
+        """Eigene Playlists im Dashboard verwalten (fremde nur abspielen)."""
+        name = name.strip()[:60]
+        if not name:
+            raise MediaError("Bitte einen Namen angeben.")
+        st = self.store
+        if op == "create":
+            if not st.playlist_create(name, user):
+                raise MediaError(f"Eine Playlist „{name}“ gibt es schon.")
+            return
+        owner = st.playlist_owner(name)
+        if owner is None:
+            raise MediaError(f"Playlist „{name}“ gibt es nicht.")
+        if owner and owner.lower() != user.lower():
+            raise MediaError("Das ist nicht deine Playlist – die darf nur ihr Besitzer ändern.")
+        if op == "add":
+            if not key and query:                       # Suchtreffer: erst Metadaten holen
+                resolved = await self.resolver.resolve_async(query)
+                key = st.note_request(resolved.key, title=resolved.title, url=resolved.url,
+                                      duration=resolved.duration, uploader=resolved.uploader).key
+                if resolved.thumbnail:
+                    self._thumb_url[resolved.key] = resolved.thumbnail
+            cur = self.player.current
+            key = key or (cur.key if cur else "")
+            if not key or st.get(key) is None:
+                raise MediaError("Welcher Titel? Gerade läuft nichts.")
+            st.playlist_add(name, key)
+        elif op == "remove":
+            if st.playlist_remove(name, index + 1) is None:
+                raise MediaError("Diesen Titel gibt es in der Playlist nicht (mehr).")
+        elif op == "delete":
+            st.playlist_delete(name)
+        else:
+            raise MediaError("Unbekannte Aktion.")
+
+    # Erlaubte Befehle aus dem Dashboard (wie im Chat, gleiche Karten im Raum)
+    _WEB_COMMANDS = {"play", "pause", "resume", "stop", "skip", "previous", "clear", "seek", "autoplay",
+                     "forward", "rewind", "volume", "video", "shuffle", "loop", "joincall",
+                     "leavecall", "always", "playlist", "fav"}
+
+    async def web_command(self, user: str, name: str, arg: str) -> None:
+        if name == "softskip":
+            await self._quick(self._soft_skip(self._web_room(user)))
+            return
+        if name == "softstop":
+            await self._quick(self._soft_stop(self._web_room(user), float(arg or 4)))
+            return
+        if name == "favkey":                          # beliebigen Titel merken/entfernen
+            keys = self.store.fav_keys(user)
+            if arg in keys:
+                self.store.fav_remove(user, keys.index(arg) + 1)
+            elif self.store.get(arg):
+                self.store.fav_add(user, arg)
+            return
+        if name not in self._WEB_COMMANDS:
+            raise MediaError("Unbekannter Befehl.")
+        if name == "playlist" and arg.split(" ", 1)[0] not in ("play", "enqueue"):
+            raise MediaError("Playlists bitte im Chat bearbeiten.")
+        await self._quick(self._dispatch(self._web_room(user), user, name, arg))
+
+    async def _quick(self, coro, wait: float = 0.35) -> None:
+        """Befehl starten und kurz warten: Der Player reagiert sofort, die Karten im Chat
+        (Netzwerk) laufen im Hintergrund weiter – so fuehlt sich das Dashboard flott an."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        task.add_done_callback(lambda t: t.cancelled() or not t.exception() or log.error(
+            "Dashboard-Befehl fehlgeschlagen", exc_info=t.exception()))
+        done, _ = await asyncio.wait({task}, timeout=wait)
+        if done:
+            task.result()                        # Fehler (z. B. MediaError) gehen ans Dashboard
+
+    async def _soft_skip(self, room: str) -> None:
+        p = self.player
+        self._loop_on = False
+        if self._always and not p.queue:
+            self._refill_always()
+        if await p.crossfade_now():
+            return
+        if p.queue and not await p.fade_out(1.5):
+            return
+        await self._dispatch(room, "", "skip", "")
+        p.reset_master()
+
+    async def _soft_stop(self, room: str, seconds: float) -> None:
+        if await self.player.fade_out(max(0.5, min(15.0, seconds))):
+            await self._dispatch(room, "", "stop", "")
+        self.player.reset_master()
+
+    async def web_add(self, user: str, query: str, mode: str) -> None:
+        if not query.strip():
+            raise MediaError("Bitte Link oder Suchbegriff angeben.")
+        room = self._web_room(user)
+        resolved = await self.resolver.resolve_async(query)
+        limit = self.cfg.max_song_seconds
+        if limit and resolved.duration > limit:
+            raise MediaError(f"Zu lang ({fmt_time(resolved.duration)}). Maximal {fmt_time(limit)}.")
+        track = self.store.note_request(resolved.key, title=resolved.title, url=resolved.url,
+                                        duration=resolved.duration, uploader=resolved.uploader)
+        if resolved.thumbnail:
+            self._thumb_url[resolved.key] = resolved.thumbnail
+        self._prefetch_thumb(resolved.key)
+        p = self.player
+        idle = p.state == "stopped" and not p._lock.locked()
+        if idle:
+            self._fetch_room = room
+            self._history.append(track.key)
+            del self._history[:-20]
+            await self._start_key(room, track.key, user, announce=True)
+        elif mode in ("now", "next"):
+            p.queue.insert(0, (track.key, user))
+            if mode == "now":
+                await self._soft_skip(room)
+        else:
+            p.enqueue(track.key, user)
+
+    def web_queue(self, user: str, op: str, index: int, to: int) -> None:
+        q = self.player.queue
+        if not (0 <= index < len(q)):
+            raise MediaError("Diesen Platz gibt es nicht (mehr).")
+        if op == "remove":
+            q.pop(index)
+        elif op == "top":
+            q.insert(0, q.pop(index))
+        elif op == "move" and 0 <= to < len(q):
+            q.insert(to, q.pop(index))
+        else:
+            raise MediaError("Unbekannte Aktion.")
+
+    async def web_fade(self, user: str, data: dict) -> None:
+        for field, name in (("crossfade", "crossfade_seconds"), ("fade_in", "fade_in_seconds")):
+            if field in data:
+                value = max(0.0, min(20.0, float(data[field])))
+                setattr(self.cfg, name, value)
+                self.store.set_setting(name, str(value))
+
+    # ------------------------------------------------------------------ Autoplay
+    def _autoplay_on(self) -> bool:
+        return self._autoplay and not self._loop_on and not self._always
+
+    async def _autoplay_pick(self, seed, *, start: bool, fallback_room: str | None = None) -> bool:
+        """Aehnlichen Titel zum `seed` suchen und einreihen (start=False) bzw. sofort spielen."""
+        if self._autoplay_busy:
+            return False
+        self._autoplay_busy = True
+        try:
+            found = await self.resolver.similar_async(seed.key, seed.title or "", seed.uploader or "")
+            skip = set(self._recent) | set(self._history) | {k for k, _ in self.player.queue} | {seed.key}
+            limit = self.cfg.max_song_seconds
+            fits = [c for c in found if c["key"] not in skip
+                    and (not c["duration"] or 60 <= c["duration"] <= (limit or 10 ** 6))]
+            if not fits:
+                log.info("Autoplay: nichts Passendes zu %s", seed.key)
+                if start and fallback_room:
+                    await self._note(fallback_room, "Autoplay hat nichts Ähnliches gefunden.", "warning", "✨")
+                return False
+            pick = random.choice(fits[:6])          # etwas Abwechslung, aber nah am Original
+            track = self.store.note_request(pick["key"], title=pick["title"], url=pick["url"],
+                                            duration=pick["duration"], uploader=pick["artist"])
+            self._thumb_url[pick["key"]] = pick["thumbnail"]
+            self._prefetch_thumb(pick["key"])
+            log.info("Autoplay: %s -> %s", seed.title or seed.key, track.title)
+            if not start:
+                if self.player.queue:                # inzwischen hat jemand etwas gewuenscht
+                    return False
+                self.player.enqueue(track.key, AUTOPLAY)
+                return True
+            room = self._notice_room() or fallback_room
+            if not room or self.player.state != "stopped":
+                return False
+            self._history.append(track.key)
+            del self._history[:-20]
+            return await self._start_key(room, track.key, AUTOPLAY, announce=True)
+        except Exception:
+            log.exception("Autoplay fehlgeschlagen")
+            return False
+        finally:
+            self._autoplay_busy = False

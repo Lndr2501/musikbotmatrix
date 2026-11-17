@@ -6,3 +6,7 @@ data/
 .env
 *.sqlite3
 matrix-store/
+radio/*
+!radio/.gitkeep
+.cloudflare/
+*.egg-info/
