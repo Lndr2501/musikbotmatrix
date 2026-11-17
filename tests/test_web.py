@@ -343,3 +343,45 @@ def test_upload_play_checks_type_size_and_plays(tmp_path):
     assert title == "Mein Song"
     assert played == [("!r:x", "@u:x", "Mein Song.MP3", b"ID3-daten", ".mp3")]
     assert bot._busy == set()
+
+
+def test_local_library_lists_and_plays_files_without_247(tmp_path):
+    import wave
+
+    from musikbot.ytdl import MediaError
+
+    radio = tmp_path / "radio"
+    radio.mkdir()
+    for name in ("b-Song.wav", "A-Song.wav"):
+        with wave.open(str(radio / name), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(b"\x00\x00" * 8000)
+    (radio / "notiz.txt").write_text("x")
+    bot = _bot_with_store(tmp_path)
+    bot.cfg = SimpleNamespace(radio_dir=str(radio))
+    bot._radio_files = {}
+    bot._always = None
+    bot._web_room = lambda user: "!r:x"
+    done = []
+
+    async def enqueue(room, user, key, mode):
+        done.append(("one", key, mode))
+
+    async def play_keys(room, user, keys, *, replace):
+        done.append(("all", tuple(keys), replace))
+    bot._web_enqueue, bot._play_keys = enqueue, play_keys
+
+    lib = asyncio.run(bot.web_local("@u:x"))
+    assert [t["title"] for t in lib["tracks"]] == ["A-Song", "b-Song"]
+    assert all(abs(t["duration"] - 1) < 0.1 for t in lib["tracks"])
+    first = lib["tracks"][0]["key"]
+    asyncio.run(bot.web_local_play("@u:x", "next", first))
+    asyncio.run(bot.web_local_play("@u:x", "all"))
+    asyncio.run(asyncio.sleep(0))
+    assert done[0] == ("one", first, "next")
+    assert done[1][0] == "all" and done[1][2] is True and len(done[1][1]) == 2
+    assert bot._always is None                            # kein 24/7
+    with pytest.raises(MediaError):
+        asyncio.run(bot.web_local_play("@u:x", "now", "radio:gibtsnicht"))

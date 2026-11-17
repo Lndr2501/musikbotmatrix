@@ -14,7 +14,6 @@ const ICONS = {
   shuffle: '<svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>',
   list: '<svg viewBox="0 0 24 24"><path d="M3 6h12M3 12h12M3 18h7M18 13v8M14 17h8"/></svg>',
   trash: '<svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>',
-  always: '<svg viewBox="0 0 24 24"><path d="M18.2 8.4a4.8 4.8 0 1 1 0 7.2L12 12 5.8 8.4a4.8 4.8 0 1 0 0 7.2L12 12l6.2-3.6Z"/></svg>',
 };
 
 let S = null;            // letzter Zustand vom Server
@@ -155,7 +154,7 @@ function render() {
   $("#title").textContent = t ? t.title : "Nichts läuft";
   $("#artist").textContent = t
     ? [t.artist, t.requester === "autoplay" ? "✨ Autoplay" : ""].filter(Boolean).join(" · ") || (t.requester ? `gewünscht von ${t.requester}` : "")
-    : "Such dir etwas aus – oder starte das 24/7-Radio.";
+    : "Such dir etwas aus – oder spiel etwas aus der Mediathek.";
   document.title = t ? `${S.state === "playing" ? "▶" : "⏸"} ${t.title} – Musikbot` : "Musikbot";
 
   const cover = $("#cover"), empty = $("#cover-empty");
@@ -179,15 +178,19 @@ function render() {
   $("#autoplay").classList.toggle("on", S.autoplay);
   $("#autoplay-hint").hidden = !S.autoplay || S.queue.some((t) => t.requester === "autoplay");
   $("#fav").classList.toggle("on", !!(t && S.favs.includes(t.key)));
-  const inCall = !!(S.call && S.call.active);
-  $("#call-toggle").classList.toggle("on", inCall);
-  $("#call-toggle-text").textContent = inCall ? "Call verlassen" : (S.call && S.call.waiting ? "Warte auf Call …" : "Call beitreten");
-  $("#rejoin").disabled = !(S.call && S.call.element);
+  const call = S.call || {};
+  const inCall = !!call.active;
+  $("#call-bar").classList.toggle("live", inCall);
+  $("#call-text").textContent = inCall
+    ? (call.listeners ? `Im Call · ${call.listeners} hör${call.listeners === 1 ? "t" : "en"} zu` : "Im Call")
+    : call.waiting ? "Wartet auf den Call …" : "Nicht im Call";
+  $("#call-toggle-text").textContent = inCall ? "Verlassen" : "Beitreten";
+  $("#rejoin").hidden = !call.element;
   setRange($("#volume"), S.volume);
   $("#volume-val").textContent = S.volume;
 
   // Status oben rechts
-  if (changed("chips", [S.busy, S.always, S.in_call, S.peers])) renderChips();
+  if (changed("chips", [S.busy, S.in_call, S.peers])) renderChips();
   if (changed("queue", [S.queue, S.history, S.me])) renderQueue();
   if (changed("fades", [S.crossfade, S.fade_in])) renderFades();
   tick();
@@ -210,10 +213,6 @@ function renderChips() {
     chips.append(el);
   };
   if (S.busy) pill("lädt …", "busy");
-  if (S.always) {
-    const a = S.always;
-    pill(a.kind === "radio" ? "24/7 Radio" : a.kind === "playlist" ? `24/7 · ${a.name}` : a.title ? `24/7 · ${a.title}` : "24/7", "live", true);
-  }
   pill(S.in_call ? `im Call · ${S.peers}` : "nicht im Call", S.in_call ? "live" : "");
 }
 
@@ -354,6 +353,7 @@ function selectTab(name) {
   $$(".tabs [role=tab]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === name)));
   $$(".tab").forEach((t) => { t.hidden = t.id !== `tab-${name}`; });
   if (name === "library") loadLibrary();
+  if (name === "local") loadLocal();
   if (name === "search") $("#search-q").focus();
   try { localStorage.setItem("musikbot-tab", name); } catch { /* egal */ }
 }
@@ -385,7 +385,6 @@ function searchActions(url) {
     button("next", "Als Nächstes", add("next", "Als Nächstes eingereiht")),
     button("plus", "Hinten anstellen", add("end", "Eingereiht")),
     button("list", "Zu deiner Playlist", (ev) => playlistMenu(ev, { query: url })),
-    button("always", "24/7: in Dauerschleife", () => cmd("always", `song ${url}`, "Läuft in Dauerschleife"), "hover-only"),
   ];
 }
 
@@ -412,7 +411,7 @@ async function loadLibrary() {
 }
 
 // Radio-Upload: eine Anfrage pro Datei (XHR wegen Fortschritt), Status steht auf der Karte.
-let uploading = "";
+const setUploading = (text) => { $("#upload-status").textContent = text; };
 function uploadRadio(files) {
   const list = [...files];
   const one = (file) => new Promise((resolve) => {
@@ -422,13 +421,13 @@ function uploadRadio(files) {
     xhr.open("POST", "/api/radio/upload");
     xhr.setRequestHeader("X-Musikbot", "1");
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) { uploading = `${file.name}: ${Math.round((e.loaded / e.total) * 100)} %`; renderLibrary(); }
+      if (e.lengthComputable) setUploading(`${file.name}: ${Math.round((e.loaded / e.total) * 100)} %`);
     };
     xhr.onload = () => {
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch { /* leer */ }
       if (xhr.status === 401) { showLogin(); resolve(false); return; }
-      if (xhr.status >= 200 && xhr.status < 300) toast(`„${(data.saved || [file.name])[0]}“ ist im Radio`);
+      if (xhr.status >= 200 && xhr.status < 300) toast(`„${(data.saved || [file.name])[0]}“ ist in der Mediathek`);
       else toast(`${file.name}: ${data.error || "Fehler " + xhr.status}`, true);
       resolve(xhr.status < 300);
     };
@@ -437,8 +436,8 @@ function uploadRadio(files) {
   });
   (async () => {
     for (const f of list) await one(f);
-    uploading = "";
-    await loadLibrary();
+    setUploading("");
+    await loadLocal();
   })();
 }
 
@@ -450,9 +449,9 @@ function uploadPlay(file) {
   xhr.open("POST", "/api/upload");
   xhr.setRequestHeader("X-Musikbot", "1");
   xhr.upload.onprogress = (e) => {
-    if (e.lengthComputable) { uploading = `${file.name}: ${Math.round((e.loaded / e.total) * 100)} %`; renderLibrary(); }
+    if (e.lengthComputable) setUploading(`${file.name}: ${Math.round((e.loaded / e.total) * 100)} %`);
   };
-  const done = () => { uploading = ""; renderLibrary(); };
+  const done = () => setUploading("");
   xhr.onload = () => {
     let data = {};
     try { data = JSON.parse(xhr.responseText); } catch { /* leer */ }
@@ -464,6 +463,46 @@ function uploadPlay(file) {
   xhr.onerror = () => { done(); toast(`${file.name}: Upload fehlgeschlagen`, true); };
   xhr.send(fd);
 }
+
+// ---------------------------------------------------------------- Mediathek (lokale Dateien)
+let LOCAL = null;
+async function loadLocal() {
+  try { LOCAL = await api("/api/local"); } catch { return; }
+  renderLocal();
+}
+function renderLocal() {
+  if (!LOCAL) return;
+  const q = $("#local-q").value.trim().toLowerCase();
+  const all = LOCAL.tracks;
+  const items = q ? all.filter((t) => t.title.toLowerCase().includes(q)) : all;
+  const total = all.reduce((a, t) => a + (t.duration || 0), 0);
+  $("#local-sum").textContent = all.length ? `${all.length} Titel · ${fmt(total)}` : "";
+  $("#local-all").hidden = $("#local-shuffle").hidden = all.length === 0;
+  $("#local-add").hidden = !LOCAL.writable;
+  const empty = $("#local-empty");
+  empty.hidden = items.length > 0;
+  empty.textContent = all.length ? "Nichts gefunden." : "Die Mediathek ist leer. Füge unten eigene Dateien hinzu.";
+  const play = (op, key, text) => () => act("/api/local", { op, key }, text);
+  $("#local").replaceChildren(...items.map((t) => {
+    const li = row(t, subline(t), [
+      button("play", "Jetzt spielen", play("now", t.key, "Kommt jetzt …")),
+      button("next", "Als Nächstes", play("next", t.key, "Als Nächstes eingereiht"), "hover-only"),
+      button("plus", "Hinten anstellen", play("end", t.key, "Eingereiht")),
+      button("list", "Zu deiner Playlist", (ev) => playlistMenu(ev, { key: t.key }), "hover-only"),
+    ]);
+    li.classList.add("clickable");
+    li.addEventListener("dblclick", play("now", t.key, "Kommt jetzt …"));
+    return li;
+  }));
+}
+$("#local-form").addEventListener("submit", (ev) => ev.preventDefault());
+$("#local-q").addEventListener("input", renderLocal);
+$("#local-all").addEventListener("click", () => act("/api/local", { op: "all" }, "Mediathek läuft"));
+$("#local-shuffle").addEventListener("click", () => act("/api/local", { op: "shuffle" }, "Mediathek läuft gemischt"));
+$("#local-add").addEventListener("click", () => $("#radio-file").click());
+$("#play-file-btn").addEventListener("click", () => $("#play-file").click());
+$("#radio-file").addEventListener("change", (ev) => { uploadRadio(ev.target.files); ev.target.value = ""; });
+$("#play-file").addEventListener("change", (ev) => { if (ev.target.files[0]) uploadPlay(ev.target.files[0]); ev.target.value = ""; });
 
 function renderLibrary() {
   const lib = LIB;
@@ -486,23 +525,11 @@ function renderLibrary() {
     b.addEventListener("click", onClick);
     return b;
   };
-  const always = S && S.always;
   cards.replaceChildren(
-    always
-      ? card("24/7 ausschalten", "Dauerschleife beenden", () => cmd("always", "off", "24/7 ist aus"), true)
-      : card("24/7 Radio", lib.radio ? `${lib.radio} Dateien, zufällig` : "Radio-Ordner ist leer", () => cmd("always", "radio", "Radio läuft")),
-    !always && S && S.track
-      ? card("24/7 dieser Titel", "Laufenden Titel in Dauerschleife", () => cmd("always", "song", "Läuft in Dauerschleife"))
-      : "",
     card("Deine Favoriten", `${lib.favorites.length} Titel gemischt abspielen`, () => cmd("fav", "play shuffle")),
-    card("Datei abspielen", uploading || "Audio/Video vom Gerät, läuft sofort", () => $("#play-file").click()),
-    card("MP3 hochladen", uploading || "Eigene Songs fürs Radio", () => $("#radio-file").click()),
+    card("Mediathek", "Lokale Dateien abspielen", () => selectTab("local")),
   );
-  const playInput = $("#play-file");
-  if (!playInput.onchange) playInput.onchange = () => { if (playInput.files[0]) uploadPlay(playInput.files[0]); playInput.value = ""; };
   $("#fav-play").onclick = () => cmd("fav", "play");
-  const fileInput = $("#radio-file");
-  if (!fileInput.onchange) fileInput.onchange = () => { uploadRadio(fileInput.files); fileInput.value = ""; };
 
   // Eigene Playlists: aufklappbar, mit Titeln
   const box = $("#my-playlists");
@@ -517,7 +544,6 @@ function renderLibrary() {
       button("play", "Abspielen", () => cmd("playlist", `play ${p.name}`)),
       button("shuffle", "Gemischt abspielen", () => cmd("playlist", `play ${p.name} shuffle`)),
       button("plus", "Einreihen", () => cmd("playlist", `enqueue ${p.name}`, "Eingereiht")),
-      button("always", "24/7: in Dauerschleife", () => cmd("always", `playlist ${p.name}`, `„${p.name}“ läuft 24/7`), "hover-only"),
       button("trash", "Playlist löschen", () => {
         if (confirm(`Playlist „${p.name}“ löschen?`)) playlistOp({ op: "delete", name: p.name }, "Gelöscht");
       }, "hover-only"));
@@ -557,7 +583,6 @@ function renderLibrary() {
       button("play", "Abspielen", () => cmd("playlist", `play ${p.name}`)),
       button("shuffle", "Gemischt abspielen", () => cmd("playlist", `play ${p.name} shuffle`)),
       button("plus", "Einreihen", () => cmd("playlist", `enqueue ${p.name}`, "Eingereiht")),
-      button("always", "24/7: in Dauerschleife", () => cmd("always", `playlist ${p.name}`, `„${p.name}“ läuft 24/7`), "hover-only"),
     ])));
   $("#top").replaceChildren(...simple(lib.top, (t) => `${t.plays}× gespielt`));
   const people = lib.listeners || [];

@@ -1611,19 +1611,58 @@ class Bot:
         if resolved.thumbnail:
             self._thumb_url[resolved.key] = resolved.thumbnail
         self._prefetch_thumb(resolved.key)
+        await self._web_enqueue(room, user, track.key, mode)
+
+    async def _web_enqueue(self, room: str, user: str, key: str, mode: str) -> None:
+        """Titel aus dem Dashboard: laeuft nichts, sofort spielen; sonst jetzt, als Naechstes oder hinten."""
         p = self.player
         idle = p.state == "stopped" and not p._lock.locked()
         if idle:
             self._fetch_room = room
-            self._history.append(track.key)
+            self._history.append(key)
             del self._history[:-20]
-            await self._start_key(room, track.key, user, announce=True)
+            await self._start_key(room, key, user, announce=True)
         elif mode in ("now", "next"):
-            p.queue.insert(0, (track.key, user))
+            p.queue.insert(0, (key, user))
             if mode == "now":
                 await self._soft_skip(room)
         else:
-            p.enqueue(track.key, user)
+            p.enqueue(key, user)
+
+    # ------------------------------------------------------------------ Mediathek (Radio-Ordner)
+    async def web_local(self, user: str) -> dict:
+        """Alle Dateien im Radio-Ordner als Mediathek; fehlende Laengen werden einmal gemessen."""
+        keys = await asyncio.to_thread(self._radio_scan) if os.path.isdir(self.cfg.radio_dir) else []
+        for key in keys:
+            track = self.store.get(key)
+            if track and not track.duration:
+                try:
+                    duration = await asyncio.to_thread(probe_duration, self._radio_files[key])
+                except Exception:  # noqa: BLE001 – kaputte Datei: ohne Laenge anzeigen
+                    continue
+                self.store.note_request(key, duration=duration)
+        tracks = [dict(self._track_json(key), artist="") for key in keys]
+        tracks.sort(key=lambda t: t["title"].lower())
+        root = self.cfg.radio_dir
+        return {"tracks": tracks, "writable": os.path.isdir(root) and os.access(root, os.W_OK)}
+
+    async def web_local_play(self, user: str, op: str, key: str = "") -> None:
+        """Mediathek: einen Titel spielen/einreihen (op now|next|end) oder alle (all|shuffle)."""
+        keys = await asyncio.to_thread(self._radio_scan) if os.path.isdir(self.cfg.radio_dir) else []
+        room = self._web_room(user)
+        if op in ("all", "shuffle"):
+            if not keys:
+                raise MediaError("Die Mediathek ist leer.")
+            keys.sort(key=self._title)
+            if op == "shuffle":
+                random.shuffle(keys)
+            await self._quick(self._play_keys(room, user, keys, replace=True))
+            return
+        if key not in keys:
+            raise MediaError("Diese Datei gibt es nicht (mehr).")
+        if op not in ("now", "next", "end"):
+            raise MediaError("Unbekannte Aktion.")
+        await self._quick(self._web_enqueue(room, user, key, op))
 
     def web_queue(self, user: str, op: str, index: int, to: int) -> None:
         q = self.player.queue

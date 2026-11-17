@@ -87,6 +87,8 @@ class Dashboard:
         r.add_post("/api/playlist", self.playlist)
         r.add_post("/api/radio/upload", self.radio_upload)
         r.add_post("/api/upload", self.upload_play)
+        r.add_get("/api/local", self.local)
+        r.add_post("/api/local", self.local_play)
 
     # --------------------------------------------------------------- Lifecycle
     async def start(self) -> None:
@@ -211,6 +213,16 @@ class Dashboard:
             raise MediaError("Keine Datei erhalten.")
         return web.json_response({"ok": True, "saved": saved,
                                   "radio": len(self.bot._radio_scan())})
+
+    async def local(self, request: web.Request) -> web.StreamResponse:
+        user = self._user(request)
+        return web.json_response(await self.bot.web_local(user))
+
+    async def local_play(self, request: web.Request) -> web.StreamResponse:
+        user = self._user(request)
+        data = await request.json()
+        await self.bot.web_local_play(user, str(data.get("op", "")), str(data.get("key", ""))[:100])
+        return web.json_response(self.bot.web_state(user))
 
     async def upload_play(self, request: web.Request) -> web.StreamResponse:
         """Eine Audio-/Videodatei (multipart, Feld `file`) hochladen und sofort abspielen."""

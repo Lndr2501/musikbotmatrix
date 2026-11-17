@@ -75,7 +75,7 @@ input { font: inherit; color: inherit; }
 .play-btn:active { transform: scale(.95); }
 .play-btn svg { width: 30px; height: 30px; }
 .chip {
-  display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border-radius: 999px;
+  display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border-radius: 999px;
   border: 1px solid var(--line-strong); background: rgba(255,255,255,.04); color: var(--text);
   font-size: 13px; font-weight: 600; white-space: nowrap;
 }
@@ -113,6 +113,9 @@ input { font: inherit; color: inherit; }
   .app { grid-template-columns: minmax(0, 440px) minmax(0, 1fr); grid-template-rows: auto 1fr; padding: 20px 28px 40px; }
   .topbar { grid-column: 1 / -1; }
   .player { position: sticky; top: 20px; align-self: start; }
+}
+@media (min-width: 980px) and (max-width: 1199px) {
+  .app { grid-template-columns: minmax(0, 400px) minmax(0, 1fr); }
 }
 .topbar { display: flex; align-items: center; gap: 12px; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
@@ -181,9 +184,9 @@ input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bord
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 28px; padding: 8px 8px 16px; box-shadow: var(--shadow); min-width: 0;
 }
-.tabs { display: flex; gap: 4px; padding: 6px; overflow-x: auto; scrollbar-width: none; }
+.tabs { display: flex; gap: 2px; padding: 6px; overflow-x: auto; scrollbar-width: none; }
 .tabs button {
-  border: 0; background: transparent; padding: 9px 14px; border-radius: 12px; font-weight: 600;
+  border: 0; background: transparent; padding: 9px 11px; border-radius: 12px; font-weight: 600; font-size: 14px;
   color: var(--muted); white-space: nowrap; display: inline-flex; gap: 6px; align-items: center;
 }
 .tabs button[aria-selected=true] { background: rgba(255,255,255,.1); color: var(--text); }
@@ -307,3 +310,23 @@ input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bord
 }
 .popover button:hover { background: rgba(255,255,255,.08); }
 .popover .pop-title { font-size: 12px; color: var(--muted); padding: 6px 12px 4px; text-transform: uppercase; letter-spacing: .05em; }
+
+/* Call-Leiste im Player */
+.meta, .sub-controls { min-width: 0; }
+.call-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px; border-radius: 16px; background: rgba(255,255,255,.04); border: 1px solid var(--line);
+}
+.call-state {
+  flex: 1 0 100%; display: inline-flex; align-items: center; gap: 8px; padding: 2px 0 2px 2px;
+  font-size: 13px; font-weight: 600; color: var(--muted); white-space: nowrap;
+}
+.call-state .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.call-bar .chip { flex: 1; justify-content: center; }
+.call-bar.live .call-state { color: var(--text); }
+.call-bar.live .call-state .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+
+/* Mediathek */
+.local-foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 18px 4px 0; }
+.tab-head { gap: 10px; flex-wrap: wrap; }
+.row.clickable { cursor: default; }
