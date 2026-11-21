@@ -120,6 +120,23 @@ geladen, damit er pünktlich bereitliegt. Länge per `CROSSFADE_SECONDS`
 damit es nicht knackt. Kein Crossfade gibt es, wenn derselbe Titel direkt
 nochmal kommt (Schleife mit leerer Warteschlange).
 
+## Bär-DJ und Ansage
+
+Hat ein Titel kein eigenes Video (MP3, Audio-Stream, Datei mit eingebettetem
+Cover), zeigt die Kamera des Bots einen Bären am DJ-Pult statt des Titelbilds:
+er wippt im Takt, jubelt bei Drops, die LEDs am Pult zeigen den Bass, das
+Titelbild hängt klein oben rechts. Takt, Bass und Drops kommen live aus dem
+Audio, das der Bot gerade ausgibt – alles auf der CPU (480p/24 fps: ~30 % eines
+Kerns).
+
+Am Anfang jedes Titels sagt der Bär ihn an („Jetzt kommt: <Titel> von
+<Interpret>“). Die Stimme ist Piper (`de_DE-thorsten-medium`, liegt im Image),
+die Musik wird dafür kurz leiser. „(Official Video)“ & Co. werden nicht
+vorgelesen, „Interpret - Titel“ wird aufgeteilt.
+
+Abschalten: `BAER_ENABLED=false` bzw. `ANSAGE_ENABLED=false`. Die Bilder des
+Bären liegen in `musikbot/baer_assets/` (einmalig mit Qwen-Image erzeugt).
+
 ## Mediathek (Ordner `radio/`)
 
 MP3s (auch m4a, ogg, opus, flac, wav; Unterordner gehen) in `radio/` neben der

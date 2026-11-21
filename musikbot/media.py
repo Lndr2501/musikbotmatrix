@@ -39,6 +39,7 @@ class MediaSource:
         self.video_fps = video_fps
         self.duration: float | None = None
         self.has_video = False
+        self.still: av.VideoFrame | None = None   # eingebettetes Cover (MP3/M4A), als Titelbild
         self.video_size: tuple[int, int] | None = None
         self._audio_container: av.InputContainer | None = None
         self._video_container: av.InputContainer | None = None
@@ -58,6 +59,10 @@ class MediaSource:
             self.duration = probe.duration / 1e6 if probe.duration else None
             vstream = next(iter(probe.streams.video), None)
             astream = next(iter(probe.streams.audio), None)
+            if vstream is not None and _is_still(vstream):
+                # Cover-Bild in der Audiodatei ist kein Video: nur als Titelbild merken
+                self.still = _grab_still(probe, vstream, self.video_height)
+                vstream = None
             self.has_video = vstream is not None
             if vstream is not None:
                 src_h = vstream.height or self.video_height
@@ -182,6 +187,25 @@ class MediaSource:
             yield when, frame
 
 
+def _is_still(stream) -> bool:
+    flag = getattr(getattr(getattr(av, "stream", None), "Disposition", None), "attached_pic", None)
+    try:
+        return flag is not None and bool(stream.disposition & flag)
+    except TypeError:
+        return False
+
+
+def _grab_still(container, stream, height: int) -> "av.VideoFrame | None":
+    try:
+        frame = next(container.decode(stream), None)
+    except (*_AV_ERRORS, ValueError):
+        return None
+    if frame is None:
+        return None
+    height = max(16, height // 2 * 2)
+    return letterbox(frame, (height * 16 // 9) // 2 * 2, height)
+
+
 def _frame_time(frame: av.VideoFrame) -> float:
     if frame.pts is None or frame.time_base is None:
         return 0.0
@@ -240,13 +264,18 @@ def cover_frame(data: bytes, width: int, height: int):
     try:
         with av.open(io.BytesIO(data)) as box:
             src = next(box.decode(video=0))
-        scale = min(width / src.width, height / src.height)
-        w = max(2, int(src.width * scale) // 2 * 2)
-        h = max(2, int(src.height * scale) // 2 * 2)
-        img = src.reformat(width=w, height=h, format="rgb24").to_ndarray()
-        canvas = np.zeros((height, width, 3), dtype=np.uint8)
-        y, x = (height - h) // 2, (width - w) // 2
-        canvas[y:y + h, x:x + w] = img
-        return av.VideoFrame.from_ndarray(canvas, format="rgb24")
+        return letterbox(src, width, height)
     except (StopIteration, ValueError, *_AV_ERRORS):
         return None
+
+
+def letterbox(src: av.VideoFrame, width: int, height: int) -> av.VideoFrame:
+    """Bild zentriert auf width x height (schwarze Raender, nichts wird gestreckt)."""
+    scale = min(width / src.width, height / src.height)
+    w = max(2, int(src.width * scale) // 2 * 2)
+    h = max(2, int(src.height * scale) // 2 * 2)
+    img = src.reformat(width=w, height=h, format="rgb24").to_ndarray()
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    y, x = (height - h) // 2, (width - w) // 2
+    canvas[y:y + h, x:x + w] = img
+    return av.VideoFrame.from_ndarray(canvas, format="rgb24")

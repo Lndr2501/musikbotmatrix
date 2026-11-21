@@ -80,6 +80,11 @@ class Config:
     crossfade_seconds: float = 6.0
     # Neuer Titel (ohne Crossfade) wird so lange eingeblendet (Sekunden, 0 = sofort voll).
     fade_in_seconds: float = 0.0
+    # Baer-DJ als Kamerabild, wenn ein Titel kein eigenes Video hat (statt Titelbild).
+    baer_enabled: bool = True
+    # Ansage "Jetzt kommt: <Titel>" am Anfang jedes Titels (Piper-Stimme, Musik wird leiser).
+    ansage_enabled: bool = True
+    ansage_voice: str = "/opt/piper/de_DE-thorsten-medium.onnx"
 
     # --- Dashboard (Web) ---------------------------------------------------
     web_enabled: bool = True
@@ -201,6 +206,9 @@ class Config:
             default_volume=_int("DEFAULT_VOLUME", 60),
             crossfade_seconds=_float("CROSSFADE_SECONDS", 6.0),
             fade_in_seconds=_float("FADE_IN_SECONDS", 0.0),
+            baer_enabled=_bool("BAER_ENABLED", True),
+            ansage_enabled=_bool("ANSAGE_ENABLED", True),
+            ansage_voice=_str("ANSAGE_VOICE", "/opt/piper/de_DE-thorsten-medium.onnx"),
             web_enabled=_bool("WEB_ENABLED", True),
             web_host=_str("WEB_HOST", "0.0.0.0"),
             web_port=_int("WEB_PORT", 8095),

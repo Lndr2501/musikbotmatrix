@@ -17,6 +17,8 @@ import numpy as np
 from aiortc import MediaStreamTrack
 from av import AudioFrame, VideoFrame
 
+from .ansage import Ansager, spoken_title, text_for
+from .baer import BaerDJ
 from .config import Config
 from .hub import Hub, Sink
 from .media import MediaSource, apply_gain, crossfade_mix, fade_block, silence_block
@@ -34,6 +36,8 @@ EventHandler = Callable[[str, dict], Awaitable[None]]
 
 
 MAX_VOLUME = 300  # 60 = Originalpegel, darueber Boost (300 = 5x)
+DUCK = 0.3              # Musik waehrend der Ansage
+ANSAGE_LATEST = 8.0     # spaeter als so viele Sekunden im Titel keine Ansage mehr
 
 
 class PeerAudioTrack(MediaStreamTrack):
@@ -161,6 +165,15 @@ class Player:
         self._master = 1.0
         self._master_target = 1.0
         self._master_rate = 0.0
+        # Baer-DJ (Kamerabild ohne eigenes Video) und Ansage
+        self.baer: BaerDJ | None = None
+        if cfg.baer_enabled:
+            h = int(cfg.video_height) // 2 * 2
+            self.baer = BaerDJ((h * 16 // 9) // 2 * 2, h)
+        self.ansager = Ansager(cfg.ansage_voice) if cfg.ansage_enabled else None
+        self._voice: np.ndarray | None = None   # laufende Ansage (Bloecke wie im Mix)
+        self._voice_i = 0
+        self._baer_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------ Peers (WebRTC)
     def add_peer_audio(self, peer) -> PeerAudioTrack:
@@ -186,6 +199,8 @@ class Player:
     async def _ensure_loop(self) -> None:
         if self._mix_task is None or self._mix_task.done():
             self._mix_task = asyncio.create_task(self._mix(), name="mix-loop")
+        if self.baer is not None and (self._baer_task is None or self._baer_task.done()):
+            self._baer_task = asyncio.create_task(self._baer_loop(), name="baer")
 
     async def _mix(self) -> None:
         loop = asyncio.get_running_loop()
@@ -227,6 +242,10 @@ class Player:
                         block = await self._mix_fade(block)
                     else:
                         block = apply_gain(block, self.gain)
+                    if self.baer is not None:          # Beat aus der Musik (ohne Ansage)
+                        self.baer.beat.feed(block, self._wall_base + self._pos)
+                    if self._voice is not None:
+                        block = self._mix_voice(block)
                     self.hub.push_audio(self._apply_master(block))
                     self._pos += (block.shape[1] // 2) / SAMPLE_RATE
                     continue
@@ -272,6 +291,7 @@ class Player:
                 await asyncio.to_thread(source.open)
             self._source = source
             self._start_streams(0.0)
+            self._on_new_track()
             if self.cfg.fade_in_seconds > 0:      # sanft einblenden statt mit voller Lautstaerke
                 self._master = 0.0
                 self._ramp(1.0, self.cfg.fade_in_seconds)
@@ -299,17 +319,23 @@ class Player:
     def set_cover(self, key: str, frame: VideoFrame | None) -> None:
         """Titelbild fuer `key` als Kamerabild merken (und zeigen, wenn der Titel kein Video hat)."""
         self.cover = (key, frame) if frame is not None else None
+        if self.baer is not None and self.current is not None and self.current.key == key:
+            self.baer.set_track(self.baer.title, self.baer.artist, frame)
         self._push_cover()
 
     @property
     def cover_frame(self) -> VideoFrame | None:
         cur = self.current
-        return self.cover[1] if self.cover and cur and self.cover[0] == cur.key else None
+        if self.cover and cur and self.cover[0] == cur.key:
+            return self.cover[1]
+        return getattr(self._source, "still", None)   # Cover aus der Datei selbst
 
     def _push_cover(self) -> None:
         """Ohne eigenes Video bleibt die Kamera nicht schwarz: Titelbild (sonst ein schwarzes Bild)."""
         if not self.video_enabled or self._source is None or self._source.has_video:
             return
+        if self._baer_active():
+            return                       # der Baer liefert die Bilder
         self.hub.push_video(self.cover_frame or _blank_frame())
 
     def pause(self) -> bool:
@@ -354,6 +380,7 @@ class Player:
         await self._end_fade()
         await asyncio.to_thread(self._source.seek, seconds)
         self.hub.fade_out(CUT_FADE)
+        self._voice = None
         self._start_streams(seconds)
         if self.state == "paused":
             self.state = "playing"
@@ -450,6 +477,7 @@ class Player:
         self._source = None
         self._audio_iter = self._video_iter = None
         self._pos = self._vpos = 0.0
+        self._voice = None
         if cut:
             self.hub.fade_out(CUT_FADE)
 
@@ -571,7 +599,9 @@ class Player:
         self._video_iter = (prepared.source.video_frames(0.0)
                             if (self.video_enabled and prepared.source.has_video) else None)
         self._pos = self._vpos = 0.0
+        self._voice = None
         self._push_cover()
+        self._on_new_track()
         log.info("Crossfade (%.1fs): %s -> %s", fade, old.title or old.key,
                  prepared.track.title or prepared.track.key)
         # Ereignisse im Hintergrund: Karten/Netzwerk duerfen den Mix nicht aufhalten
@@ -653,6 +683,89 @@ class Player:
             await asyncio.to_thread(fade.source.close)
             self._release(fade.track.key)
 
+    # ------------------------------------------------------- Baer-DJ & Ansage
+    def _baer_active(self) -> bool:
+        return (self.baer is not None and self.video_enabled and self.hub.count > 0
+                and self._source is not None and not self._source.has_video)
+
+    async def _baer_loop(self) -> None:
+        """Baer-Bilder im Video-Takt in den Hub schieben (Rendern im Thread)."""
+        loop = asyncio.get_running_loop()
+        fps = max(1.0, min(30.0, float(self.cfg.video_fps)))
+        anchor = loop.time()
+        try:
+            while True:
+                baer = self.baer
+                if baer is None:
+                    return
+                if not self._baer_active():
+                    await asyncio.sleep(0.2)
+                    anchor = loop.time()
+                    continue
+                try:
+                    frame = await asyncio.to_thread(baer.render, loop.time())
+                except Exception:  # noqa: BLE001
+                    log.exception("Baer-Bild fehlgeschlagen – zurueck zum Titelbild")
+                    self.baer = None
+                    self._push_cover()
+                    return
+                if self._baer_active():
+                    self.hub.push_video(frame)
+                anchor += 1.0 / fps
+                delay = anchor - loop.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                elif delay < -1.0:
+                    anchor = loop.time()
+        except asyncio.CancelledError:
+            raise
+
+    def _on_new_track(self) -> None:
+        """Neuer Titel laeuft an: Baer bekommt Titel/Titelbild, Ansage wird erzeugt."""
+        track = self.current
+        self._voice = None
+        if track is None:
+            return
+        title, artist = spoken_title(track.title or track.key, track.uploader)
+        if self.baer is not None:
+            self.baer.set_track(title, artist, self.cover_frame)
+        if self.ansager is not None and self.ansager.available:
+            task = asyncio.create_task(self._prepare_ansage(track.key, text_for(title, artist)),
+                                       name="ansage")
+            self._bg.add(task)
+            task.add_done_callback(self._bg.discard)
+        elif self.baer is not None:          # ohne Stimme: nur die Sprechblase
+            self.baer.announce(self._wall_base + self._pos, None)
+
+    async def _prepare_ansage(self, key: str, text: str) -> None:
+        voice = await asyncio.to_thread(self.ansager.synth, text) if self.ansager else None
+        if self.current is None or self.current.key != key or self._pos > ANSAGE_LATEST:
+            return                           # inzwischen gewechselt/gespult: Ansage verfallen
+        if voice is not None:
+            self._voice, self._voice_i = voice, 0
+            log.info("Ansage: %s", text)
+        if self.baer is not None:
+            self.baer.announce(self._wall_base + self._pos, voice)
+
+    def _mix_voice(self, block: "np.ndarray") -> "np.ndarray":
+        """Ansage ueber die Musik legen; die Musik wird dafuer weich leiser (DUCK)."""
+        voice, i = self._voice, self._voice_i
+        assert voice is not None
+        n, total = block.shape[1], voice.shape[1]
+
+        def duck(pos: int) -> float:
+            t = pos / 2 / SAMPLE_RATE
+            rest = max(0, total - pos) / 2 / SAMPLE_RATE
+            return 1 - (1 - DUCK) * min(1.0, t / 0.25, rest / 0.4)
+
+        out = fade_block(block, duck(i), duck(i + n)).astype(np.int32)
+        seg = voice[:, i:i + n]
+        out[:, : seg.shape[1]] += (seg.astype(np.float32) * min(self.gain, 1.5)).astype(np.int32)
+        self._voice_i = i + n
+        if self._voice_i >= total:
+            self._voice = None
+        return np.clip(out, -32768, 32767).astype(np.int16)
+
     def _emit_bg(self, *events: tuple[str, dict]) -> None:
         if self.on_event is None:
             return
@@ -674,6 +787,10 @@ class Player:
             self._mix_task.cancel()
             await asyncio.gather(self._mix_task, return_exceptions=True)
             self._mix_task = None
+        if self._baer_task is not None:
+            self._baer_task.cancel()
+            await asyncio.gather(self._baer_task, return_exceptions=True)
+            self._baer_task = None
         self._discard_prepared()
         await self._teardown()
         self.store.release_all()
