@@ -17,11 +17,14 @@ import numpy as np
 from aiortc import MediaStreamTrack
 from av import AudioFrame, VideoFrame
 
+import time
+
 from .ansage import Ansager, spoken_title, text_for
 from .baer import BaerDJ
 from .config import Config
 from .hub import Hub, Sink
 from .media import MediaSource, apply_gain, crossfade_mix, fade_block, silence_block
+from .moderation import Moderator
 from .store import Track, TrackStore
 
 log = logging.getLogger(__name__)
@@ -38,6 +41,7 @@ EventHandler = Callable[[str, dict], Awaitable[None]]
 MAX_VOLUME = 300  # 60 = Originalpegel, darueber Boost (300 = 5x)
 DUCK = 0.3              # Musik waehrend der Ansage
 ANSAGE_LATEST = 8.0     # spaeter als so viele Sekunden im Titel keine Ansage mehr
+FRESH_START = 15 * 60   # so lange nichts gespielt -> beim naechsten Titel "Hallo zusammen"
 
 
 class PeerAudioTrack(MediaStreamTrack):
@@ -169,8 +173,13 @@ class Player:
         self.baer: BaerDJ | None = None
         if cfg.baer_enabled:
             h = int(cfg.video_height) // 2 * 2
-            self.baer = BaerDJ((h * 16 // 9) // 2 * 2, h)
+            self.baer = BaerDJ((h * 16 // 9) // 2 * 2, h, cfg.baer_assets or None)
         self.ansager = Ansager(cfg.ansage_voice) if cfg.ansage_enabled else None
+        self.moderator = Moderator(cfg.moderation_tz)
+        self._gen = 0                  # zaehlt hoch bei play/stop/skip: laufende Moderation bricht ab
+        self._no_intro_key: str | None = None   # in der Pause schon angesagt
+        self._speaking = False                  # Moderation laeuft (Baer rendert ohne Quelle)
+        self._last_start = 0.0
         self._voice: np.ndarray | None = None   # laufende Ansage (Bloecke wie im Mix)
         self._voice_i = 0
         self._baer_task: asyncio.Task | None = None
@@ -275,6 +284,7 @@ class Player:
 
     async def play(self, track: Track, requester: str = "") -> None:
         """Startet sofort neu (aktiver Titel wird abgelöst)."""
+        self._gen += 1
         async with self._lock:
             prepared = await self._take_prepared(track.key)
             # Nur abschneiden, wenn noch etwas laeuft – nach einem natuerlichen Ende
@@ -359,6 +369,7 @@ class Player:
         return self.state
 
     async def stop(self, *, clear_queue: bool = False) -> None:
+        self._gen += 1
         async with self._lock:
             if clear_queue:
                 self.queue.clear()
@@ -369,6 +380,7 @@ class Player:
 
     async def skip(self) -> bool:
         """Aktuellen Titel beenden und nächsten starten."""
+        self._gen += 1
         async with self._lock:
             await self._teardown()
         return await self._advance(auto=False)
@@ -442,9 +454,12 @@ class Player:
         await self._teardown(cut=False)   # Rest im Puffer ist das echte Songende
         if self.on_event:
             await self.on_event("track-end", {"track": finished})
-        await self._advance(auto=True)
+        await self._advance(auto=True, prev=finished)
 
-    async def _advance(self, *, auto: bool) -> bool:
+    async def _advance(self, *, auto: bool, prev: Track | None = None) -> bool:
+        if auto and prev is not None and self.moderation_on:
+            if not await self._moderate(prev):
+                return False             # waehrend der Ansage gestoppt/uebersprungen/neu gestartet
         if not self.queue:
             self.state = "stopped"
             if self.on_event:
@@ -502,7 +517,8 @@ class Player:
     def _maybe_prefetch(self) -> None:
         """Rechtzeitig vor dem Ende den naechsten Titel laden und den Decoder oeffnen."""
         self._maybe_need_next()
-        if self.cfg.crossfade_seconds <= 0 or not self.queue or self._source is None:
+        if (self.cfg.crossfade_seconds <= 0 and not self.moderation_on) or not self.queue \
+                or self._source is None:
             return
         dur = self._source.duration
         if not dur or self._pos < dur - self.cfg.crossfade_seconds - PREFETCH_SECONDS:
@@ -576,6 +592,8 @@ class Player:
             return False
         if self._force_fade:
             return True
+        if self.moderation_on:
+            return False                 # Titelwechsel mit Pause und Ansage statt Ueberblendung
         dur = self._source.duration
         fade = self._fade_seconds(dur, prepared.source.duration)
         return bool(dur) and fade > 0 and self._pos >= dur - fade
@@ -685,8 +703,11 @@ class Player:
 
     # ------------------------------------------------------- Baer-DJ & Ansage
     def _baer_active(self) -> bool:
-        return (self.baer is not None and self.video_enabled and self.hub.count > 0
-                and self._source is not None and not self._source.has_video)
+        if self.baer is None or not self.video_enabled or self.hub.count == 0:
+            return False
+        if self._speaking:                   # Moderationspause: keine Quelle, Baer redet
+            return True
+        return self._source is not None and not self._source.has_video
 
     async def _baer_loop(self) -> None:
         """Baer-Bilder im Video-Takt in den Hub schieben (Rendern im Thread)."""
@@ -720,17 +741,89 @@ class Player:
         except asyncio.CancelledError:
             raise
 
+    @property
+    def moderation_on(self) -> bool:
+        return bool(self.cfg.moderation_enabled and self.ansager is not None and self.ansager.available)
+
+    @staticmethod
+    def _info(track: Track) -> tuple[str, str]:
+        return spoken_title(track.title or track.key, track.uploader)
+
+    async def _moderate(self, prev: Track) -> bool:
+        """Pause zwischen zwei Titeln: Musik ist aus, der Baer redet. False = abgebrochen."""
+        gen = self._gen
+        self._speaking = True
+        try:
+            await self._moderate_inner(prev)
+        finally:
+            self._speaking = False
+        return gen == self._gen
+
+    async def _moderate_inner(self, prev: Track) -> None:
+        if self.queue:
+            key, requester = self.queue[0]
+            nxt = self.store.get(key)
+            if nxt is None:
+                return
+            info = self._info(nxt)
+            if self.baer is not None:
+                self.baer.set_track(*info)
+            await self._speak(self.moderator.between(self._info(prev), info, requester),
+                              "Jetzt kommt:", *info)
+            self._no_intro_key = key
+        else:
+            await self._speak(self.moderator.end(self._info(prev)),
+                              "Danke fürs Zuhören!", "DJ Bär macht Pause", "")
+
+    async def _speak(self, text: str, headline: str, title: str, artist: str) -> None:
+        """Text sprechen, ohne Musik (direkt in den Hub, im Echtzeit-Takt)."""
+        if self.ansager is None:
+            return
+        gen = self._gen
+        voice = await asyncio.to_thread(self.ansager.synth, text)
+        if voice is None or gen != self._gen:
+            return
+        log.info("Moderation: %s", text)
+        loop = asyncio.get_running_loop()
+        t0 = loop.time() + self.hub.buffered_audio_seconds()   # erst nach dem Songende
+        if self.baer is not None:
+            self.baer.announce(t0, voice, headline=headline, title=title, artist=artist)
+        gain = min(self.gain, 1.5)
+        step = 960 * 2
+        for i in range(0, voice.shape[1], step):
+            if gen != self._gen:
+                return
+            # im Echtzeit-Takt schieben (wie der Mix-Loop), egal ob jemand zuhoert
+            delay = t0 + i / 2 / SAMPLE_RATE - LEAD_SECONDS - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            block = voice[:, i:i + step]
+            if block.shape[1] < step:
+                block = np.pad(block, ((0, 0), (0, step - block.shape[1])))
+            self.hub.push_audio(apply_gain(block, gain))
+        end = t0 + voice.shape[1] / 2 / SAMPLE_RATE
+        while loop.time() < end and gen == self._gen:
+            await asyncio.sleep(0.05)
+
     def _on_new_track(self) -> None:
         """Neuer Titel laeuft an: Baer bekommt Titel/Titelbild, Ansage wird erzeugt."""
         track = self.current
         self._voice = None
         if track is None:
             return
-        title, artist = spoken_title(track.title or track.key, track.uploader)
+        title, artist = self._info(track)
         if self.baer is not None:
             self.baer.set_track(title, artist, self.cover_frame)
+        first = time.monotonic() - self._last_start > FRESH_START
+        self._last_start = time.monotonic()
+        if self._no_intro_key == track.key:          # in der Pause davor schon angesagt
+            self._no_intro_key = None
+            return
+        self._no_intro_key = None
         if self.ansager is not None and self.ansager.available:
-            task = asyncio.create_task(self._prepare_ansage(track.key, text_for(title, artist)),
+            text = (self.moderator.start((title, artist), first) if self.cfg.moderation_enabled
+                    else text_for(title, artist))
+            task = asyncio.create_task(self._prepare_ansage(track.key, text),
                                        name="ansage")
             self._bg.add(task)
             task.add_done_callback(self._bg.discard)

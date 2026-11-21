@@ -85,6 +85,11 @@ class Config:
     # Ansage "Jetzt kommt: <Titel>" am Anfang jedes Titels (Piper-Stimme, Musik wird leiser).
     ansage_enabled: bool = True
     ansage_voice: str = "/opt/piper/de_DE-thorsten-medium.onnx"
+    # Zwischen zwei Titeln der Warteschlange: Musik aus, der Baer moderiert (statt Crossfade).
+    moderation_enabled: bool = True
+    moderation_tz: str = "Europe/Zurich"
+    # Eigenes Bildpaket fuer den Baeren (Ordner mit manifest.json); leer = eingebautes.
+    baer_assets: str = ""
 
     # --- Dashboard (Web) ---------------------------------------------------
     web_enabled: bool = True
@@ -209,6 +214,9 @@ class Config:
             baer_enabled=_bool("BAER_ENABLED", True),
             ansage_enabled=_bool("ANSAGE_ENABLED", True),
             ansage_voice=_str("ANSAGE_VOICE", "/opt/piper/de_DE-thorsten-medium.onnx"),
+            moderation_enabled=_bool("MODERATION_ENABLED", True),
+            moderation_tz=_str("MODERATION_TZ", "Europe/Zurich"),
+            baer_assets=_str("BAER_ASSETS"),
             web_enabled=_bool("WEB_ENABLED", True),
             web_host=_str("WEB_HOST", "0.0.0.0"),
             web_port=_int("WEB_PORT", 8095),

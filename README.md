@@ -120,22 +120,48 @@ geladen, damit er pünktlich bereitliegt. Länge per `CROSSFADE_SECONDS`
 damit es nicht knackt. Kein Crossfade gibt es, wenn derselbe Titel direkt
 nochmal kommt (Schleife mit leerer Warteschlange).
 
-## Bär-DJ und Ansage
+## Bär-DJ und Moderation
 
 Hat ein Titel kein eigenes Video (MP3, Audio-Stream, Datei mit eingebettetem
-Cover), zeigt die Kamera des Bots einen Bären am DJ-Pult statt des Titelbilds:
-er wippt im Takt, jubelt bei Drops, die LEDs am Pult zeigen den Bass, das
-Titelbild hängt klein oben rechts. Takt, Bass und Drops kommen live aus dem
-Audio, das der Bot gerade ausgibt – alles auf der CPU (480p/24 fps: ~30 % eines
-Kerns).
+Cover), zeigt die Kamera des Bots einen Bären am DJ-Pult statt des Titelbilds.
+Takt, Bass und Drops kommen live aus dem Audio, das der Bot gerade ausgibt; eine
+gleichmäßige Beat-Uhr rastet auf die Kicks ein. Der Bär spielt vorgerenderte
+Tanz-Loops (je 4 Beats, 16 Bilder pro Beat) im Songtempo ab, wechselt am
+Taktanfang mit Überblendung die Pose, jubelt bei Drops, trinkt in Ruhephasen
+Kaffee und bewegt beim Reden den Mund nach der Stimme. Licht, LEDs und
+Plattenteller laufen im Takt mit. Alles läuft auf der CPU (480p/24 fps: ~25 %
+eines Kerns, ~470 MB RAM).
 
-Am Anfang jedes Titels sagt der Bär ihn an („Jetzt kommt: <Titel> von
-<Interpret>“). Die Stimme ist Piper (`de_DE-thorsten-medium`, liegt im Image),
-die Musik wird dafür kurz leiser. „(Official Video)“ & Co. werden nicht
-vorgelesen, „Interpret - Titel“ wird aufgeteilt.
+**Moderation:** Zwischen zwei Titeln gibt es keinen Crossfade, sondern eine
+kurze Pause, in der der Bär redet: was lief, manchmal ein Spruch („Ich hoffe,
+euch hat das gefallen“), wer sich den nächsten Titel gewünscht hat, was jetzt
+kommt. Die Texte werden zufällig zusammengesetzt und wiederholen sich nicht
+gleich. Ist die Warteschlange leer, verabschiedet er sich. Bei `!play` sagt er
+den Titel über dem (leiser gedrehten) Intro an. Stimme: Piper
+(`de_DE-thorsten-medium`, liegt im Image). „(Official Video)“ & Co. werden
+nicht vorgelesen, „Interpret - Titel“ wird aufgeteilt. `!skip`/`!stop` brechen
+die Moderation sofort ab.
 
-Abschalten: `BAER_ENABLED=false` bzw. `ANSAGE_ENABLED=false`. Die Bilder des
-Bären liegen in `musikbot/baer_assets/` (einmalig mit Qwen-Image erzeugt).
+| Variable | Standard | |
+|---|---|---|
+| `BAER_ENABLED` | `true` | Bär statt Titelbild |
+| `ANSAGE_ENABLED` | `true` | Ansagen/Moderation mit Stimme |
+| `MODERATION_ENABLED` | `true` | `false`: wieder Crossfade, nur kurze Ansage über dem Intro |
+| `MODERATION_TZ` | `Europe/Zurich` | für „Guten Abend“, „Freitagabend“ |
+| `BAER_ASSETS` | eingebaut | Ordner mit eigenem Bär-Paket (z. B. `/data/baer-qwen`) |
+
+**Eigener Bär (3D):** Eingebaut ist ein einfacher Bär aus Einzelbildern. Ein
+richtig animiertes Paket entsteht mit Blender (z. B. auf einem Mac, ~0,25 s pro
+Bild, ~15 min für alle Clips):
+
+```sh
+blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out clips [--clips mix,wave]
+python tools/baer3d/pack.py clips data/baer-paket      # PNG -> WebP, ~16 MB
+```
+
+Den Ordner nach `data/` legen (lesbar für UID 10000) und
+`BAER_ASSETS=/data/baer-paket` setzen. Ein kaputtes Paket fällt auf den
+eingebauten Bären zurück.
 
 ## Mediathek (Ordner `radio/`)
 
