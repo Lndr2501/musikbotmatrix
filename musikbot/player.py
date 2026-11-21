@@ -316,7 +316,7 @@ class Player:
         self._audio_iter = self._source.audio_blocks(start)
         self._video_iter = (
             self._source.video_frames(start)
-            if (self.video_enabled and self._source.has_video) else None
+            if self._shows_video(self._source) else None
         )
         self._pos = start
         self._vpos = start
@@ -342,7 +342,7 @@ class Player:
 
     def _push_cover(self) -> None:
         """Ohne eigenes Video bleibt die Kamera nicht schwarz: Titelbild (sonst ein schwarzes Bild)."""
-        if not self.video_enabled or self._source is None or self._source.has_video:
+        if not self.video_enabled or self._source is None or self._shows_video(self._source):
             return
         if self._baer_active():
             return                       # der Baer liefert die Bilder
@@ -410,7 +410,7 @@ class Player:
             self.video_enabled = not self.video_enabled
         if self.video_enabled and self._source is not None and self._video_iter is None:
             self._video_iter = (
-                self._source.video_frames(self._pos) if self._source.has_video else None)
+                self._source.video_frames(self._pos) if self._shows_video(self._source) else None)
         if not self.video_enabled:
             self._video_iter = None
         return self.video_enabled
@@ -615,7 +615,7 @@ class Player:
         self.current, self.requester, self._source = prepared.track, requester, prepared.source
         self._audio_iter = prepared.source.audio_blocks(0.0)
         self._video_iter = (prepared.source.video_frames(0.0)
-                            if (self.video_enabled and prepared.source.has_video) else None)
+                            if self._shows_video(prepared.source) else None)
         self._pos = self._vpos = 0.0
         self._voice = None
         self._push_cover()
@@ -707,7 +707,13 @@ class Player:
             return False
         if self._speaking:                   # Moderationspause: keine Quelle, Baer redet
             return True
-        return self._source is not None and not self._source.has_video
+        return self._source is not None and not self._shows_video(self._source)
+
+    def _shows_video(self, source) -> bool:
+        """Eigenes Video des Titels zeigen? Nein, wenn der Baer darueber tanzen soll."""
+        if source is None or not source.has_video or not self.video_enabled:
+            return False
+        return self.baer is None or not self.cfg.baer_over_video
 
     async def _baer_loop(self) -> None:
         """Baer-Bilder im Video-Takt in den Hub schieben (Rendern im Thread)."""

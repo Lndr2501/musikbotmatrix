@@ -197,7 +197,9 @@ async def _baer_run():
     await asyncio.gather(task, return_exceptions=True)
     frame = sink.take_video()
     assert frame is not None and (frame.width, frame.height) == (256, 144)
-    p._source = SimpleNamespace(has_video=True)                 # echtes Video: Baer schweigt
+    p._source = SimpleNamespace(has_video=True)                 # auch bei echtem Video: Baer
+    assert p._baer_active()
+    p.cfg.baer_over_video = False                               # Schalter aus: Video schlaegt Baer
     assert not p._baer_active()
 
 
@@ -220,6 +222,35 @@ def test_piper_synth_real_voice():
 
 
 @pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="ffmpeg fehlt")
+def test_baer_over_video_switch():
+    vid = SimpleNamespace(has_video=True)
+    p = _player()
+    p._source = vid
+    p.hub.new_sink()
+    assert not p._shows_video(vid) and p._baer_active()        # Standard: Baer statt YouTube-Video
+    off = _player(baer_over_video=False)
+    off._source = vid
+    off.hub.new_sink()
+    assert off._shows_video(vid) and not off._baer_active()
+    assert _player(baer_enabled=False)._shows_video(vid)       # ohne Baer: Video wie frueher
+
+
+def test_night_greeting_is_evening():
+    import datetime as dt
+    from musikbot import moderation
+    m = moderation.Moderator()
+
+    class _DT(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 11, 22, 0, 39, tzinfo=tz)
+    orig, moderation.dt.datetime = moderation.dt.datetime, _DT
+    try:
+        assert m._vars()["gruss"] == "Abend"
+    finally:
+        moderation.dt.datetime = orig
+
+
 def test_embedded_cover_is_still_not_video(tmp_path):
     import subprocess
     from musikbot.media import MediaSource

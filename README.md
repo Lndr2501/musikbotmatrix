@@ -122,8 +122,9 @@ nochmal kommt (Schleife mit leerer Warteschlange).
 
 ## Bär-DJ und Moderation
 
-Hat ein Titel kein eigenes Video (MP3, Audio-Stream, Datei mit eingebettetem
-Cover), zeigt die Kamera des Bots einen Bären am DJ-Pult statt des Titelbilds.
+Die Kamera des Bots zeigt einen Bären am DJ-Pult – bei MP3s und Streams statt
+des Titelbilds, standardmäßig auch bei YouTube-Titeln statt ihres Videos
+(`BAER_OVER_VIDEO=false` zeigt dort wieder das Video).
 Takt, Bass und Drops kommen live aus dem Audio, das der Bot gerade ausgibt; eine
 gleichmäßige Beat-Uhr rastet auf die Kicks ein. Der Bär spielt vorgerenderte
 Tanz-Loops (je 4 Beats, 16 Bilder pro Beat) im Songtempo ab, wechselt am
@@ -148,6 +149,7 @@ die Moderation sofort ab.
 | `ANSAGE_ENABLED` | `true` | Ansagen/Moderation mit Stimme |
 | `MODERATION_ENABLED` | `true` | `false`: wieder Crossfade, nur kurze Ansage über dem Intro |
 | `MODERATION_TZ` | `Europe/Zurich` | für „Guten Abend“, „Freitagabend“ |
+| `BAER_OVER_VIDEO` | `true` | Bär auch bei Titeln mit eigenem Video (YouTube); `false` zeigt das Video |
 | `BAER_ASSETS` | eingebaut | Ordner mit eigenem Bär-Paket (z. B. `/data/baer-qwen`) |
 
 **Eigener Bär (3D):** Eingebaut ist ein einfacher Bär aus Einzelbildern. Ein

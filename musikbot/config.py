@@ -82,6 +82,8 @@ class Config:
     fade_in_seconds: float = 0.0
     # Baer-DJ als Kamerabild, wenn ein Titel kein eigenes Video hat (statt Titelbild).
     baer_enabled: bool = True
+    # Baer auch bei Titeln mit eigenem Video (YouTube); das Video wird dann nicht dekodiert.
+    baer_over_video: bool = True
     # Ansage "Jetzt kommt: <Titel>" am Anfang jedes Titels (Piper-Stimme, Musik wird leiser).
     ansage_enabled: bool = True
     ansage_voice: str = "/opt/piper/de_DE-thorsten-medium.onnx"
@@ -212,6 +214,7 @@ class Config:
             crossfade_seconds=_float("CROSSFADE_SECONDS", 6.0),
             fade_in_seconds=_float("FADE_IN_SECONDS", 0.0),
             baer_enabled=_bool("BAER_ENABLED", True),
+            baer_over_video=_bool("BAER_OVER_VIDEO", True),
             ansage_enabled=_bool("ANSAGE_ENABLED", True),
             ansage_voice=_str("ANSAGE_VOICE", "/opt/piper/de_DE-thorsten-medium.onnx"),
             moderation_enabled=_bool("MODERATION_ENABLED", True),

@@ -115,7 +115,7 @@ class Moderator:
         h = now.hour
         tageszeit = ("mitten in der Nacht" if h < 5 else "früh am Morgen" if h < 10 else
                      "Mittag" if h < 14 else "Nachmittag" if h < 18 else "Abend" if h < 23 else "spät")
-        gruss = "Morgen" if 5 <= h < 11 else "Tag" if h < 18 else "Abend"
+        gruss = "Morgen" if 5 <= h < 11 else "Tag" if 11 <= h < 18 else "Abend"
         tag = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"][now.weekday()]
         if 18 <= h:
             tageszeit = f"{tag}abend"
