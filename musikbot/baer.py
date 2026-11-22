@@ -316,12 +316,19 @@ class Pack:
 
 # ---------------------------------------------------------------- Regie
 class Director:
-    """Waehlt, welcher Loop laeuft: Grooven, Hype bei Drops, Reden bei Ansagen,
-    Kaffee in Pausen. Wechsel an Taktgrenzen, nie zweimal derselbe Hype hintereinander."""
+    """Waehlt, welcher Loop laeuft: Grooven, Hype bei Drops, Reden bei Ansagen, Rufen bei
+    Zurufen, Kaffee in Pausen. Wechsel an Taktgrenzen; die letzten paar Moves werden gemieden,
+    damit es bei vielen Clips abwechslungsreich bleibt."""
+
+    GROOVE_SWITCH = 0.6     # je Takt: anderer Groove-Move
+    HYPE_ON_LOUD = 0.4      # je Takt bei lauter Musik: Hype-Move
+    SPECIAL_EVERY = 4       # fruehestens alle so viele Takte ein Special
+    RECENT = 4              # so viele zuletzt gespielte Moves meiden
 
     def __init__(self, pack: Pack, rng: random.Random) -> None:
         self.pack = pack
         self.rng = rng
+        self._recent: list[str] = []
         self.clip = self._pick("groove") or next(iter(pack.kind))
         self.start = 0.0
         self.prev: tuple[str, float] | None = None
@@ -329,12 +336,15 @@ class Director:
         self._bar = -1
         self._last_drop = None
         self._specials_due = 0
+        self._recent.append(self.clip)
 
     def _pick(self, kind: str, avoid: str | None = None) -> str | None:
-        names = [n for n in self.pack.names(kind) if n != avoid] or self.pack.names(kind)
+        names = self.pack.names(kind)
         if not names:
             return None
-        weights = [3 if n == "mix" else 1 for n in names]
+        fresh = [n for n in names if n != avoid and n not in self._recent]
+        names = fresh or [n for n in names if n != avoid] or names
+        weights = [2 if n == "mix" else 1 for n in names]
         return self.rng.choices(names, weights)[0]
 
     def _switch(self, name: str, pos: float, now: float, at_beat: bool = False) -> None:
@@ -342,15 +352,18 @@ class Director:
             return
         self.prev = (self.clip, self.start)
         self.clip = name
+        self._recent = (self._recent + [name])[-self.RECENT:]
         self.start = math.floor(pos) if at_beat else math.floor(pos / 4) * 4
         self.changed_at = now
 
-    def update(self, pos: float, now: float, st: dict, talking: bool) -> None:
+    def update(self, pos: float, now: float, st: dict, talking: bool, talk_kind: str = "talk") -> None:
         bar = int(pos // 4)
         hype_kind = "hype" if self.pack.names("hype") else "groove"
-        talk_kind = "talk" if self.pack.names("talk") else "groove"
-        if talking:
-            if self.pack.kind.get(self.clip) != "talk":
+        if talking:                                # Zuruf: "shout"-Clips, sonst Reden
+            for talk_kind in (talk_kind, "talk", "groove"):
+                if self.pack.names(talk_kind):
+                    break
+            if self.pack.kind.get(self.clip) != talk_kind:
                 self._switch(self._pick(talk_kind, self.clip) or self.clip, pos, now, at_beat=True)
             elif bar != self._bar and self.rng.random() < 0.5:
                 self._switch(self._pick(talk_kind, self.clip) or self.clip, pos, now)
@@ -370,14 +383,15 @@ class Director:
             self._switch(calm or self.clip, pos, now)
         elif drop:
             self._switch(self._pick(hype_kind, self.clip) or self.clip, pos, now)
-        elif st["loud"] > 0.55 and self.rng.random() < 0.25:
+        elif st["loud"] > 0.55 and self.rng.random() < self.HYPE_ON_LOUD:
             self._switch(self._pick(hype_kind, self.clip) or self.clip, pos, now)
         else:
             self._specials_due += 1
-            if self._specials_due >= 6 and self.pack.names("special") and self.rng.random() < 0.5:
+            if (self._specials_due >= self.SPECIAL_EVERY and self.pack.names("special")
+                    and self.rng.random() < 0.5):
                 self._specials_due = 0
                 self._switch(self._pick("special", self.clip) or self.clip, pos, now)
-            elif self.pack.kind.get(self.clip) != "groove" or self.rng.random() < 0.35:
+            elif self.pack.kind.get(self.clip) != "groove" or self.rng.random() < self.GROOVE_SWITCH:
                 self._switch(self._pick("groove", self.clip) or self.clip, pos, now)
 
 
@@ -397,6 +411,7 @@ class BaerDJ:
         self._cover = None
         self._talk_from = 0.0
         self._talk_until = 0.0
+        self._talk_kind = "talk"
         self._bubble: tuple[str, str, str] = ("", "", "")
         self._voice_env: np.ndarray | None = None   # Lautheit der Ansage, 50 Werte/s
         self._bass = 0.0
@@ -434,8 +449,11 @@ class BaerDJ:
             self._audience = ready
 
     def announce(self, start: float, voice: np.ndarray | None, *, headline: str = "Jetzt kommt:",
-                 title: str | None = None, artist: str | None = None, seconds: float = 4.0) -> None:
-        """Baer redet ab Wanduhr-Zeit `start` (Mund nach der Stimme), Sprechblase dazu."""
+                 title: str | None = None, artist: str | None = None, seconds: float = 4.0,
+                 kind: str = "talk") -> None:
+        """Baer redet ab Wanduhr-Zeit `start` (Mund nach der Stimme), Sprechblase dazu.
+        `kind="shout"` waehlt die Ruf-Moves (Zurufe mitten im Song)."""
+        self._talk_kind = kind
         if voice is not None and voice.size:
             mono = np.abs(voice.reshape(-1, 2).astype(np.float32).mean(1))
             step = SAMPLE_RATE // 50
@@ -514,7 +532,7 @@ class BaerDJ:
         talking = self.talking(now)
         calm = 72.0 if (talking or not st["audible"]) else None
         pos = self.clock.advance(now, st, calm)
-        self.director.update(pos, now, st, talking)
+        self.director.update(pos, now, st, talking, self._talk_kind)
         # weich nachgefuehrt statt flackernd
         a = 1 - math.exp(-dt / 0.08)
         self._bass += (st["bass"] - self._bass) * a

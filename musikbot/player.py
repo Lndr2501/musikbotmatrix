@@ -457,7 +457,8 @@ class Player:
         self._last_speech = asyncio.get_running_loop().time()
         log.info("Zuruf: %s", text)
         if self.baer is not None:
-            self.baer.announce(self._wall_base + self._pos, voice, headline="DJ Bär:", title=text, artist="")
+            self.baer.announce(self._wall_base + self._pos, voice, headline="DJ Bär:", title=text, artist="",
+                               kind="shout")
         return True
 
     def set_video(self, enabled: bool | None = None) -> bool:

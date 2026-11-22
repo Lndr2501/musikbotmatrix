@@ -25,6 +25,7 @@ PREVIEW = "--preview" in argv
 VARIANT = argv[argv.index("--variant") + 1] if "--variant" in argv else "generic"
 ONLY = argv[argv.index("--clips") + 1].split(",") if "--clips" in argv else None
 DESK_ONLY = "--desk" in argv
+SHEET = "--sheet" in argv          # Vorschau: jeder Clip (aus --clips) zu 4 Zeitpunkten, mit Pult
 STAGE_ONLY = "--stage" in argv
 TEX = os.path.dirname(os.path.abspath(__file__))
 FPB = 16                 # Bilder pro Beat
@@ -815,6 +816,251 @@ def clip_headbang(t):
     return p
 
 
+def ss(x):
+    """weicher Uebergang 0..1"""
+    x = max(0.0, min(1.0, x))
+    return x * x * (3 - 2 * x)
+
+
+def pulse_hold(t, on, off, ramp=0.25):
+    """1 zwischen on und off (Beats im 4er-Loop), weich ein/aus."""
+    return ss((t - on) / ramp) * (1 - ss((t - off) / ramp))
+
+
+# --- Grooven am Pult
+def clip_scratch(t):
+    p = base(t, nod=0.12, bounce=0.03)
+    p["shoulder_L"] = (-0.95 + 0.05 * wave(t, 0.5), -0.22, 0.3 * wave(t, 0.5))
+    p["elbow_L"] = (-0.65, 0, 0)
+    p["shoulder_R"] = (-0.9, 0.08, 0)
+    p["elbow_R"] = (-0.7 + 0.12 * wave(t, 1), 0, 0)
+    p["head"] = (0.14 + 0.08 * onbeat(t), 0, 0.18)
+    return p
+
+
+def clip_knobs(t):
+    p = base(t, nod=0.14, bounce=0.03)
+    p["shoulder_L"] = (-1.0, 0.2, 0)
+    p["shoulder_R"] = (-1.0, -0.2, 0)
+    p["elbow_L"] = (-0.55, 0, 0.3)
+    p["elbow_R"] = (-0.55, 0, -0.3)
+    p["hand_L"] = (0, 0, 0.6 * wave(t, 1))
+    p["hand_R"] = (0, 0, -0.6 * wave(t, 1, 0.5))
+    p["head"] = (0.16 + 0.1 * onbeat(t), 0.04 * wave(t, 2), 0)
+    return p
+
+
+def clip_cue(t):
+    p = base(t, nod=0.1, bounce=0.03)
+    p["shoulder_R"] = (-0.25, 2.3, 0)
+    p["elbow_R"] = (0, -2.25, 0)
+    p["shoulder_L"] = (-0.9, -0.2, 0.12 * wave(t, 2))
+    p["elbow_L"] = (-0.7, 0, 0)
+    p["head"] = (0.08 + 0.08 * onbeat(t), -0.18, 0.05 * wave(t, 4))
+    return p
+
+
+def clip_sway(t):
+    p = base(t, nod=0.08, bounce=0.03, sway=0.0)
+    w = wave(t, 2)
+    p["root_loc"] = (0.09 * w, 0, -0.03 * onbeat(t))
+    p["hips"] = (0, 0, 0.08 * w)
+    p["chest"] = (0.03 * onbeat(t), -0.1 * w, 0.06 * w)
+    p["shoulder_L"] = (-0.25, -0.5 - 0.2 * w, 0)
+    p["shoulder_R"] = (-0.25, 0.5 - 0.2 * w, 0)
+    p["elbow_L"] = (-1.0, 0, 0)
+    p["elbow_R"] = (-1.0, 0, 0)
+    p["head"] = (0.04 * onbeat(t), 0.14 * w, 0)
+    return p
+
+
+def clip_shimmy(t):
+    p = base(t, nod=0.06, bounce=0.03)
+    p["chest"] = (0.04 * onbeat(t), 0, 0.2 * wave(t, 0.5))
+    p["shoulder_L"] = (-0.6, -0.3, 0)
+    p["shoulder_R"] = (-0.6, 0.3, 0)
+    p["elbow_L"] = (-1.6, 0, 0)
+    p["elbow_R"] = (-1.6, 0, 0)
+    p["head"] = (0.04, 0, -0.12 * wave(t, 0.5))
+    return p
+
+
+def clip_lowpump(t):
+    p = base(t, nod=0.15, bounce=0.05)
+    a, b = (wave(t, 2) + 1) / 2, (1 - wave(t, 2)) / 2
+    p["shoulder_L"] = (-0.8 - 0.5 * a, -0.25, 0)
+    p["shoulder_R"] = (-0.8 - 0.5 * b, 0.25, 0)
+    p["elbow_L"] = (-1.1 + 0.4 * a, 0, 0)
+    p["elbow_R"] = (-1.1 + 0.4 * b, 0, 0)
+    return p
+
+
+# --- Hype
+def clip_airdrum(t):
+    p = base(t, nod=0.0, bounce=0.05)
+    p["shoulder_L"] = (-0.8, -0.25, 0)
+    p["shoulder_R"] = (-0.8, 0.25, 0)
+    p["elbow_L"] = (-1.7 + 0.8 * onbeat(t, 1), 0, 0)
+    p["elbow_R"] = (-1.7 + 0.8 * onbeat(t + 0.5, 1), 0, 0)
+    p["head"] = (0.22 * onbeat(t, 0.5) - 0.05, 0, 0)
+    return p
+
+
+def clip_fistpump(t):
+    p = base(t, nod=0.1, bounce=0.06)
+    a, b = onbeat(t, 2), onbeat(t + 1, 2)
+    p["shoulder_L"] = (-0.25, -2.05 - 0.25 * a, 0)
+    p["shoulder_R"] = (-0.25, 2.05 + 0.25 * b, 0)
+    p["elbow_L"] = (0, 1.3 * (1 - a), 0)
+    p["elbow_R"] = (0, -1.3 * (1 - b), 0)
+    p["head"] = (-0.1 + 0.08 * onbeat(t), 0.08 * wave(t, 2), 0)
+    return p
+
+
+def clip_roof(t):
+    p = base(t, nod=0.1, bounce=0.06)
+    up = onbeat(t, 1)
+    p["shoulder_L"] = (-0.2, -1.85 - 0.25 * up, 0)
+    p["shoulder_R"] = (-0.2, 1.85 + 0.25 * up, 0)
+    p["elbow_L"] = (0, 1.1 * (1 - up), 0)
+    p["elbow_R"] = (0, -1.1 * (1 - up), 0)
+    p["hand_L"] = (0, 0.8, 0)
+    p["hand_R"] = (0, -0.8, 0)
+    p["head"] = (-0.12 + 0.1 * up, 0, 0)
+    return p
+
+
+def clip_disco(t):
+    p = base(t, nod=0.05, bounce=0.04, sway=0.06)
+    up = (wave(t, 2, 0.25) + 1) / 2                   # Beat 0/2 oben, 1/3 unten
+    p["shoulder_R"] = (-0.5 + 0.2 * up, 2.4 * up - 0.4 * (1 - up), 0)
+    p["elbow_R"] = (-0.1, 0, 0)
+    p["shoulder_L"] = (0.05, -0.45, 0)
+    p["elbow_L"] = (-0.4, 1.4, 0)
+    p["hips"] = (0, 0.08 * wave(t, 2, 0.25), 0)
+    p["head"] = (0.05 - 0.15 * up, -0.1 * up, 0.15 * (up - 0.5))
+    return p
+
+
+def clip_robot(t):
+    p = base(t, nod=0.0, bounce=0.0, sway=0.0)
+    step = math.floor(t * 2) % 4                        # alle halben Beats ein Ruck
+    frac = ss((t * 2 - math.floor(t * 2)) / 0.3)
+    poses = [(-1.0, -2.1, 0.25), (-2.1, -1.0, -0.25), (-1.0, -1.0, 0.0), (-2.1, -2.1, 0.0)]
+    a, b = poses[step - 1], poses[step]
+    el, er, tw = (a[i] + (b[i] - a[i]) * frac for i in range(3))
+    p["shoulder_L"] = (-0.45, -0.35, 0)
+    p["shoulder_R"] = (-0.45, 0.35, 0)
+    p["elbow_L"] = (el, 0, 0)
+    p["elbow_R"] = (er, 0, 0)
+    p["chest"] = (0, 0, tw)
+    p["head"] = (0, 0, -tw * 1.2)
+    return p
+
+
+def clip_crowdwave(t):
+    p = base(t, nod=0.05, bounce=0.04)
+    w = wave(t, 2)
+    p["root_loc"] = (0.06 * w, 0, -0.03 * onbeat(t))
+    p["shoulder_L"] = (-0.2, -2.25 + 0.35 * w, 0)
+    p["shoulder_R"] = (-0.2, 2.25 + 0.35 * w, 0)
+    p["elbow_L"] = (0, -0.2, 0)
+    p["elbow_R"] = (0, 0.2, 0)
+    p["chest"] = (0, -0.1 * w, 0)
+    p["head"] = (-0.08, 0.12 * w, 0)
+    return p
+
+
+def clip_dab(t):
+    p = base(t, nod=0.05, bounce=0.03)
+    d = max(pulse_hold(t, 0.5, 1.5), pulse_hold(t, 2.5, 3.5))
+    p["shoulder_L"] = (-0.3 * d - 0.05 * (1 - d), -2.2 * d - 0.12 * (1 - d), 0)
+    p["elbow_L"] = (-0.15 * (1 - d), 0, 0)
+    p["shoulder_R"] = (-1.35 * d + 0.05 * (1 - d), 0.12 - 0.5 * d, -0.6 * d)
+    p["elbow_R"] = (-0.6 * d - 0.15 * (1 - d), 0, -0.9 * d)
+    p["head"] = (0.4 * d, 0.1 * d, 0.35 * d)
+    return p
+
+
+# --- Spezial
+def clip_heart(t):
+    p = base(t, nod=0.04, bounce=0.02, sway=0.05)
+    p["shoulder_L"] = (-1.15, 0.35, 0)
+    p["shoulder_R"] = (-1.15, -0.35, 0)
+    p["elbow_L"] = (-0.9, 0, 0.6)
+    p["elbow_R"] = (-0.9, 0, -0.6)
+    p["head"] = (0.02, 0.15 * wave(t, 2), 0)
+    return p
+
+
+def clip_thumbsup(t):
+    p = base(t, nod=0.06, bounce=0.03)
+    k = onbeat(t, 1)
+    p["shoulder_R"] = (-1.35 - 0.1 * k, 0.25, 0)
+    p["elbow_R"] = (-0.35, 0, 0)
+    p["hand_R"] = (0, 0, 0.3)
+    p["shoulder_L"] = (0.05, -0.12, 0)
+    p["head"] = (0.0, 0.12, -0.08)
+    return p
+
+
+def clip_stretch(t):
+    p = base(t, nod=0.0, bounce=0.0, sway=0.0)
+    up = ss(t / 1.5) * (1 - ss((t - 2.5) / 1.5))
+    p["shoulder_L"] = (-0.15 * up, -0.12 - 2.45 * up, 0)
+    p["shoulder_R"] = (-0.15 * up, 0.12 + 2.45 * up, 0)
+    p["elbow_L"] = (-0.15 * (1 - up), 0.4 * up, 0)
+    p["elbow_R"] = (-0.15 * (1 - up), -0.4 * up, 0)
+    p["chest"] = (-0.12 * up, 0, 0)
+    p["head"] = (-0.25 * up, 0, 0)
+    return p
+
+
+def clip_lookout(t):
+    p = base(t, nod=0.0, bounce=0.02, sway=0.0)
+    turn = 0.35 * math.sin(TAU * t / 4)
+    p["shoulder_R"] = (-0.7, 2.0, 0)
+    p["elbow_R"] = (0, -2.45, 0)
+    p["shoulder_L"] = (0.05, -0.12, 0)
+    p["chest"] = (0, 0, turn * 0.5)
+    p["head"] = (-0.05, 0, turn)
+    return p
+
+
+def clip_bow(t):
+    p = base(t, nod=0.0, bounce=0.0, sway=0.0)
+    b = pulse_hold(t, 0.5, 2.5, 0.6)
+    p["chest"] = (0.38 * b, 0, 0)
+    p["head"] = (0.3 * b, 0, 0)
+    p["shoulder_L"] = (-0.3 * b + 0.05, -0.12, 0)
+    p["shoulder_R"] = (-0.3 * b + 0.05, 0.12, 0)
+    p["elbow_L"] = (-0.4 * b, 0, 0)
+    p["elbow_R"] = (-0.4 * b, 0, 0)
+    return p
+
+
+# --- Reden
+def clip_shout(t):
+    p = base(t, nod=0.05, bounce=0.03)
+    p["shoulder_R"] = (-1.0, 1.05, 0)
+    p["elbow_R"] = (0, -1.95, 0)
+    p["shoulder_L"] = (-0.9, -1.2 + 0.15 * wave(t, 1), 0)
+    p["elbow_L"] = (-0.4, 0, 0)
+    p["head"] = (-0.05 + 0.06 * onbeat(t), 0.06 * wave(t, 2), 0)
+    return p
+
+
+def clip_explain(t):
+    p = base(t, nod=0.04, bounce=0.015, sway=0.02)
+    p["shoulder_L"] = (-1.1, -0.6, 0.4 * wave(t, 4))
+    p["elbow_L"] = (-0.3, 0, 0)
+    p["hand_L"] = (0, 0, 0.3)
+    p["shoulder_R"] = (-0.85, 0.15, 0)
+    p["elbow_R"] = (-0.75, 0, 0)
+    p["head"] = (0.03 * wave(t, 1.5), 0.05 * wave(t, 4), -0.1 * wave(t, 4))
+    return p
+
+
 CLIPS = {
     # name: (funktion, art, mund, extra)
     "mix": (clip_mix, "groove", 0, None),
@@ -829,6 +1075,26 @@ CLIPS = {
     "coffee": (clip_coffee, "special", 0, "cup"),
     "talk": (clip_talk, "talk", "both", None),
     "point": (clip_point, "talk", "both", "finger"),
+    "scratch": (clip_scratch, "groove", 0, None),
+    "knobs": (clip_knobs, "groove", 0, None),
+    "cue": (clip_cue, "groove", 0, None),
+    "sway": (clip_sway, "groove", 0, None),
+    "shimmy": (clip_shimmy, "groove", 0, None),
+    "lowpump": (clip_lowpump, "groove", 0, None),
+    "airdrum": (clip_airdrum, "hype", 1, None),
+    "fistpump": (clip_fistpump, "hype", 1, None),
+    "roof": (clip_roof, "hype", 1, None),
+    "disco": (clip_disco, "hype", 0, "finger"),
+    "robot": (clip_robot, "hype", 0, None),
+    "crowdwave": (clip_crowdwave, "hype", 1, None),
+    "dab": (clip_dab, "hype", 0, None),
+    "heart": (clip_heart, "special", 0, None),
+    "thumbsup": (clip_thumbsup, "special", 0, None),
+    "stretch": (clip_stretch, "special", 1, None),
+    "lookout": (clip_lookout, "special", 0, None),
+    "bow": (clip_bow, "special", 0, None),
+    "shout": (clip_shout, "shout", "both", None),
+    "explain": (clip_explain, "talk", "both", None),
 }
 
 
@@ -920,6 +1186,17 @@ def main():
         with open(os.path.join(OUT, "desk", "desk.json"), "w") as fh:
             json.dump(info, fh, indent=1)
         print("DESK", json.dumps(info), flush=True)
+        return
+    if SHEET:
+        sc.render.resolution_x, sc.render.resolution_y = PLATE
+        sc.render.resolution_percentage = 50
+        for name in (ONLY or list(CLIPS)):
+            fn, kind, mouth, extra = CLIPS[name]
+            set_extra(M, extra)
+            set_mouth(M, 1 if mouth else 0)
+            for t in (0.0, 1.0, 2.0, 3.0):
+                apply_pose(J, fn(t))
+                render_to(os.path.join(OUT, f"sheet_{name}_{t:.0f}.png"))
         return
     if PREVIEW:
         set_extra(M, None)

@@ -160,14 +160,27 @@ Die LED-Wand hinter dem Bären zeigt einen Equalizer aus dem laufenden Audio.
 | `BAER_ASSETS` | eingebaut | Ordner mit eigenem Bär-Paket (z. B. `/data/baer-qwen`) |
 
 **Eigener Bär (3D):** Eingebaut ist ein einfacher Bär aus Einzelbildern. Ein
-richtig animiertes Paket entsteht mit Blender (z. B. auf einem Mac, ~0,25 s pro
-Bild, ~15 min für alle Clips):
+richtig animiertes Paket entsteht mit Blender (z. B. auf einem Mac, ~1 s pro
+Bild, ~40 min für alle 32 Clips):
 
 ```sh
 blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out clips [--clips mix,wave]
 blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out clips --desk   # DJ-Pult
+blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out clips --stage  # Bühne
+blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out sheet --sheet --clips dab,roof  # Posen-Vorschau
 python tools/baer3d/pack.py clips data/baer-paket      # PNG -> WebP, ~17 MB
 ```
+
+Jeder Clip ist ein 4-Beat-Loop. Es gibt 32 Moves in fünf Sorten, die der Bot
+taktweise mischt (zuletzt gespielte werden gemieden):
+
+| Sorte | Moves | wann |
+|---|---|---|
+| groove | mix, groove, pump, scratch, knobs, cue, sway, shimmy, lowpump | normal, wechselt oft |
+| hype | headbang, cheer, jump, clap, spin, airdrum, fistpump, roof, disco, robot, crowdwave, dab | Drops, laute Stellen |
+| special | wave, coffee, heart, thumbsup, stretch, lookout, bow | alle paar Takte, Kaffee in Stille |
+| talk | talk, point, explain | Ansagen und Moderation |
+| shout | shout | Zurufe mitten im Song |
 
 Das Pult (Booth mit LED-Front, Controller mit Jogwheels, Mixer und Pads) wird aus
 derselben Kamera gerendert, einmal gedimmt und einmal voll leuchtend. Der Bot blendet

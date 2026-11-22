@@ -159,6 +159,41 @@ def test_director_jumps_to_hype_on_drop(tmp_path):
     assert baer.director.start == 5.0                                 # ab dem naechsten Beat
 
 
+def test_director_shouts_and_varies_moves(tmp_path):
+    clips = {n: {"kind": "groove"} for n in ("mix", "sway", "knobs", "scratch", "cue", "shimmy")}
+    clips.update({"talk": {"kind": "talk", "talk": True}, "shout": {"kind": "shout", "talk": True}})
+    baer = BaerDJ(256, 144, _pack(tmp_path, clips))
+    baer.render(0.0)
+    d = baer.director
+    st = {"bass": 0.5, "loud": 0.3, "audible": True, "kicks": [], "bpm": 120.0, "drop_at": None}
+    d.update(0.5, 0.5, st, talking=True, talk_kind="shout")
+    assert d.clip == "shout"                                          # Zuruf: Ruf-Move
+    d.update(4.5, 2.5, st, talking=True)
+    assert d.clip == "talk"                                           # Ansage: Rede-Move
+    seen, last = [], None
+    for bar in range(2, 42):
+        d.update(bar * 4 + 0.1, bar * 2.0, st, talking=False)
+        if d.clip != last:
+            seen.append(d.clip)
+            last = d.clip
+    assert len(set(seen)) == 6                                        # alle Groove-Moves kommen dran
+    assert len(seen) > 15                                             # und es wechselt oft
+    assert all(seen[i] not in seen[max(0, i - 3):i] for i in range(len(seen)))   # keine Wiederholung
+
+
+def test_baer_announce_kind_reaches_director(tmp_path):
+    baer = BaerDJ(256, 144, _pack(tmp_path, {"mix": {"kind": "groove"},
+                                             "shout": {"kind": "shout", "talk": True}}))
+    baer.render(0.0)
+    baer.announce(1.0, None, headline="DJ Bär:", title="Hey!", artist="", kind="shout")
+    baer.render(1.2)
+    assert baer.director.clip == "shout"
+    baer.announce(3.0, None)                                          # ohne Talk-Clips: weiter grooven
+    baer.render(10.0)
+    baer.render(10.3)
+    assert baer.pack.kind[baer.director.clip] in ("groove", "shout")
+
+
 def test_moderator_texts_vary_and_name_things():
     import random
     from musikbot.moderation import Moderator, who
