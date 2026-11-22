@@ -172,7 +172,13 @@ python tools/baer3d/pack.py clips data/baer-paket      # PNG -> WebP, ~17 MB
 ```
 
 Jeder Clip ist ein 4-Beat-Loop. Es gibt 32 Moves in fünf Sorten, die der Bot
-taktweise mischt (zuletzt gespielte werden gemieden):
+taktweise mischt (zuletzt gespielte werden gemieden). Welcher Move kommt, hängt vom
+Song ab: Der Bot hört mit (Lautheit, Bass, Höhen, Tempo) und erkennt grob ruhige
+Stellen, Build-ups, Breaks und Drops. Ruhige Songs bekommen Schunkeln und Herz,
+Build-ups Schrauben am Pult, Drops Jubel, schnelle Songs mit vielen Hi-Hats Luftschlagzeug
+und Roboter. Auch was er sagt, passt dazu: „Achtung, gleich kommt's!“ im Build-up,
+„140 Beats pro Minute!“ bei schnellen Songs, nach dem Song „Vier Drops in einem Song!“
+oder „Schön entspannt war das“.
 
 | Sorte | Moves | wann |
 |---|---|---|

@@ -501,3 +501,103 @@ def test_shout_over_running_song(tmp_path):
         assert not p._zuruf_ok()                             # kurz vor Schluss: auch nicht
         await p.shutdown()
     asyncio.run(run())
+
+
+def _song_audio(seconds: float, loud: float, bpm: float = 0.0, hats: bool = False) -> np.ndarray:
+    """Stereo int16: Brummen mit Lautheit `loud`, optional Kicks im Tempo und Hi-Hat-Rauschen."""
+    t = np.arange(int(seconds * SR)) / SR
+    x = 0.25 * np.sin(2 * np.pi * 220 * t)
+    if bpm:
+        ph = (t * bpm / 60) % 1.0
+        x = x * 0.4 + 0.9 * np.exp(-ph * 18) * np.sin(2 * np.pi * 60 * t)
+    if hats:
+        x = x + 0.15 * np.random.default_rng(1).standard_normal(t.size) * ((t * bpm / 30) % 1 < 0.1)
+    x = np.clip(x * loud, -1, 1)
+    return (np.repeat(x[:, None], 2, 1) * 32767).astype(np.int16).reshape(1, -1)
+
+
+def _feed(beat: Beat, audio: np.ndarray, start: float) -> float:
+    blk = 960 * 2
+    flat = audio.reshape(-1)
+    for i in range(0, flat.size - blk + 1, blk):
+        beat.feed(flat[i:i + blk], start + i / 2 / SR)
+    return start + flat.size / 2 / SR
+
+
+def test_beat_feels_the_song():
+    b = Beat()
+    end = _feed(b, _song_audio(12, 0.15), 0.0)
+    calm = b.state(end - 0.01)
+    assert calm["section"] == "calm" and calm["energy"] < 0.35
+    b.new_song(end)
+    end = _feed(b, _song_audio(30, 2.5, bpm=128, hats=True), end)
+    st = b.state(end - 0.01)
+    assert st["energy"] > 0.5 and st["section"] in ("groove", "drop")
+    song = b.song()
+    assert 28 < song["seconds"] < 31 and song["energy"] > 0.5      # nur der neue Song zaehlt
+    assert 118 < song["bpm"] < 138
+
+
+def test_moves_fit_the_song():
+    from musikbot.baer import move_fit
+    calm = {"energy": 0.2, "section": "calm", "bpm": 85.0}
+    assert move_fit("sway", "groove", calm) > 5 * move_fit("jump", "hype", calm)
+    build = {"energy": 0.55, "section": "build", "bpm": 120.0}
+    assert move_fit("knobs", "groove", build) > 2 * move_fit("shimmy", "groove", build)
+    wild = {"energy": 0.85, "section": "groove", "bpm": 140.0, "bright": 0.3, "low": 0.4}
+    assert move_fit("airdrum", "hype", wild) > 2 * move_fit("crowdwave", "hype", wild)
+    assert move_fit("eigener", "hype", wild) > move_fit("eigener", "special", wild)   # unbekannte: nach Sorte
+
+
+def test_director_stays_calm_in_quiet_songs(tmp_path):
+    clips = {n: {"kind": "groove"} for n in ("mix", "sway", "knobs", "cue", "shimmy")}
+    clips.update({n: {"kind": "hype"} for n in ("jump", "headbang", "cheer")})
+    clips.update({n: {"kind": "special"} for n in ("heart", "stretch")})
+    baer = BaerDJ(256, 144, _pack(tmp_path, clips))
+    baer.render(0.0)
+    d = baer.director
+    st = {"bass": 0.1, "loud": 0.25, "audible": True, "kicks": [], "bpm": 84.0, "drop_at": None,
+          "energy": 0.2, "section": "calm", "low": 0.1, "bright": 0.1}
+    played = []
+    for bar in range(1, 60):
+        d.update(bar * 4 + 0.1, bar * 2.0, st, talking=False)
+        played.append(d.clip)
+    assert not {"jump", "headbang", "cheer"} & set(played)               # nichts Wildes
+    assert played.count("sway") + played.count("heart") > played.count("shimmy")
+    build = dict(st, energy=0.55, section="build", bpm=122.0)
+    played = []
+    for bar in range(60, 100):
+        d.update(bar * 4 + 0.1, bar * 2.0, build, talking=False)
+        played.append(d.clip)
+    assert played.count("knobs") + played.count("cue") > len(played) / 3   # Build-up: am Pult schrauben
+
+
+def test_zurufe_fit_the_moment():
+    import random
+    from musikbot import moderation as mo
+    m = mo.Moderator(rng=random.Random(5))
+    build = [m.zuruf(["Lndr"], vibe={"section": "build", "energy": 0.6}) for _ in range(20)]
+    assert sum(t in mo.BUILD for t in build) >= 12                       # Build-up ankuendigen
+    calm = [m.zuruf(["Lndr"], vibe={"section": "calm", "energy": 0.2}) for _ in range(40)]
+    assert not set(calm) & set(mo.ZURUF + mo.FAST)                       # ruhig: kein "Lauter!"
+    assert any(t in mo.CALM for t in calm)
+    fast = {"section": "groove", "energy": 0.9, "bpm": 140.0, "low": 0.5}
+    wild = [m.zuruf([], vibe=fast, song=("Voll", "suehnung")) for _ in range(60)]
+    assert any("140 Beats" in t for t in wild) and any(t in mo.BASS for t in wild)
+    assert any("Voll" in t or "suehnung" in t for t in wild)
+    assert all("{" not in t for t in build + calm + wild)
+
+
+def test_moderation_remembers_how_the_song_was():
+    import random
+    from musikbot.moderation import Moderator
+    m = Moderator(rng=random.Random(2))
+    hot = {"seconds": 180, "energy": 0.9, "bass": 0.3, "bright": 0.2, "drops": 4, "bpm": 140.0}
+    texts = [m.between(("Voll", "suehnung"), ("B", ""), song=hot) for _ in range(20)]
+    assert any("Vier Drops" in t for t in texts) and any("140 Beats" in t for t in texts)
+    calm = {"seconds": 180, "energy": 0.3, "bass": 0.2, "bright": 0.1, "drops": 0, "bpm": 80.0}
+    texts = [m.between(("Leise", ""), ("B", ""), song=calm) for _ in range(20)]
+    assert not any("Brett" in t or "qualmen" in t for t in texts)
+    assert any("entspannt" in t or "ruhig" in t or "Dahinschmelzen" in t for t in texts)
+    assert all("{" not in t for t in texts)
+    assert "{" not in m.end(("Voll", ""), hot) and "{" not in m.end(("Voll", ""), calm)

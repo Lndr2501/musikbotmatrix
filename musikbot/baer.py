@@ -53,6 +53,8 @@ HALF_TIME_ABOVE = 135.0   # schnellere Songs: Baer tanzt halbes Tempo (sieht nat
 CACHE_FRAMES = 96
 # FFT-Bins (1024 @ 48 kHz, ~47 Hz je Bin) -> 12 Baender von ~94 Hz bis ~7,7 kHz fuer die EQ-Wand
 BAND_EDGES = (2, 3, 4, 6, 9, 13, 19, 27, 39, 56, 80, 115, 165)
+BRIGHT_BIN = 56             # ab ~2,6 kHz zaehlt als "hell" (Hi-Hats, Becken)
+CALM_ENERGY = 0.35          # darunter (geglaettete Lautheit) gilt ein Song als ruhig
 
 
 def _font(size: int, bold: bool = True):
@@ -82,6 +84,20 @@ class Beat:
         self._long = 0.0
         self._window = np.hanning(1024).astype(np.float32)
         self._band_peak = np.full(len(BAND_EDGES) - 1, 1e-3, np.float32)
+        self.new_song(0.0)
+
+    # Song-Gefuehl: weich gemittelte Werte, damit der Baer zum Teil des Songs passt
+    def new_song(self, at: float) -> None:
+        """Ab Wanduhr-Zeit `at` laeuft ein neuer Titel: Song-Werte neu sammeln."""
+        with getattr(self, "_lock", threading.Lock()):
+            self._song_at = at
+            self._e_fast = self._e_slow = self._low = self._bright = 0.0
+            self._song_n = 0
+            self._song_energy = self._song_bass = self._song_bright = 0.0
+            self._song_peak = 0.0
+            self._song_drops = 0
+            self._song_bpms: list[float] = []
+            self._song_last = at
 
     def feed(self, block: np.ndarray, at: float) -> None:
         mono = block.reshape(-1, 2).astype(np.float32).mean(1) / 32768.0
@@ -95,6 +111,8 @@ class Beat:
         self._bass_peak = max(bass, self._bass_peak * 0.9995)  # langsam vergessen
         level = bass / (self._bass_peak + 1e-9)
         bands = np.add.reduceat(spec[:BAND_EDGES[-1]], BAND_EDGES[:-1]).astype(np.float32)
+        total = float(spec[1:BAND_EDGES[-1]].sum()) + 1e-9
+        bright = float(spec[BRIGHT_BIN:BAND_EDGES[-1]].sum()) / total   # Anteil Hoehen (Hi-Hats)
         self._band_peak = np.maximum(bands, self._band_peak * 0.9993)
         bands = np.sqrt(np.clip(bands / (self._band_peak + 1e-9), 0.0, 1.0))
         with self._lock:
@@ -106,8 +124,63 @@ class Beat:
             self._short = 0.98 * self._short + 0.02 * rms
             self._long = 0.9975 * self._long + 0.0025 * rms
             last_drop = self.drops[-1] if self.drops else -1e9
-            if self._short > 1.45 * self._long and self._short > 0.06 and at - last_drop > 10:
+            settled = at - self._song_at > 8 or self._song_at == 0   # Songanfang ist kein Drop
+            if (self._short > 1.45 * self._long and self._short > 0.06 and at - last_drop > 10
+                    and settled):
                 self.drops.append(at)
+                if at >= self._song_at:
+                    self._song_drops += 1
+            if at >= self._song_at and rms > 0.01:
+                self._vibe_feed(at, min(1.0, rms * 4.0), level, bright)
+
+    def _vibe_feed(self, at: float, loud: float, low: float, bright: float) -> None:
+        def ema(old: float, new: float, tau: float) -> float:
+            return old + (new - old) * (1 - math.exp(-dt / tau))
+        dt = max(0.005, min(0.1, at - self._song_last))
+        self._song_last = at
+        first = self._song_n == 0
+        self._e_fast = loud if first else ema(self._e_fast, loud, 1.5)
+        self._e_slow = loud if first else ema(self._e_slow, loud, 8.0)
+        self._low = low if first else ema(self._low, low, 2.0)
+        self._bright = bright if first else ema(self._bright, bright, 3.0)
+        n = self._song_n = self._song_n + 1
+        self._song_energy += (loud - self._song_energy) / n
+        self._song_bass += (low - self._song_bass) / n
+        self._song_bright += (bright - self._song_bright) / n
+        self._song_peak = max(self._song_peak, self._e_slow)
+        if n % 250 == 0 and len(self.kicks) >= 7:            # alle ~5 s: Tempo merken
+            ks = list(self.kicks)
+            gaps = [b - a for a, b in zip(ks, ks[1:]) if 0.28 <= b - a <= 0.9]
+            if len(gaps) >= 6:
+                self._song_bpms.append(60.0 / float(np.median(gaps[-12:])))
+
+    def _section(self, now: float, drop_at: float | None) -> str:
+        """drop | build | break | calm | groove – grob, aus Energie und Bass."""
+        if drop_at is not None and now - drop_at < 6.0:
+            return "drop"
+        if self._song_n < 250:                                   # erste ~5 s: noch nichts sagen
+            return "calm" if self._e_fast < CALM_ENERGY else "groove"
+        seconds = self._song_n * 0.02
+        if seconds > 20 and self._song_bass > 0.2 and self._low < 0.45 * self._song_bass:
+            return "break"                                       # Bass weg, Musik laeuft weiter
+        if self._e_fast > 1.12 * self._e_slow and self._low < 0.85 * self._song_bass:
+            return "build"                                       # wird lauter, Bass haelt sich zurueck
+        if self._e_slow < CALM_ENERGY:
+            return "calm"
+        return "groove"
+
+    def song(self) -> dict:
+        """Zusammenfassung des laufenden/letzten Titels fuer die Moderation."""
+        with self._lock:
+            bpms = sorted(self._song_bpms)
+            return {
+                "seconds": self._song_n * 0.02,
+                "energy": self._song_energy,
+                "bass": self._song_bass,
+                "bright": self._song_bright,
+                "drops": self._song_drops,
+                "bpm": bpms[len(bpms) // 2] if bpms else 0.0,
+            }
 
     def reset(self) -> None:
         with self._lock:
@@ -115,6 +188,7 @@ class Beat:
             self.kicks.clear()
             self.drops.clear()
             self._bass_avg = self._short = self._long = 0.0
+        self.new_song(0.0)
 
     def state(self, now: float) -> dict:
         """Was gerade zu hoeren ist: Bass, Lautheit, Kicks, gemessenes Tempo, Drop."""
@@ -129,6 +203,8 @@ class Beat:
                     break
             kicks = [k for k in self.kicks if k <= now]
             drops = [d for d in self.drops if d <= now]
+            section = self._section(now, drops[-1] if drops else None)
+            energy, low, bright = self._e_fast, self._low, self._bright
         gaps = [b - a for a, b in zip(kicks, kicks[1:]) if 0.28 <= b - a <= 0.9]
         bpm = 60.0 / float(np.median(gaps[-12:])) if len(gaps) >= 6 else 0.0
         return {
@@ -139,6 +215,10 @@ class Beat:
             "bpm": bpm,
             "drop_at": drops[-1] if drops else None,
             "bands": bands if bands is not None else np.zeros(len(BAND_EDGES) - 1, np.float32),
+            "energy": energy if heard else 0.0,      # weich gemittelte Lautheit (~1,5 s)
+            "low": low,                              # Bass-Anteil (~2 s)
+            "bright": bright,                        # Hoehen-Anteil (Hi-Hats, ~3 s)
+            "section": section if heard else "calm",
         }
 
 
@@ -315,12 +395,68 @@ class Pack:
 
 
 # ---------------------------------------------------------------- Regie
-class Director:
-    """Waehlt, welcher Loop laeuft: Grooven, Hype bei Drops, Reden bei Ansagen, Rufen bei
-    Zurufen, Kaffee in Pausen. Wechsel an Taktgrenzen; die letzten paar Moves werden gemieden,
-    damit es bei vielen Clips abwechslungsreich bleibt."""
+# Wie ein Move wirkt: (Energie 0..1, Tempo -1 langsam/0/+1 schnell, Fokus, passende Songteile).
+# Fokus "bass" passt zu basslastigen Stellen, "bright" zu vielen Hi-Hats. Unbekannte Clips
+# (eigene Pakete) bekommen einen Wert nach ihrer Sorte.
+MOVES: dict[str, tuple[float, int, str, tuple[str, ...]]] = {
+    "coffee": (0.05, -1, "", ("calm",)),
+    "sway": (0.15, -1, "", ("calm", "break")),
+    "heart": (0.2, -1, "", ("calm", "break")),
+    "stretch": (0.25, -1, "", ("break",)),
+    "bow": (0.3, -1, "", ("calm",)),
+    "lookout": (0.35, 0, "", ("build",)),
+    "wave": (0.35, 0, "", ("calm",)),
+    "thumbsup": (0.4, 0, "", ()),
+    "knobs": (0.4, 0, "", ("build",)),
+    "cue": (0.45, 0, "", ("build",)),
+    "mix": (0.45, 0, "", ()),
+    "groove": (0.5, 0, "", ()),
+    "lowpump": (0.5, -1, "bass", ("break",)),
+    "scratch": (0.55, 1, "bright", ("build",)),
+    "shimmy": (0.55, 1, "bright", ()),
+    "pump": (0.6, 0, "bass", ()),
+    "clap": (0.65, 0, "", ("build",)),
+    "crowdwave": (0.7, -1, "", ("break", "drop")),
+    "disco": (0.7, 0, "bright", ()),
+    "robot": (0.7, 1, "bright", ()),
+    "roof": (0.75, 0, "bass", ("drop",)),
+    "fistpump": (0.75, 0, "bass", ("drop",)),
+    "airdrum": (0.8, 1, "bright", ()),
+    "dab": (0.8, 0, "", ("drop",)),
+    "cheer": (0.85, 0, "", ("drop",)),
+    "spin": (0.85, 0, "", ()),
+    "headbang": (0.9, 1, "bass", ("drop",)),
+    "jump": (0.95, 1, "bass", ("drop",)),
+}
+KIND_ENERGY = {"groove": 0.5, "hype": 0.8, "special": 0.3, "talk": 0.4, "shout": 0.6}
+FAST_BPM, SLOW_BPM = 124.0, 96.0
+BASSY, BRIGHT = 0.32, 0.22           # Schwellen fuer "low" und "bright" aus Beat.state
 
-    GROOVE_SWITCH = 0.6     # je Takt: anderer Groove-Move
+
+def move_fit(name: str, kind: str, st: dict) -> float:
+    """Wie gut passt der Move zur Stelle im Song? (>0, groesser = besser)"""
+    energy, tempo, focus, sections = MOVES.get(name, (KIND_ENERGY.get(kind, 0.5), 0, "", ()))
+    w = math.exp(-((energy - st.get("energy", 0.5)) / 0.25) ** 2)
+    bpm = st.get("bpm") or 0.0
+    if bpm and tempo:
+        fast, slow = bpm >= FAST_BPM, bpm < SLOW_BPM
+        w *= 1.8 if (tempo > 0 and fast) or (tempo < 0 and slow) else 0.5 if (fast or slow) else 1.0
+    if focus == "bass" and st.get("low", 0.0) >= BASSY:
+        w *= 1.6
+    if focus == "bright" and st.get("bright", 0.0) >= BRIGHT:
+        w *= 1.6
+    if st.get("section") in sections:
+        w *= 3.0
+    return w + 0.03
+
+
+class Director:
+    """Waehlt, welcher Loop laeuft – passend zum Song: ruhige Stellen ruhige Moves, Build-ups
+    am Pult schrauben, Drops Hype, Breaks schunkeln; schnelle Songs schnelle Moves. Reden bei
+    Ansagen, Rufen bei Zurufen, Kaffee in Stille. Wechsel an Taktgrenzen; die letzten Moves
+    werden gemieden, damit es abwechslungsreich bleibt."""
+
+    GROOVE_SWITCH = 0.6     # je Takt: anderer Groove-Move (ruhige Songs seltener, wilde oefter)
     HYPE_ON_LOUD = 0.4      # je Takt bei lauter Musik: Hype-Move
     SPECIAL_EVERY = 4       # fruehestens alle so viele Takte ein Special
     RECENT = 4              # so viele zuletzt gespielte Moves meiden
@@ -336,19 +472,25 @@ class Director:
         self._bar = -1
         self._last_drop = None
         self._specials_due = 0
+        self._section = "groove"
         self._recent.append(self.clip)
 
-    def _pick(self, kind: str, avoid: str | None = None) -> str | None:
-        names = self.pack.names(kind)
+    def _pick(self, kinds: str | tuple[str, ...], avoid: str | None = None,
+              st: dict | None = None) -> str | None:
+        kinds = (kinds,) if isinstance(kinds, str) else kinds
+        names = [n for k in kinds for n in self.pack.names(k)]
         if not names:
             return None
         fresh = [n for n in names if n != avoid and n not in self._recent]
         names = fresh or [n for n in names if n != avoid] or names
-        weights = [2 if n == "mix" else 1 for n in names]
+        if st is None:
+            weights = [2.0 if n == "mix" else 1.0 for n in names]
+        else:
+            weights = [move_fit(n, self.pack.kind[n], st) for n in names]
         return self.rng.choices(names, weights)[0]
 
-    def _switch(self, name: str, pos: float, now: float, at_beat: bool = False) -> None:
-        if name == self.clip:
+    def _switch(self, name: str | None, pos: float, now: float, at_beat: bool = False) -> None:
+        if name is None or name == self.clip:
             return
         self.prev = (self.clip, self.start)
         self.clip = name
@@ -364,36 +506,45 @@ class Director:
                 if self.pack.names(talk_kind):
                     break
             if self.pack.kind.get(self.clip) != talk_kind:
-                self._switch(self._pick(talk_kind, self.clip) or self.clip, pos, now, at_beat=True)
+                self._switch(self._pick(talk_kind, self.clip), pos, now, at_beat=True)
             elif bar != self._bar and self.rng.random() < 0.5:
-                self._switch(self._pick(talk_kind, self.clip) or self.clip, pos, now)
+                self._switch(self._pick(talk_kind, self.clip), pos, now)
             self._bar = bar
             return
         drop = st["drop_at"] is not None and now - st["drop_at"] < 8 * 60 / max(60.0, st["bpm"] or 120)
+        song = dict(st, section="drop") if drop else st
         if drop and st["drop_at"] != self._last_drop:          # Drop: sofort (naechster Beat) jubeln
             self._last_drop = st["drop_at"]
-            self._switch(self._pick(hype_kind, self.clip) or self.clip, pos, now, at_beat=True)
+            self._switch(self._pick(hype_kind, self.clip, song), pos, now, at_beat=True)
             self._bar = bar
             return
         if bar == self._bar:
             return
         self._bar = bar
+        kind = self.pack.kind.get(self.clip)
+        section = song.get("section", "groove")
+        energy = song.get("energy", song["loud"])
+        changed, self._section = section != self._section, section
         if not st["audible"]:
             calm = "coffee" if "coffee" in self.pack.kind else self._pick("groove")
-            self._switch(calm or self.clip, pos, now)
+            self._switch(calm, pos, now)
         elif drop:
-            self._switch(self._pick(hype_kind, self.clip) or self.clip, pos, now)
-        elif st["loud"] > 0.55 and self.rng.random() < self.HYPE_ON_LOUD:
-            self._switch(self._pick(hype_kind, self.clip) or self.clip, pos, now)
+            self._switch(self._pick(hype_kind, self.clip, song), pos, now)
+        elif section == "build":                  # Spannung: am Pult schrauben, jeden Takt was anderes
+            self._switch(self._pick(("groove", "special", "hype"), self.clip, song), pos, now)
+        elif section in ("break", "calm"):       # ruhig: weniger wechseln, nichts Wildes
+            if changed or kind == "hype" or self.rng.random() < 0.4:
+                self._switch(self._pick(("groove", "special"), self.clip, song), pos, now)
+        elif energy > 0.55 and self.rng.random() < self.HYPE_ON_LOUD * (0.5 + energy):
+            self._switch(self._pick(hype_kind, self.clip, song), pos, now)
         else:
             self._specials_due += 1
             if (self._specials_due >= self.SPECIAL_EVERY and self.pack.names("special")
                     and self.rng.random() < 0.5):
                 self._specials_due = 0
-                self._switch(self._pick("special", self.clip) or self.clip, pos, now)
-            elif self.pack.kind.get(self.clip) != "groove" or self.rng.random() < self.GROOVE_SWITCH:
-                self._switch(self._pick("groove", self.clip) or self.clip, pos, now)
-
+                self._switch(self._pick("special", self.clip, song), pos, now)
+            elif kind != "groove" or self.rng.random() < self.GROOVE_SWITCH * (0.6 + 0.6 * energy):
+                self._switch(self._pick("groove", self.clip, song), pos, now)
 
 # ---------------------------------------------------------------- Baer
 class BaerDJ:

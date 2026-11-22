@@ -434,18 +434,27 @@ class Player:
         loop = asyncio.get_running_loop()
         next_at = loop.time() + self._zuruf_gap()
         last_drop = None
+        build_since = None
         while True:
             await asyncio.sleep(0.5)
             now = loop.time()
-            drop = False
+            drop = build = False
+            vibe = None
             if self.baer is not None:
-                d = self.baer.beat.state(now)["drop_at"]
+                vibe = self.baer.beat.state(now)
+                vibe["bpm"] = self.baer.clock.song_bpm or vibe["bpm"]
+                d = vibe["drop_at"]
                 if d is not None and d != last_drop:
                     last_drop = d
                     drop = now - d < 1.5 and now - self._last_speech > 20
-            if (drop or now >= next_at) and self._zuruf_ok():
-                await self.shout(self.moderator.zuruf(self._listeners, drop=drop))
+                # Build-up, das sich ein paar Sekunden haelt: ankuendigen ("Gleich kommt's!")
+                build_since = (build_since or now) if vibe["section"] == "build" else None
+                build = build_since is not None and now - build_since >= 1.5 and now - self._last_speech > 25
+            if (drop or build or now >= next_at) and self._zuruf_ok():
+                song = self._info(self.current) if self.current else ("", "")
+                await self.shout(self.moderator.zuruf(self._listeners, drop=drop, vibe=vibe, song=song))
                 next_at = loop.time() + self._zuruf_gap()
+                build_since = None
 
     async def shout(self, text: str) -> bool:
         """Zuruf ueber die laufende Musik legen (Musik kurz leiser, Baer redet)."""
@@ -825,6 +834,7 @@ class Player:
         return gen == self._gen
 
     async def _moderate_inner(self, prev: Track) -> None:
+        song = self.baer.beat.song() if self.baer is not None else None   # wie war der letzte?
         if self.queue:
             key, requester = self.queue[0]
             nxt = self.store.get(key)
@@ -833,11 +843,11 @@ class Player:
             info = self._info(nxt)
             if self.baer is not None:
                 self.baer.set_track(*info)
-            await self._speak(self.moderator.between(self._info(prev), info, requester),
+            await self._speak(self.moderator.between(self._info(prev), info, requester, song),
                               "Jetzt kommt:", *info)
             self._no_intro_key = key
         else:
-            await self._speak(self.moderator.end(self._info(prev)),
+            await self._speak(self.moderator.end(self._info(prev), song),
                               "Danke fürs Zuhören!", "DJ Bär macht Pause", "")
 
     async def _speak(self, text: str, headline: str, title: str, artist: str) -> None:
@@ -879,6 +889,7 @@ class Player:
         title, artist = self._info(track)
         if self.baer is not None:
             self.baer.set_track(title, artist, self.cover_frame)
+            self.baer.beat.new_song(self._wall_base + self._pos)
         first = time.monotonic() - self._last_start > FRESH_START
         self._last_start = time.monotonic()
         if self._no_intro_key == track.key:          # in der Pause davor schon angesagt
