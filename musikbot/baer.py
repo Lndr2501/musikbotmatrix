@@ -47,7 +47,7 @@ DESK_Y = 0.70             # Oberkante Pult (Anteil der Bildhoehe)
 HEAD_Y = 0.11             # Kopf-Oberkante des Baeren
 FLOOR_Y = 0.935           # Boden unter dem Pult (Pakete mit "anchors")
 HEAD_Y_3D = 0.10          # Kopf-Oberkante bei Paketen mit "anchors"
-XFADE = 0.3               # Ueberblendung zwischen Clips (s)
+XFADE = 0.22              # Ueberblendung bei spontanen Wechseln (Reden), sonst Ein-/Ausstieg (s)
 MOUTH_OPEN = 0.3          # ab dieser Lautheit der Stimme ist der Mund offen
 HALF_TIME_ABOVE = 135.0   # schnellere Songs: Baer tanzt halbes Tempo (sieht natuerlicher aus)
 CACHE_FRAMES = 96
@@ -274,8 +274,12 @@ class Pack:
         self.clips: dict[str, list[bytes]] = {}
         self.kind: dict[str, str] = {}
         self.talking: set[str] = set()
+        self.edges: set[str] = set()     # Clips mit Ein-/Ausstieg ueber die Grundpose
         for name, info in m["clips"].items():
-            for variant in ([name, name + "_open"] if info.get("talk") else [name]):
+            variants = [name, name + "_open"] if info.get("talk") else [name]
+            if info.get("edges"):
+                variants += [name + "@in", name + "@out"]
+            for variant in variants:
                 d = path / variant
                 files = sorted(d.glob("*.webp")) or sorted(d.glob("*.png"))
                 if files:
@@ -284,6 +288,8 @@ class Pack:
                 self.kind[name] = info.get("kind", "groove")
                 if info.get("talk") and name + "_open" in self.clips:
                     self.talking.add(name)
+                if name + "@in" in self.clips and name + "@out" in self.clips:
+                    self.edges.add(name)
         if not self.clips:
             raise ValueError(f"Keine Clips in {path}")
         src_w, src_h = Image.open(io.BytesIO(next(iter(self.clips.values()))[0])).size
@@ -386,6 +392,11 @@ class Pack:
                 self._cache.popitem(last=False)
         return img
 
+    def edge_at(self, name: str, which: str, u: float) -> Image.Image:
+        """Ein-/Ausstieg (`which` = "in"/"out"), u = 0..1 ueber den einen Beat."""
+        frames = self.clips[f"{name}@{which}"]
+        return self.frame(f"{name}@{which}", min(len(frames) - 1, max(0, int(u * len(frames)))))
+
     def frame_at(self, name: str, beats: float) -> Image.Image:
         """Bild eines Loops nach `beats` Beats seit Clip-Start."""
         n = len(self.clips[name])
@@ -473,6 +484,9 @@ class Director:
         self._last_drop = None
         self._specials_due = 0
         self._section = "groove"
+        self.pending: tuple[str, float] | None = None    # (Clip, ab Beat-Position) – geplanter Wechsel
+        self.planned = False                             # laufender Clip kam ueber seinen Einstieg
+        self._decided: tuple[float, int] | None = None
         self._recent.append(self.clip)
 
     def _pick(self, kinds: str | tuple[str, ...], avoid: str | None = None,
@@ -489,13 +503,18 @@ class Director:
             weights = [move_fit(n, self.pack.kind[n], st) for n in names]
         return self.rng.choices(names, weights)[0]
 
-    def _switch(self, name: str | None, pos: float, now: float, at_beat: bool = False) -> None:
+    def _switch(self, name: str | None, pos: float, now: float, at_beat: bool = False,
+                planned: bool = False, cut: bool = False) -> None:
+        self.pending = None
         if name is None or name == self.clip:
             return
-        self.prev = (self.clip, self.start)
+        smooth = planned and self.clip in self.pack.edges and name in self.pack.edges
+        # cut: harter Schnitt (beim Drop verdecken Blitz und Zoom ihn), sonst kurz ueberblenden
+        self.prev = None if smooth or cut else (self.clip, self.start)
         self.clip = name
         self._recent = (self._recent + [name])[-self.RECENT:]
-        self.start = math.floor(pos) if at_beat else math.floor(pos / 4) * 4
+        self.start = pos if planned else math.floor(pos) if at_beat else math.floor(pos / 4) * 4
+        self.planned = smooth
         self.changed_at = now
 
     def update(self, pos: float, now: float, st: dict, talking: bool, talk_kind: str = "talk") -> None:
@@ -511,40 +530,53 @@ class Director:
                 self._switch(self._pick(talk_kind, self.clip), pos, now)
             self._bar = bar
             return
+        self._bar = bar
         drop = st["drop_at"] is not None and now - st["drop_at"] < 8 * 60 / max(60.0, st["bpm"] or 120)
         song = dict(st, section="drop") if drop else st
         if drop and st["drop_at"] != self._last_drop:          # Drop: sofort (naechster Beat) jubeln
             self._last_drop = st["drop_at"]
-            self._switch(self._pick(hype_kind, self.clip, song), pos, now, at_beat=True)
-            self._bar = bar
+            self._switch(self._pick(hype_kind, self.clip, song), pos, now, at_beat=True, cut=True)
             return
-        if bar == self._bar:
+        if self.pending is not None and pos >= self.pending[1]:   # geplanter Wechsel ist dran
+            name, at = self.pending
+            self._switch(name, at, now, planned=True)
+        # Entscheidung im letzten Beat jedes 4er-Loops des laufenden Clips: so kann der alte Clip
+        # ueber seinen Ausstieg in die Grundpose laufen und der neue von dort einsteigen.
+        rel = pos - self.start
+        cyc = int(rel // 4)
+        if rel - cyc * 4 < 3 or self._decided == (self.start, cyc) or self.pending is not None:
             return
-        self._bar = bar
+        self._decided = (self.start, cyc)
+        choice = self._decide(st, song, drop, hype_kind)
+        if choice is not None and choice != self.clip:
+            self.pending = (choice, self.start + 4 * (cyc + 1))
+
+    def _decide(self, st: dict, song: dict, drop: bool, hype_kind: str) -> str | None:
+        """Naechster Move (oder None = weiter so), passend zur Stelle im Song."""
         kind = self.pack.kind.get(self.clip)
         section = song.get("section", "groove")
         energy = song.get("energy", song["loud"])
         changed, self._section = section != self._section, section
         if not st["audible"]:
-            calm = "coffee" if "coffee" in self.pack.kind else self._pick("groove")
-            self._switch(calm, pos, now)
-        elif drop:
-            self._switch(self._pick(hype_kind, self.clip, song), pos, now)
-        elif section == "build":                  # Spannung: am Pult schrauben, jeden Takt was anderes
-            self._switch(self._pick(("groove", "special", "hype"), self.clip, song), pos, now)
-        elif section in ("break", "calm"):       # ruhig: weniger wechseln, nichts Wildes
+            return "coffee" if "coffee" in self.pack.kind else self._pick("groove")
+        if drop:
+            return self._pick(hype_kind, self.clip, song)
+        if section == "build":                    # Spannung: am Pult schrauben, jeden Takt was anderes
+            return self._pick(("groove", "special", "hype"), self.clip, song)
+        if section in ("break", "calm"):         # ruhig: weniger wechseln, nichts Wildes
             if changed or kind == "hype" or self.rng.random() < 0.4:
-                self._switch(self._pick(("groove", "special"), self.clip, song), pos, now)
-        elif energy > 0.55 and self.rng.random() < self.HYPE_ON_LOUD * (0.5 + energy):
-            self._switch(self._pick(hype_kind, self.clip, song), pos, now)
-        else:
-            self._specials_due += 1
-            if (self._specials_due >= self.SPECIAL_EVERY and self.pack.names("special")
-                    and self.rng.random() < 0.5):
-                self._specials_due = 0
-                self._switch(self._pick("special", self.clip, song), pos, now)
-            elif kind != "groove" or self.rng.random() < self.GROOVE_SWITCH * (0.6 + 0.6 * energy):
-                self._switch(self._pick("groove", self.clip, song), pos, now)
+                return self._pick(("groove", "special"), self.clip, song)
+            return None
+        if energy > 0.55 and self.rng.random() < self.HYPE_ON_LOUD * (0.5 + energy):
+            return self._pick(hype_kind, self.clip, song)
+        self._specials_due += 1
+        if (self._specials_due >= self.SPECIAL_EVERY and self.pack.names("special")
+                and self.rng.random() < 0.5):
+            self._specials_due = 0
+            return self._pick("special", self.clip, song)
+        if kind != "groove" or self.rng.random() < self.GROOVE_SWITCH * (0.6 + 0.6 * energy):
+            return self._pick("groove", self.clip, song)
+        return None
 
 # ---------------------------------------------------------------- Baer
 class BaerDJ:
@@ -667,7 +699,14 @@ class BaerDJ:
         name = d.clip
         if talking and name in pack.talking and self._voice(now) > MOUTH_OPEN:
             name += "_open"
-        img = pack.frame_at(name, pos - d.start)
+        rel = pos - d.start
+        if d.pending is not None and d.clip in pack.edges and d.pending[0] in pack.edges \
+                and d.pending[1] - 1 <= pos < d.pending[1]:
+            img = pack.edge_at(d.clip, "out", pos - (d.pending[1] - 1))     # in die Grundpose
+        elif d.planned and 0 <= rel < 1 and d.clip in pack.edges:
+            img = pack.edge_at(d.clip, "in", rel)                            # aus der Grundpose
+        else:
+            img = pack.frame_at(name, rel)
         fade = (now - d.changed_at) / XFADE
         if d.prev is not None and 0 <= fade < 1:
             old = pack.frame_at(d.prev[0], pos - d.prev[1])
@@ -715,6 +754,7 @@ class BaerDJ:
         desk = getattr(self.pack, "desk", None)
         if desk is not None:                                 # 3D-Pult unter dem Baeren
             self._draw_desk(img, desk, pos, bass, loud, pulse)
+        self._draw_particles(img, now, hue)                  # hinter dem Baeren, nie im Gesicht
         spr = self._bear(now, pos, talking)
         if self.pack.static:                                 # einzelne Posen: Wippen per Code
             amp = 0.25 + 0.75 * loud
@@ -730,10 +770,65 @@ class BaerDJ:
         if desk is None:
             self._draw_simple_desk(dr, pos, bass, hue)
 
+        d_at = st["drop_at"]                                 # Drop: kurzer Zoom-Stoss + Blitz
+        if d_at is not None and 0 <= now - d_at < 1.0:
+            age = now - d_at
+            z = 1 + 0.06 * math.exp(-age * 4.5) * min(1.0, age / 0.05)
+            if z > 1.003:
+                cw, ch = W / z, H / z
+                x0, y0 = (W - cw) / 2, (H - ch) * 0.45
+                img = img.crop((int(x0), int(y0), int(x0 + cw), int(y0 + ch))).resize((W, H), Image.BILINEAR)
+                dr = ImageDraw.Draw(img, "RGBA")
+            flash = int(80 * math.exp(-age * 12))
+            if flash > 3:
+                dr.rectangle([0, 0, W, H], fill=(255, 255, 255, flash))
+
+        if self._cover is not None:                          # Titelbild klein oben rechts
+            c = self._cover
+            x, y = W - c.width - int(W * .03), int(H * .04)
+            r = max(3, H // 90)
+            dr.rounded_rectangle([x - 4, y - 2, x + c.width + 6, y + c.height + 6], radius=r, fill=(0, 0, 0, 110))
+            dr.rounded_rectangle([x - 3, y - 3, x + c.width + 2, y + c.height + 2], radius=r,
+                                 fill=(255, 255, 255))
+            img.paste(c, (x, y))
+
+        headline, b_title, b_artist = self._bubble
+        if talking and (b_title or headline):
+            self._draw_bubble(img, now, headline, b_title, b_artist, hue)
+
+        # Bauchbinde: halbtransparent, Neon-Linie im Takt, LIVE-Chip
+        dr = ImageDraw.Draw(img, "RGBA")
+        y0 = int(H * .935)
+        dr.rectangle([0, y0, W, H], fill=(6, 4, 14, 200))
+        dr.rectangle([0, y0, W, y0 + max(1, H // 240)], fill=hue + (int(140 + 100 * pulse),))
+        f = self._f_small
+        chip = "LIVE"
+        cw = dr.textlength(chip, font=f) + H * .058
+        cy0, cy1 = y0 + H * .012, H - H * .012
+        dr.rounded_rectangle([W * .015, cy0, W * .015 + cw, cy1], radius=(cy1 - cy0) / 2, fill=(225, 30, 70))
+        dot = (cy1 - cy0) * .22
+        dcx, dcy = W * .015 + H * .018, (cy0 + cy1) / 2
+        dr.ellipse([dcx - dot, dcy - dot, dcx + dot, dcy + dot], fill=(255, 255, 255, int(150 + 105 * pulse)))
+        dr.text((W * .015 + H * .036, (cy0 + cy1) / 2), chip, font=f, fill=(255, 255, 255), anchor="lm")
+        bpm = self.clock.song_bpm
+        line = f"♪ {self.title}" + (f"  ·  {bpm:.0f} BPM" if bpm and st["audible"] else "")
+        tx = W * .015 + cw + W * .015
+        dr.text((tx, (cy0 + cy1) / 2), _fit(dr, line, f, W - tx - W * .02), font=f,
+                fill=(235, 235, 245), anchor="lm")
+        return img
+
+
+    def _draw_particles(self, img: Image.Image, now: float, hue: tuple) -> None:
+        """Noten/Herzen bei Hype-Moves: steigen links und rechts neben dem Baeren auf
+        und treiben nach aussen; gezeichnet vor dem Baeren-Sprite, also dahinter."""
+        W, H = img.size
         if self.pack.kind.get(self.director.clip) == "hype" and self._rng.random() < 0.35:
-            self._particles.append([W / 2 + self._rng.uniform(-W * .22, W * .22), H * .45,
-                                    self._rng.uniform(-40, 40), self._rng.uniform(-160, -90),
+            side = self._rng.choice((-1, 1))
+            self._particles.append([W / 2 + side * self._rng.uniform(W * .24, W * .34),
+                                    H * self._rng.uniform(.30, .50),
+                                    side * self._rng.uniform(15, 60), self._rng.uniform(-150, -80),
                                     self._rng.choice("♪♫♥★"), hue, now])
+        dr = ImageDraw.Draw(img, "RGBA")
         alive = []
         for p in self._particles:
             age = now - p[6]
@@ -744,44 +839,59 @@ class BaerDJ:
                 dr.text((px, py), p[4], font=self._f_note, fill=p[5] + (int(255 * (1 - age / 1.6)),))
         self._particles = alive[-60:]
 
-        if self._cover is not None:                          # Titelbild klein oben rechts
-            c = self._cover
-            x, y = W - c.width - int(W * .03), int(H * .04)
-            dr.rectangle([x - 3, y - 3, x + c.width + 2, y + c.height + 2], fill=(255, 255, 255))
-            img.paste(c, (x, y))
-
-        headline, b_title, b_artist = self._bubble
-        if talking and (b_title or headline):
-            box = [W * .03, H * .05, W * .40, H * .26]
-            dr.rounded_rectangle(box, radius=max(4, H // 30), fill=(255, 255, 255),
-                                 outline=(20, 20, 30), width=max(1, H // 240))
-            dr.polygon([(W * .33, H * .259), (W * .39, H * .259), (W * .41, H * .32)], fill=(255, 255, 255))
-            pad = W * .02
-            inner = box[2] - box[0] - 2 * pad
-            dr.text((box[0] + pad, box[1] + H * .025), _fit(dr, headline, self._f_small, inner),
-                    font=self._f_small, fill=(90, 90, 110))
-            line1, line2 = b_title, b_artist
-            if not b_artist and dr.textlength(b_title, font=self._f_big) > inner:   # Zuruf: umbrechen
-                words, line1 = b_title.split(), ""
-                while words and dr.textlength((line1 + " " + words[0]).strip(), font=self._f_big) <= inner:
-                    line1 = (line1 + " " + words.pop(0)).strip()
-                line1, line2 = (line1 or b_title), " ".join(words)
-            dr.text((box[0] + pad, box[1] + H * .07), _fit(dr, line1, self._f_big, inner),
-                    font=self._f_big, fill=(20, 20, 30))
-            if line2 and not b_artist:
-                dr.text((box[0] + pad, box[1] + H * .125), _fit(dr, line2, self._f_big, inner),
-                        font=self._f_big, fill=(20, 20, 30))
-            if b_artist:
-                dr.text((box[0] + pad, box[1] + H * .135), _fit(dr, b_artist, self._f_small, inner),
-                        font=self._f_small, fill=(60, 60, 80))
-
-        dr.rectangle([0, H * .94, W, H], fill=(0, 0, 0))
-        bpm = self.clock.song_bpm
-        line = f"♪ {self.title}" + (f"  ·  {bpm:.0f} BPM" if bpm and st["audible"] else "")
-        dr.text((W * .02, H * .948), _fit(dr, line, self._f_small, W * .96), font=self._f_small,
-                fill=(230, 230, 240))
-        return img
-
+    def _draw_bubble(self, img, now: float, headline: str, title: str, artist: str, hue) -> None:
+        """Sprechblase: dunkle Glas-Karte mit Neon-Rand, ploppt auf, Spitze zeigt auf den Baeren."""
+        W, H = self.w, self.h
+        age = now - self._talk_from
+        left = self._talk_until + 0.3 - now
+        pop = min(1.0, max(0.0, age / 0.22))
+        s = 1 + 2.2 * (pop - 1) ** 3 + 1.2 * (pop - 1) ** 2 if pop < 1 else 1.0   # easeOutBack
+        alpha = max(0.0, min(1.0, left / 0.25, age / 0.08))
+        if s <= 0.05 or alpha <= 0.02:
+            return
+        bw, bh = int(W * .335), int(H * .23)
+        tail = int(H * .07)
+        layer = Image.new("RGBA", (bw + 8, bh + tail + 8), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer, "RGBA")
+        r = max(6, H // 28)
+        accent = hue if headline.startswith("DJ") else (180, 80, 255)
+        d.rounded_rectangle([5, 7, bw + 5, bh + 7], radius=r, fill=(0, 0, 0, 120))             # Schatten
+        tip = (int(bw * .93), bh + tail)
+        d.polygon([(int(bw * .72), bh - 2), (int(bw * .86), bh - 2), tip], fill=accent + (255,))
+        d.polygon([(int(bw * .735), bh - 4), (int(bw * .845), bh - 4), (tip[0] - 2, tip[1] - 5)],
+                  fill=(18, 12, 34, 238))
+        d.rounded_rectangle([0, 0, bw, bh], radius=r, fill=(18, 12, 34, 238), outline=accent + (255,),
+                            width=max(2, H // 200))
+        pad = int(W * .018)
+        inner = bw - 2 * pad
+        f_s, f_b = self._f_small, self._f_big
+        tag = headline.rstrip(":").upper()
+        tw = d.textlength(tag, font=f_s) + pad
+        ty0, ty1 = int(bh * .09), int(bh * .09 + H * .045)
+        d.rounded_rectangle([pad, ty0, pad + tw, ty1], radius=(ty1 - ty0) // 2, fill=accent + (255,))
+        d.text((pad + pad / 2, (ty0 + ty1) / 2), tag, font=f_s, fill=(14, 8, 26), anchor="lm")
+        line1, line2 = title, artist
+        if not artist and d.textlength(title, font=f_b) > inner:     # Zuruf: umbrechen
+            words, line1 = title.split(), ""
+            while words and d.textlength((line1 + " " + words[0]).strip(), font=f_b) <= inner:
+                line1 = (line1 + " " + words.pop(0)).strip()
+            line1, line2 = (line1 or title), " ".join(words)
+        y = ty1 + H * .015
+        d.text((pad, y), _fit(d, line1, f_b, inner), font=f_b, fill=(255, 255, 255))
+        if line2:
+            y2 = y + H * .055
+            if artist:
+                d.text((pad, y2 + H * .004), _fit(d, line2, f_s, inner), font=f_s, fill=(200, 190, 230))
+            else:
+                d.text((pad, y2), _fit(d, line2, f_b, inner), font=f_b, fill=(255, 255, 255))
+        if alpha < 1:
+            layer.putalpha(layer.getchannel("A").point(lambda v: int(v * alpha)))
+        ax, ay = int(W * .02), int(H * .05)
+        if s < 0.999:                                   # aus der Spitze heraus aufploppen
+            nw, nh = max(1, int(layer.width * s)), max(1, int(layer.height * s))
+            ax, ay = ax + int(tip[0] * (1 - s)), ay + int(tip[1] * (1 - s))
+            layer = layer.resize((nw, nh), Image.BILINEAR)
+        img.paste(layer, (ax, ay), layer)
 
     def _draw_simple_desk(self, dr, pos: float, bass: float, hue) -> None:
         """Einfaches Pult (Pakete ohne eigene Pult-Bilder)."""

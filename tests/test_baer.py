@@ -72,15 +72,17 @@ def test_beat_clock_half_time_for_fast_songs():
     assert clock.bpm == pytest.approx(80, abs=5)
 
 
-def _pack(tmp_path, clips: dict, frames: int = 4) -> str:
+def _pack(tmp_path, clips: dict, frames: int = 4, edges: bool = False) -> str:
     import json
     from PIL import Image
     for name in clips:
-        for variant in ([name, name + "_open"] if clips[name].get("talk") else [name]):
+        variants = [name, name + "_open"] if clips[name].get("talk") else [name]
+        for variant in variants + ([name + "@in", name + "@out"] if edges else []):
             d = tmp_path / variant
             d.mkdir()
             for i in range(frames):
-                Image.new("RGBA", (112, 140), (i * 40, 100, 200, 255)).save(d / f"{i:03d}.webp")
+                tint = 0 if "@" not in variant else 60 if variant.endswith("@in") else 120
+                Image.new("RGBA", (112, 140), (i * 40, 100 + tint, 200, 255)).save(d / f"{i:03d}.webp")
     (tmp_path / "manifest.json").write_text(json.dumps({
         "fpb": 1, "beats": frames, "clips": clips,
         "units": {"top": 3.0, "bottom": -0.1, "desk": 0.85, "head": 2.5}}))
@@ -173,9 +175,11 @@ def test_director_shouts_and_varies_moves(tmp_path):
     seen, last = [], None
     for bar in range(2, 42):
         d.update(bar * 4 + 0.1, bar * 2.0, st, talking=False)
+        d.update(bar * 4 + 3.2, bar * 2.0 + 1.6, st, talking=False)
         if d.clip != last:
             seen.append(d.clip)
             last = d.clip
+    seen = [n for n in seen if n != "talk"]                           # Rede-Move laeuft noch aus
     assert len(set(seen)) == 6                                        # alle Groove-Moves kommen dran
     assert len(seen) > 15                                             # und es wechselt oft
     assert all(seen[i] not in seen[max(0, i - 3):i] for i in range(len(seen)))   # keine Wiederholung
@@ -561,6 +565,7 @@ def test_director_stays_calm_in_quiet_songs(tmp_path):
     played = []
     for bar in range(1, 60):
         d.update(bar * 4 + 0.1, bar * 2.0, st, talking=False)
+        d.update(bar * 4 + 3.2, bar * 2.0 + 1.6, st, talking=False)
         played.append(d.clip)
     assert not {"jump", "headbang", "cheer"} & set(played)               # nichts Wildes
     assert played.count("sway") + played.count("heart") > played.count("shimmy")
@@ -568,6 +573,7 @@ def test_director_stays_calm_in_quiet_songs(tmp_path):
     played = []
     for bar in range(60, 100):
         d.update(bar * 4 + 0.1, bar * 2.0, build, talking=False)
+        d.update(bar * 4 + 3.2, bar * 2.0 + 1.6, build, talking=False)
         played.append(d.clip)
     assert played.count("knobs") + played.count("cue") > len(played) / 3   # Build-up: am Pult schrauben
 
@@ -601,3 +607,82 @@ def test_moderation_remembers_how_the_song_was():
     assert any("entspannt" in t or "ruhig" in t or "Dahinschmelzen" in t for t in texts)
     assert all("{" not in t for t in texts)
     assert "{" not in m.end(("Voll", ""), hot) and "{" not in m.end(("Voll", ""), calm)
+
+
+def test_planned_switch_runs_through_edges(tmp_path):
+    """Wechsel wird im letzten Beat geplant: alter Clip laeuft aus, neuer steigt ein – ohne Ueberblendung."""
+    clips = {n: {"kind": "groove", "edges": True} for n in ("mix", "sway", "knobs")}
+    baer = BaerDJ(256, 144, _pack(tmp_path, clips, edges=True))
+    baer.render(0.0)
+    d, pack = baer.director, baer.pack
+    assert pack.edges == {"mix", "sway", "knobs"}
+    st = {"bass": 0.5, "loud": 0.3, "audible": True, "kicks": [], "bpm": 120.0, "drop_at": None,
+          "energy": 0.5, "section": "groove"}
+    d.GROOVE_SWITCH = 5.0                                             # sicher wechseln
+    first = d.clip
+    d.update(3.1, 1.0, st, talking=False)
+    assert d.pending is not None and d.pending[1] == 4.0 and d.clip == first
+    out = baer._bear(1.0, 3.5, False)
+    assert out.tobytes() == pack.edge_at(first, "out", 0.5).tobytes()  # Ausstieg in die Grundpose
+    d.update(4.05, 1.5, st, talking=False)
+    assert d.clip != first and d.start == 4.0 and d.planned and d.prev is None
+    assert baer._bear(1.5, 4.5, False).tobytes() == pack.edge_at(d.clip, "in", 0.5).tobytes()
+    assert baer._bear(1.5, 5.5, False).tobytes() == pack.frame_at(d.clip, 1.5).tobytes()
+
+
+def test_bubble_pops_and_drop_punches():
+    """Sprechblase ploppt auf (erst klein, dann voll), Drop zoomt kurz rein und blitzt."""
+    baer = BaerDJ(640, 360)
+    baer.set_track("Voll", "suehnung")
+    baer.render(0.0)
+    base = baer.render(0.5).to_ndarray(format="rgb24")
+    baer.announce(1.0, None, headline="DJ Bär:", title="Lndr, du bist geil!", artist="", kind="shout")
+    early = baer.render(1.03).to_ndarray(format="rgb24")
+    full = baer.render(1.4).to_ndarray(format="rgb24")
+    box = (slice(20, 90), slice(15, 220))                           # oben links: dort sitzt die Blase
+    assert np.abs(full[box].astype(int) - base[box]).mean() > np.abs(early[box].astype(int) - base[box]).mean()
+    baer.beat.drops.append(5.0)
+    calm = baer.render(4.9).to_ndarray(format="rgb24").mean()
+    flash = baer.render(5.02).to_ndarray(format="rgb24").mean()
+    assert flash > calm + 5                                          # Blitz beim Drop
+
+
+def test_particles_stay_beside_the_bear():
+    from PIL import Image as PILImage
+    """Noten/Herzen entstehen links und rechts neben dem Baeren, nicht vor seinem Gesicht."""
+    baer = BaerDJ(640, 360)
+    baer.set_track("Voll", "suehnung")
+    baer.render(0.0)                                                 # laedt Paket und Regie
+    hype = baer.pack.names("hype")[0]
+    baer.director.clip = hype
+    for i in range(40):
+        baer._draw_particles(PILImage.new("RGB", (640, 360)), i * 0.04, (255, 80, 200))
+    assert baer._particles
+    for p in baer._particles:
+        off = p[0] - 320
+        assert abs(off) >= 640 * .24 and p[2] * off > 0              # aussen, treibt nach aussen
+
+
+def test_drop_cuts_hard_and_talk_returns_through_edges(tmp_path):
+    """Drop: harter Schnitt (Blitz verdeckt ihn). Reden: kurz ueberblendet hinein,
+    danach geplant ueber Aus-/Einstieg zurueck zum Tanzen."""
+    clips = {"mix": {"kind": "groove"}, "sway": {"kind": "groove"}, "cheer": {"kind": "hype"},
+             "talk": {"kind": "talk", "talk": True}}
+    for c in clips.values():
+        c["edges"] = True
+    baer = BaerDJ(256, 144, _pack(tmp_path, clips, edges=True))
+    baer.render(0.0)
+    d = baer.director
+    assert "talk" in baer.pack.edges
+    st = {"bass": 0.5, "loud": 0.3, "audible": True, "kicks": [], "bpm": 120.0, "drop_at": None,
+          "energy": 0.5, "section": "groove"}
+    d.update(1.2, 1.0, dict(st, drop_at=1.0), talking=False)
+    assert d.clip == "cheer" and d.prev is None and not d.planned
+    d.update(2.3, 2.0, st, talking=True)
+    assert d.clip == "talk" and d.prev is not None                    # Reden: kurze Ueberblendung
+    d.GROOVE_SWITCH = 5.0
+    d.update(d.start + 3.1, 5.0, st, talking=False)
+    assert d.pending is not None and d.pending[0] != "talk"
+    at = d.pending[1]
+    d.update(at + 0.05, 6.0, st, talking=False)
+    assert d.planned and d.prev is None and d.start == at              # sauber ueber die Grundpose

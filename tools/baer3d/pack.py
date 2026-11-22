@@ -30,7 +30,9 @@ def main() -> None:
     a.out.mkdir(parents=True, exist_ok=True)
     total = 0
     for name, clip in manifest["clips"].items():
-        for variant in [name] + ([f"{name}_open"] if clip.get("talk") else []):
+        variants = [name] + ([f"{name}_open"] if clip.get("talk") else [])
+        variants += [f"{name}@in", f"{name}@out"] if clip.get("edges") else []
+        for variant in variants:
             src, dst = a.clips / variant, a.out / variant
             if dst.exists():
                 shutil.rmtree(dst)

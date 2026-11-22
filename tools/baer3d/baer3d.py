@@ -1,6 +1,8 @@
 """Qwen-Baer in Blender: per Skript gebaut, mit Gelenken, Tanz-Loops gerendert.
 
   blender -b -P baer3d.py -- --out DIR [--preview] [--clips a,b] [--variant qwen|generic]
+  blender -b -P baer3d.py -- --out DIR --scale 1.5   # fuer 720p (Plueschbaer, ~1,4 s pro Bild)
+  blender -b -P baer3d.py -- --out DIR --clips talk,point --edges-only   # nur Ein-/Ausstiege
   blender -b -P baer3d.py -- --out DIR --desk      # nur das DJ-Pult (desk/base.png + desk/glow.png)
   blender -b -P baer3d.py -- --out DIR --stage     # Buehne dahinter (stage/bg.png)
 
@@ -24,18 +26,22 @@ OUT = argv[argv.index("--out") + 1] if "--out" in argv else "/tmp/baer3d"
 PREVIEW = "--preview" in argv
 VARIANT = argv[argv.index("--variant") + 1] if "--variant" in argv else "generic"
 ONLY = argv[argv.index("--clips") + 1].split(",") if "--clips" in argv else None
+EDGES_ONLY = "--edges-only" in argv   # nur Ein-/Ausstiege neu rendern (mit --clips)
 DESK_ONLY = "--desk" in argv
 SHEET = "--sheet" in argv          # Vorschau: jeder Clip (aus --clips) zu 4 Zeitpunkten, mit Pult
+FRAME = argv[argv.index("--frame") + 1] if "--frame" in argv else None   # clip:t -> ein Bild in voller Groesse
 STAGE_ONLY = "--stage" in argv
+MODEL = int(argv[argv.index("--model") + 1]) if "--model" in argv else 2   # 1 = alter Kugel-Baer
 TEX = os.path.dirname(os.path.abspath(__file__))
 FPB = 16                 # Bilder pro Beat
 BEATS = 4
-RES = (448, 560)
+SCALE = float(argv[argv.index("--scale") + 1]) if "--scale" in argv else 1.0   # 1.5 -> fuer 720p
+RES = (round(448 * SCALE), round(560 * SCALE))
 TAU = 2 * math.pi
 CAM_Z, CAM_DIST, LENS, SENSOR = 2.15, 6.6, 50, 24
 CAM_TILT = 6.0               # Grad nach unten: man sieht auf den Controller
-PLATE = (1024, 560)          # Pult-Bild: gleiche Kamera, nur breiter (gleiche Pixel pro Einheit)
-STAGE = (1120, 640)          # Buehne: deckt das ganze Ausgabebild (oben/unten je 40 px mehr)
+PLATE = (round(1024 * SCALE), round(560 * SCALE))          # Pult-Bild: gleiche Kamera, nur breiter (gleiche Pixel pro Einheit)
+STAGE = (round(1120 * SCALE), round(640 * SCALE))          # Buehne: deckt das ganze Ausgabebild (oben/unten je 40 px mehr)
 DESK_Z, HEAD_Z = 0.85, 2.45      # Pultkante und Kopfmitte (Blender-Einheiten) -> Bot skaliert danach
 
 
@@ -55,7 +61,7 @@ def reset():
     sc.render.image_settings.file_format = "PNG"
     sc.render.image_settings.color_mode = "RGBA"
     try:
-        sc.eevee.taa_render_samples = 32
+        sc.eevee.taa_render_samples = SAMPLES
     except AttributeError:
         pass
     try:
@@ -327,6 +333,593 @@ def build():
         attach(c, J["hand_R"])
     return J, {"line": mouth_line, "smile": mouth_smile, "open": mouth_open, "tongue": mo_tongue,
                "finger": finger, "cup": cup}
+
+
+# ------------------------------------------------------------------ Baer v2 (Pluesch)
+# Ein weicher Koerper (Metaballs -> Mesh) statt Einzelteilen, per Armature an die Gelenk-Empties
+# gebunden (Copy Transforms) -> alle Clips bleiben gleich. Fell als Partikel-Haare, Gesicht mit
+# Augen/Glanzpunkt/Brauen/Baeckchen, Kopfhoerer auf dem Kopf, Ohren wackeln nach.
+from mathutils import Matrix, Quaternion  # noqa: E402
+
+MB_K = 0.575                 # Metaball (Steifheit 2): Oberflaeche bei 0.575 * Radius
+A_POSE = 1.0                 # Arme beim Modellieren seitlich abgespreizt (rad) -> saubere Gewichte
+FUR_LEN = 0.038
+FUR_KIDS = int(argv[argv.index("--fur-kids") + 1]) if "--fur-kids" in argv else 14
+SAMPLES = int(argv[argv.index("--samples") + 1]) if "--samples" in argv else 20
+
+
+def _smooth01(x):
+    x = max(0.0, min(1.0, x))
+    return x * x * (3 - 2 * x)
+
+
+def _rot_y(angle):
+    return Matrix.Rotation(angle, 4, "Y")
+
+
+def _seg_dist(p, a, b):
+    """(Abstand, Parameter 0..1) von Punkt p zur Strecke a-b."""
+    ab = b - a
+    t = max(0.0, min(1.0, (p - a).dot(ab) / max(1e-9, ab.length_squared)))
+    return (p - (a + ab * t)).length, t
+
+
+def _try(obj, attr, val):
+    try:
+        setattr(obj, attr, val)
+    except (AttributeError, TypeError):
+        print("skip", attr)
+
+
+def fur_material(name, root, tip, rough=0.55):
+    """Haar-Material: Wurzel dunkler, Spitzen heller, je Haar leicht anders."""
+    m = bpy.data.materials.new(name)
+    m.use_nodes = True
+    nt = m.node_tree
+    p = nt.nodes.get("Principled BSDF")
+    info = nt.nodes.new("ShaderNodeHairInfo")
+    ramp = nt.nodes.new("ShaderNodeValToRGB")
+    ramp.color_ramp.elements[0].color = srgb(root)
+    ramp.color_ramp.elements[1].color = srgb(tip)
+    nt.links.new(info.outputs["Intercept"], ramp.inputs["Fac"])
+    mix = nt.nodes.new("ShaderNodeMix")
+    mix.data_type = "RGBA"
+    mix.blend_type = "MULTIPLY"
+    nt.links.new(ramp.outputs["Color"], mix.inputs[6])
+    var = nt.nodes.new("ShaderNodeMapRange")
+    nt.links.new(info.outputs["Random"], var.inputs["Value"])
+    var.inputs["To Min"].default_value = 0.82
+    var.inputs["To Max"].default_value = 1.08
+    comb = nt.nodes.new("ShaderNodeCombineColor")
+    for i in range(3):
+        nt.links.new(var.outputs["Result"], comb.inputs[i])
+    nt.links.new(comb.outputs["Color"], mix.inputs[7])
+    mix.inputs["Factor"].default_value = 1.0
+    nt.links.new(mix.outputs[2], p.inputs["Base Color"])
+    p.inputs["Roughness"].default_value = rough
+    if "Sheen Weight" in p.inputs:
+        p.inputs["Sheen Weight"].default_value = 0.4
+    return m
+
+
+def skin_material(name, color, rough=0.6):
+    """Untergrund unter dem Fell / Samt: matt mit etwas Sheen (wirkt flauschig)."""
+    m = material(name, color, rough=rough, sss=0.08)
+    p = m.node_tree.nodes.get("Principled BSDF")
+    if "Sheen Weight" in p.inputs:
+        p.inputs["Sheen Weight"].default_value = 0.8
+        p.inputs["Sheen Roughness"].default_value = 0.4
+    return m
+
+
+def fabric_material(name, color):
+    """Baumwoll-Shirt: matt, feine Strick-Struktur, wenig Glanz."""
+    m = material(name, color, rough=0.92)
+    nt = m.node_tree
+    p = nt.nodes.get("Principled BSDF")
+    if "Sheen Weight" in p.inputs:
+        p.inputs["Sheen Weight"].default_value = 0.35
+        p.inputs["Sheen Roughness"].default_value = 0.5
+    if "Specular IOR Level" in p.inputs:
+        p.inputs["Specular IOR Level"].default_value = 0.25
+    tex = nt.nodes.new("ShaderNodeTexNoise")
+    tex.inputs["Scale"].default_value = 260.0
+    tex.inputs["Detail"].default_value = 2.0
+    bump = nt.nodes.new("ShaderNodeBump")
+    bump.inputs["Strength"].default_value = 0.25
+    bump.inputs["Distance"].default_value = 0.002
+    nt.links.new(tex.outputs["Fac"], bump.inputs["Height"])
+    nt.links.new(bump.outputs["Normal"], p.inputs["Normal"])
+    return m
+
+
+def add_fur(obj, mat, count, length, children=24, group=None, rough=0.012):
+    """Kurzes Pluesch-Fell als Partikel-Haar (folgt der Verformung)."""
+    obj.data.materials.append(mat)
+    slot = len(obj.data.materials)
+    mod = obj.modifiers.new("fur", "PARTICLE_SYSTEM")
+    ps = obj.particle_systems[mod.name] if mod.name in obj.particle_systems else obj.particle_systems[-1]
+    st = ps.settings
+    st.type = "HAIR"
+    st.count = count
+    st.emit_from = "FACE"
+    _try(st, 'use_emit_random', True)
+    _try(st, 'use_even_distribution', True)
+    st.material = slot
+    st.child_type = "INTERPOLATED"
+    _try(st, 'child_nbr', 2)
+    st.rendered_child_count = children
+    st.child_length = 1.0
+    _try(st, 'child_length_threshold', 0.25)
+    st.clump_factor = 0.28
+    st.roughness_1 = rough
+    st.roughness_1_size = 0.6
+    st.roughness_endpoint = rough * 0.8
+    _try(st, 'roughness_end_shape', 1.0)
+    st.root_radius = 1.0
+    st.tip_radius = 0.15
+    st.radius_scale = 0.006
+    st.display_step = 2
+    st.render_step = 2
+    _try(st, "length_random", 0.35)
+    _try(st, 'use_close_tip', True)
+    st.hair_length = length          # zuletzt: setzt intern die Normal-Geschwindigkeit
+    if group:
+        ps.vertex_group_density = group
+    ps.seed = 7
+    return ps
+
+
+def mb_body(name, elements, resolution=0.018):
+    """Metaball-Elemente -> ein Mesh. elements: (typ, co, radien|(halbe_laenge, dicke), rot_quat)."""
+    mb = bpy.data.metaballs.new(name)
+    mb.resolution = mb.render_resolution = resolution
+    mb.threshold = 0.6
+    o = bpy.data.objects.new(name + "_mb", mb)
+    bpy.context.collection.objects.link(o)
+    for typ, co, dims, rot in elements:
+        e = mb.elements.new()
+        e.type = typ
+        e.co = co
+        e.stiffness = 2.0
+        if typ == "BALL":
+            e.radius = dims / MB_K
+        elif typ == "ELLIPSOID":
+            e.radius = 1.0 / MB_K
+            e.size_x, e.size_y, e.size_z = dims
+        elif typ == "CAPSULE":
+            half, thick = dims
+            e.radius = thick / MB_K
+            e.size_x = half
+        if rot is not None:
+            e.rotation = rot
+    bpy.context.view_layer.update()
+    dg = bpy.context.evaluated_depsgraph_get()
+    me = bpy.data.meshes.new_from_object(o.evaluated_get(dg))
+    bpy.data.objects.remove(o)
+    obj = bpy.data.objects.new(name, me)
+    bpy.context.collection.objects.link(obj)
+    for poly in me.polygons:
+        poly.use_smooth = True
+    return obj
+
+
+def capsule_el(a, b, thick):
+    """Metaball-Kapsel zwischen zwei Punkten (Achse lokal X)."""
+    a, b = Vector(a), Vector(b)
+    d = b - a
+    rot = Vector((1, 0, 0)).rotation_difference(d.normalized())
+    return ("CAPSULE", (a + b) / 2, (d.length / 2, thick), rot)
+
+
+def surface_point(obj, x, z, inset=0.0, front=-1):
+    """Punkt auf der Vorderseite eines Objekts bei (x, z) per Raycast (Ruhe-Pose)."""
+    origin = Vector((x, front * 5.0, z))
+    ok, loc, normal, _ = obj.ray_cast(obj.matrix_world.inverted() @ origin, Vector((0, -front, 0)))
+    if not ok:
+        return Vector((x, -0.45, z)), Vector((0, -1, 0))
+    w = obj.matrix_world @ loc
+    n = (obj.matrix_world.to_3x3() @ normal).normalized()
+    return w + n * inset, n
+
+
+def place(o, loc, normal, spin=0.0):
+    """Objekt auf eine Flaeche setzen: lokales -Y zeigt entlang der Normalen."""
+    q = Vector((0, -1, 0)).rotation_difference(normal)
+    o.rotation_mode = "QUATERNION"
+    o.rotation_quaternion = q @ Quaternion((0, 1, 0), spin)
+    o.location = loc
+
+
+def build_v2():
+    shirt_col = "#18181B" if VARIANT == "qwen" else "#3B2A8C"
+    fur_skin = skin_material("fur_skin", "#C9782F", rough=0.7)
+    fur_hair = fur_material("fur_hair", "#9A5520", "#F2A954")
+    cream = skin_material("cream", "#F3D3A4", rough=0.65)
+    cream_hair = fur_material("cream_hair", "#D9AE78", "#FFF0D8")
+    ear_in = skin_material("ear_in", "#EBB98A", rough=0.7)
+    black = material("black", "#0B0A0C", rough=0.12, coat=0.8)
+    eye_m = material("eye", "#120C0A", rough=0.05, coat=1.0)
+    shine = material("shine", "#FFFFFF", rough=0.2, emit="#FFFFFF")
+    brow_m = skin_material("brow", "#6A3A16", rough=0.6)
+    blush = material("blush", "#FF7F8F", rough=0.7)
+    p_blush = blush.node_tree.nodes.get("Principled BSDF")
+    p_blush.inputs["Alpha"].default_value = 0.55
+    for attr, val in (("surface_render_method", "DITHERED"), ("blend_method", "HASHED")):
+        try:
+            setattr(blush, attr, val)
+        except (AttributeError, TypeError):
+            pass
+    shirt = fabric_material("shirt", shirt_col)
+    phone = material("phone", "#16161A", rough=0.28, metal=0.3, coat=0.6)
+    phone_pad = skin_material("phone_pad", "#2A2A30", rough=0.8)
+    phone_metal = material("phone_metal", "#8D8D99", rough=0.2, metal=0.95)
+    led = glow_material("phone_led", "#B44CFF", 9.0)
+    mouth_m = material("mouth_in", "#4A1014", rough=0.5)
+    tongue = material("tongue", "#E8747C", rough=0.45, sss=0.2)
+    cup_w = material("cup_white", "#F4F2EE", rough=0.4)
+    cup_band = material("cup_band", "#6248E6", rough=0.45)
+
+    J = {}
+    J["root"] = empty("root", (0, 0, 0))
+    J["hips"] = empty("hips", (0, 0, 0.62), J["root"])
+    J["chest"] = empty("chest", (0, 0, 0.95), J["hips"])
+    J["head"] = empty("head", (0, 0, 1.45), J["chest"])
+    joint_pos = {"root": Vector((0, 0, 0)), "hips": Vector((0, 0, 0.62)), "chest": Vector((0, 0, 0.95)),
+                 "head": Vector((0, 0, 1.45))}
+    for s, x in (("L", 1), ("R", -1)):
+        J["shoulder_" + s] = empty("shoulder_" + s, (0.44 * x, 0, 1.40), J["chest"])
+        J["elbow_" + s] = empty("elbow_" + s, (0.52 * x, 0, 1.02), J["shoulder_" + s])
+        J["hand_" + s] = empty("hand_" + s, (0.55 * x, 0, 0.72), J["elbow_" + s])
+        J["leg_" + s] = empty("leg_" + s, (0.2 * x, 0, 0.55), J["hips"])
+        J["ear_" + s] = empty("ear_" + s, (0.36 * x, 0.04, 2.24), J["head"])
+        for k in ("shoulder", "elbow", "hand", "leg", "ear"):
+            joint_pos[f"{k}_{s}"] = J[f"{k}_{s}"].location.copy()
+
+    # A-Pose fuer die Arme: um die Schulter seitlich hoch
+    def apose(s):
+        x = 1 if s == "L" else -1
+        piv = joint_pos["shoulder_" + s]
+        rot = _rot_y(-A_POSE * x)
+        return lambda v: piv + (rot @ (Vector(v) - piv).to_4d()).to_3d(), rot
+
+    # ---- Koerper (Metaballs, Arme in A-Pose)
+    els = [
+        ("ELLIPSOID", (0, 0.02, 1.20), (0.41, 0.33, 0.30), None),        # Brust
+        ("ELLIPSOID", (0, -0.03, 0.88), (0.45, 0.38, 0.33), None),       # Bauch
+        ("ELLIPSOID", (0, 0.02, 0.60), (0.40, 0.33, 0.22), None),        # Becken
+        ("BALL", (0, 0.0, 1.48), 0.25, None),                            # Hals
+        ("ELLIPSOID", (0, 0.03, 1.96), (0.53, 0.47, 0.47), None),        # Kopf
+        ("ELLIPSOID", (0.25, -0.17, 1.80), (0.21, 0.17, 0.16), None),    # Backen
+        ("ELLIPSOID", (-0.25, -0.17, 1.80), (0.21, 0.17, 0.16), None),
+    ]
+    chains = {}
+    for s, x in (("L", 1), ("R", -1)):
+        f, rot = apose(s)
+        sh, el, ha = joint_pos["shoulder_" + s], joint_pos["elbow_" + s], joint_pos["hand_" + s]
+        tip = ha + Vector((0.01 * x, -0.01, -0.17))
+        els.append(("BALL", f((0.41 * x, 0.0, 1.35)), 0.17, None))     # Schulter
+        els.append(capsule_el(f(sh + Vector((0.01 * x, 0, -0.06))), f(el), 0.15))
+        els.append(capsule_el(f(el), f(ha + Vector((0, 0, 0.04))), 0.145))
+        els.append(("ELLIPSOID", f(ha + Vector((0.005 * x, -0.015, -0.05))), (0.165, 0.16, 0.16),
+                    rot.to_quaternion()))
+        chains["arm_" + s] = [f(sh), f(el), f(ha), f(tip)]
+        lg = joint_pos["leg_" + s]
+        els.append(capsule_el(lg + Vector((0.01 * x, 0, -0.02)), lg + Vector((0.015 * x, 0, -0.38)), 0.175))
+        els.append(("ELLIPSOID", (0.22 * x, -0.08, 0.10), (0.17, 0.25, 0.11), None))
+        chains["leg_" + s] = [lg, lg + Vector((0.015 * x, 0, -0.42)), Vector((0.22 * x, -0.2, 0.08))]
+    body = mb_body("body", els)
+
+    # ---- Gewichte (in A-Pose eindeutig: Arme stehen ab)
+    groups = {n: body.vertex_groups.new(name=n) for n in
+              ("hips", "chest", "head") + tuple(f"{k}_{s}" for k in ("shoulder", "elbow", "hand", "leg")
+                                                  for s in "LR")}
+    P = 8.0
+    for v in body.data.vertices:
+        co = v.co
+        rad = math.hypot(co.x, co.y * 1.2)
+        s_t = max(0.05, rad / 0.45)
+        best = None
+        for cname, pts in chains.items():
+            r_l = 0.16 if cname.startswith("arm") else 0.18
+            dmin, seg, tpar = 1e9, 0, 0.0
+            for i in range(len(pts) - 1):
+                d, t = _seg_dist(co, pts[i], pts[i + 1])
+                if d < dmin:
+                    dmin, seg, tpar = d, i, t
+            s_l = max(0.05, dmin / r_l)
+            share = 1.0 / (1.0 + (s_l / s_t) ** P)
+            if best is None or share > best[0]:
+                best = (share, cname, seg, tpar, pts)
+        share, cname, seg, tpar, pts = best
+        if cname.startswith("leg") and co.z > 0.62:
+            share *= 1 - _smooth01((co.z - 0.62) / 0.1)
+        torso = 1.0 - share
+        w = {}
+        if share > 1e-3:
+            side = cname[-1]
+            if cname.startswith("arm"):
+                # entlang der Kette: Schulter -> Ellbogen -> Pfote, weich am Gelenk
+                lens = [(pts[i + 1] - pts[i]).length for i in range(3)]
+                u = sum(lens[:seg]) + lens[seg] * tpar
+                e1, e2 = lens[0], lens[0] + lens[1]
+                el_w = _smooth01((u - (e1 - 0.07)) / 0.14)
+                ha_w = _smooth01((u - (e2 - 0.04)) / 0.08)
+                w["shoulder_" + side] = share * (1 - el_w)
+                w["elbow_" + side] = share * (el_w - ha_w)
+                w["hand_" + side] = share * ha_w
+            else:
+                w["leg_" + side] = share
+        if torso > 1e-3:
+            z = co.z
+            head = 1.0 if z >= 1.62 else _smooth01((z - 1.40) / 0.2) * (1 - _smooth01((rad - 0.30) / 0.1))
+            hips = 1 - _smooth01((z - 0.80) / 0.2)
+            chest = max(0.0, 1 - head - hips)
+            for n, val in (("head", head), ("hips", hips), ("chest", chest)):
+                if val > 1e-3:
+                    w[n] = w.get(n, 0.0) + torso * val
+        tot = sum(w.values()) or 1.0
+        for n, val in w.items():
+            if val / tot > 1e-3:
+                groups[n].add([v.index], val / tot, "REPLACE")
+
+    # ---- Armature: Knochen in Bindepose (Arme in A-Pose), folgen den Empties (Copy Transforms)
+    arm_d = bpy.data.armatures.new("rig")
+    rig = bpy.data.objects.new("rig", arm_d)
+    bpy.context.collection.objects.link(rig)
+    bpy.context.view_layer.objects.active = rig
+    bpy.ops.object.mode_set(mode="EDIT")
+    for name in groups:
+        b = arm_d.edit_bones.new(name)
+        b.head, b.tail = (0, 0, 0), (0, 0.1, 0)
+        pos = joint_pos[name]
+        rot = Matrix.Identity(4)
+        side = name[-1]
+        if name.split("_")[0] in ("shoulder", "elbow", "hand"):
+            f, rot = apose(side)
+            pos = f(pos)
+        b.matrix = Matrix.Translation(pos) @ rot
+    bpy.ops.object.mode_set(mode="OBJECT")
+    for name in groups:
+        c = rig.pose.bones[name].constraints.new("COPY_TRANSFORMS")
+        c.target = J[name]
+        c.owner_space = c.target_space = "WORLD"
+    mod = body.modifiers.new("arm", "ARMATURE")
+    mod.object = rig
+    mod.use_deform_preserve_volume = True
+    body.data.materials.append(fur_skin)
+
+    # ---- Shirt: Kopie des Koerpers, sauber abgeschnitten (Saum, Kragen, kurze Aermel)
+    import bmesh
+    sh_me = body.data.copy()
+    bm = bmesh.new()
+    bm.from_mesh(sh_me)
+    cuts = [((0, 0, 0.60), (0, 0, -1)), ((0, 0, 1.53), (0, 0, 1))]
+    for s in "LR":
+        pts = chains["arm_" + s]
+        d = (pts[1] - pts[0]).normalized()
+        cuts.append((pts[0] + d * 0.17, d))
+    for co, no in cuts:
+        geom = bm.verts[:] + bm.edges[:] + bm.faces[:]
+        res = bmesh.ops.bisect_plane(bm, geom=geom, plane_co=co, plane_no=no, clear_outer=True)
+        del res
+    # nur der zusammenhaengende Rumpf-Teil (Beine/Pfoten-Reste weg)
+    bm.verts.ensure_lookup_table()
+    start = min(bm.verts, key=lambda v: (v.co - Vector((0, -0.4, 1.0))).length)
+    keep, todo = {start}, [start]
+    while todo:
+        v = todo.pop()
+        for e in v.link_edges:
+            o = e.other_vert(v)
+            if o not in keep:
+                keep.add(o)
+                todo.append(o)
+    bmesh.ops.delete(bm, geom=[v for v in bm.verts if v not in keep], context="VERTS")
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=0.004)
+    bmesh.ops.dissolve_degenerate(bm, edges=bm.edges[:], dist=0.004)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.to_mesh(sh_me)
+    bm.free()
+    sh_me.materials.clear()
+    sh_me.materials.append(shirt)
+    shirt_o = bpy.data.objects.new("shirt", sh_me)
+    bpy.context.collection.objects.link(shirt_o)
+    disp = shirt_o.modifiers.new("inflate", "DISPLACE")
+    disp.strength = 0.022
+    disp.mid_level = 0.0
+    sol = shirt_o.modifiers.new("thick", "SOLIDIFY")
+    sol.thickness = 0.014
+    sol.offset = -1
+    sol.use_rim = True
+    m2 = shirt_o.modifiers.new("arm", "ARMATURE")
+    m2.object = rig
+    m2.use_deform_preserve_volume = True
+    smooth(shirt_o)
+
+    # Fell nur wo kein Shirt ist (spart Haare)
+    furg = body.vertex_groups.new(name="fur")
+    furl = body.vertex_groups.new(name="furlen")
+    for v in body.data.vertices:
+        co = v.co
+        inside = 0.63 < co.z < 1.50
+        for s in "LR":
+            pts = chains["arm_" + s]
+            d = (pts[1] - pts[0]).normalized()
+            if (co - pts[0]).dot(d) > 0.15:
+                inside = False
+        furg.add([v.index], 0.0 if inside else 1.0, "REPLACE")
+        # Gesicht vorne: kuerzeres Fell, damit Augen/Brauen frei bleiben
+        e = math.hypot(co.x / 0.36, (co.z - 2.02) / 0.2)
+        front = _smooth01((-co.y - 0.12) / 0.15)
+        furl.add([v.index], 1.0 - 0.45 * front * (1 - _smooth01((e - 0.6) / 0.6)), "REPLACE")
+    ps = add_fur(body, fur_hair, count=8000, length=FUR_LEN, children=FUR_KIDS, group="fur")
+    ps.vertex_group_length = "furlen"
+
+    # Logo auf dem Shirt
+    logo_path = os.path.join(TEX, "logo_qwen.png" if VARIANT == "qwen" else "logo_note.png")
+    if os.path.exists(logo_path):
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=24, y_subdivisions=24, size=1,
+                                        location=(0.0, -0.45, 1.13), rotation=(math.pi / 2, 0, 0))
+        logo = bpy.context.active_object
+        logo.name = "logo"
+        logo.scale = (0.32, 0.36, 1)
+        logo.data.materials.append(image_material("logo", logo_path))
+        sw = logo.modifiers.new("wrap", "SHRINKWRAP")
+        sw.target, sw.offset = shirt_o, 0.004
+        attach(logo, J["chest"])
+
+    # ---- Gesicht (alles starr am Kopf)
+    face = []
+    muzzle = sphere("muzzle", (0, -0.37, 1.76), (0.205, 0.14, 0.155), cream, seg=64)
+    face.append(muzzle)
+    add_fur(muzzle, cream_hair, count=1500, length=0.018, children=16, rough=0.006)
+    bpy.context.view_layer.update()
+    nose_p, nose_n = surface_point(muzzle, 0, 1.86, 0.01)
+    nose = sphere("nose", (0, 0, 0), (0.078, 0.05, 0.052), black)
+    place(nose, nose_p, nose_n)
+    face.append(nose)
+    shine_n = sphere("nose_shine", (0, 0, 0), (0.018, 0.008, 0.01), shine)
+    place(shine_n, nose_p + nose_n * 0.045 + Vector((-0.02, 0, 0.02)), nose_n)
+    face.append(shine_n)
+    # Mund: Strich + Laecheln (zu) / offener Mund mit Zunge
+    mid = [surface_point(muzzle, 0, z, 0.003)[0] for z in (1.815, 1.79, 1.765)]
+    mouth_line = curve("mouth_line", mid, eye_m, 0.008)
+    smile = [surface_point(muzzle, x, 1.745 + 0.04 * (x / 0.08) ** 2, 0.003)[0]
+             for x in [(-0.085 + i * 0.017) for i in range(11)]]
+    mouth_smile = curve("mouth_smile", smile, eye_m, 0.008)
+    mo_p, mo_n = surface_point(muzzle, 0, 1.735, 0.0)
+    mouth_open = sphere("mouth_open", (0, 0, 0), (0.085, 0.035, 0.07), mouth_m)
+    place(mouth_open, mo_p, mo_n)
+    mo_tongue = sphere("mouth_tongue", (0, 0, 0), (0.055, 0.03, 0.03), tongue)
+    place(mo_tongue, mo_p + mo_n * 0.012 + Vector((0, 0, -0.03)), mo_n)
+    face += [mouth_line, mouth_smile, mouth_open, mo_tongue]
+
+    eyes, happy, brows = {}, {}, {}
+    for s, x in (("L", 1), ("R", -1)):
+        ep, en = surface_point(body, 0.2 * x, 1.99, 0.0)
+        eye = sphere("eye_" + s, (0, 0, 0), (0.072, 0.03, 0.085), eye_m, seg=48)
+        place(eye, ep + en * 0.012, en)
+        sh = sphere("eye_shine_" + s, (0, 0, 0), (0.022, 0.01, 0.024), shine)
+        place(sh, ep + en * 0.04 + Vector((0.022 * -x, 0, 0.032)), en)
+        attach(sh, eye)
+        eye["base_scale"] = list(eye.scale)
+        eye["shine"] = sh.name
+        eyes[s] = eye
+        arc = [surface_point(body, 0.2 * x + dx, 1.985 + 0.045 * (1 - (dx / 0.075) ** 2), 0.01)[0]
+               for dx in [(-0.075 + i * 0.015) for i in range(11)]]
+        happy[s] = curve("eye_happy_" + s, arc, eye_m, 0.014)
+        bp, bn = surface_point(body, 0.2 * x, 2.13, 0.012)
+        brow = capsule("brow_" + s, (0, 0, 0), (0.025, 0.016, 0.025), 0.07, brow_m)
+        place(brow, bp, bn, spin=math.radians(90))
+        brow.rotation_mode = "XYZ"
+        brows[s] = (brow, brow.location.copy(), brow.rotation_euler.copy())
+        cp, cn = surface_point(body, 0.33 * x, 1.85, 0.004)
+        bl = sphere("blush_" + s, (0, 0, 0), (0.075, 0.01, 0.045), blush)
+        place(bl, cp, cn)
+        face += [eye, happy[s], brow, bl]
+    for p in face:
+        attach(p, J["head"])
+
+    # ---- Ohren (eigene Empties: wackeln nach)
+    for s, x in (("L", 1), ("R", -1)):
+        ear = sphere("ear_" + s, (0.40 * x, 0.05, 2.33), (0.165, 0.085, 0.155), fur_skin)
+        ear.rotation_euler = (0, math.radians(-18 * x), 0)
+        add_fur(ear, fur_hair, count=700, length=FUR_LEN * 0.8, children=20)
+        inner = sphere("ear_in_" + s, (0.40 * x, -0.01, 2.32), (0.10, 0.04, 0.095), ear_in)
+        inner.rotation_euler = (0, math.radians(-18 * x), 0)
+        attach(ear, J["ear_" + s])
+        attach(inner, J["ear_" + s])
+
+    # ---- Kopfhoerer auf dem Kopf (Buegel hinter den Ohren, Muscheln seitlich, LED-Ring)
+    bpy.ops.mesh.primitive_torus_add(major_radius=0.575, minor_radius=0.038, location=(0, 0.16, 1.93),
+                                     rotation=(math.pi / 2, 0, 0), major_segments=96, minor_segments=16)
+    band = bpy.context.active_object
+    band.name = "phone_band"
+    bm = bmesh.new()
+    bm.from_mesh(band.data)
+    bmesh.ops.delete(bm, geom=[v for v in bm.verts if v.co.y < -0.12], context="VERTS")  # untere Haelfte weg
+    bm.to_mesh(band.data)
+    bm.free()
+    band.data.materials.append(phone)
+    smooth(band)
+    parts = [band]
+    for s, x in (("L", 1), ("R", -1)):
+        rot = (0, math.radians(90), 0)
+        cup = cylinder("phone_cup_" + s, (0.58 * x, 0.08, 1.90), 0.165, 0.12, phone, rot=rot, bevel=0.035)
+        pad = torus("phone_pad_" + s, (0.52 * x, 0.08, 1.90), 0.12, 0.04, phone_pad, rot=rot)
+        ring = torus("phone_led_" + s, (0.645 * x, 0.08, 1.90), 0.11, 0.014, led, rot=rot)
+        cap = cylinder("phone_cap_" + s, (0.648 * x, 0.08, 1.90), 0.085, 0.012, phone_metal, rot=rot,
+                       bevel=0.004)
+        yoke = cylinder("phone_yoke_" + s, (0.58 * x, 0.12, 2.10), 0.025, 0.16, phone_metal, bevel=0.005)
+        parts += [cup, pad, ring, cap, yoke]
+    for p in parts:
+        attach(p, J["head"])
+
+    # ---- Zeigefinger / Kaffeebecher (Extras)
+    finger = capsule("finger", (-0.57, -0.15, 0.66), (0.045, 0.045, 0.045), 0.09, fur_skin)
+    finger.rotation_euler = (math.radians(90), 0, 0)
+    attach(finger, J["hand_R"])
+    cup = []
+    cup.append(cylinder("cup", (-0.69, -0.14, 0.74), 0.1, 0.3, cup_w, bevel=0.01))
+    cup.append(cylinder("cup_band", (-0.69, -0.14, 0.72), 0.104, 0.15, cup_band, bevel=0.005))
+    cup.append(cylinder("cup_lid", (-0.69, -0.14, 0.90), 0.108, 0.05, black, bevel=0.015))
+    for c in cup:
+        attach(c, J["hand_R"])
+    return J, {"line": mouth_line, "smile": mouth_smile, "open": mouth_open, "tongue": mo_tongue,
+               "finger": finger, "cup": cup, "eyes": eyes, "happy": happy, "brows": brows,
+               "body": body}
+
+
+# Gesicht je Clip: Augen offen/froh, Brauen hoch (0..1), Blinzeln (Beat-Zeitpunkte)
+FACE_KIND = {"groove": ("open", 0.0, (2.55,)), "hype": ("happy", 0.4, ()), "special": ("open", 0.2, (1.3,)),
+             "talk": ("open", 0.25, (2.2,)), "shout": ("open", 0.8, ())}
+FACE_CLIP = {"heart": ("happy", 0.3, ()), "bow": ("happy", 0.0, ()), "stretch": ("happy", 0.5, ()),
+             "lookout": ("open", 0.7, ()), "coffee": ("open", 0.1, (0.7,)), "mix": ("open", 0.0, (1.55, 3.6)),
+             "sway": ("happy", 0.1, ()), "thumbsup": ("happy", 0.5, ()), "robot": ("open", 0.0, ()),
+             "disco": ("happy", 0.3, ()), "cue": ("open", 0.0, (3.1,)), "knobs": ("open", -0.2, (1.1,))}
+
+
+def set_face(M, name, kind, t):
+    """Augen/Brauen fuer Clip `name` zum Zeitpunkt t (Beats)."""
+    if "eyes" not in M:
+        return
+    eyes, brow, blinks = FACE_CLIP.get(name, FACE_KIND.get(kind, ("open", 0.0, ())))
+    blink = 0.0
+    for b in blinks:
+        d = abs(((t - b + 2) % 4) - 2)
+        if d < 0.18:
+            blink = max(blink, 1 - d / 0.18)
+    for s in "LR":
+        e = M["eyes"][s]
+        e.hide_render = eyes != "open"
+        bpy.data.objects[e["shine"]].hide_render = eyes != "open" or blink > 0.5
+        M["happy"][s].hide_render = eyes == "open"
+        bx, by, bz = e["base_scale"]
+        e.scale = (bx, by, bz * max(0.08, 1 - blink))
+        o, loc, rot = M["brows"][s]
+        o.location = loc + Vector((0, 0, 0.035 * brow - 0.02 * blink))
+        x = 1 if s == "L" else -1
+        o.rotation_euler = (rot.x, rot.y, rot.z)
+        o.rotation_euler.rotate_axis("Y", math.radians(-12 * brow * x))
+
+
+def secondary(fn, t, wrap=True):
+    """Nachschwingen: Ohren folgen Kopf-Nicken und Huepfen leicht verzoegert."""
+    def head_state(tt):
+        p = fn(tt % 4.0 if wrap else tt)
+        nod = p.get("head", (0, 0, 0))[0] + p.get("chest", (0, 0, 0))[0]
+        z = p.get("root_loc", (0, 0, 0))[2]
+        roll = p.get("head", (0, 0, 0))[1] + p.get("chest", (0, 0, 0))[1]
+        return nod, z, roll
+    lag, dt = 0.12, 0.06
+    n1, z1, r1 = head_state(t - lag)
+    n0, z0, r0 = head_state(t - lag - dt)
+    vn, vz, vr = (n1 - n0) / dt, (z1 - z0) / dt, (r1 - r0) / dt
+    out = {}
+    for s, x in (("L", 1), ("R", -1)):
+        out["ear_" + s] = (max(-0.5, min(0.5, -0.35 * vn + 0.9 * vz)),
+                           max(-0.5, min(0.5, -1.2 * vz * x - 0.3 * vr)), 0.0)
+    return out
 
 
 # ------------------------------------------------------------------ DJ-Pult
@@ -1101,18 +1694,68 @@ CLIPS = {
 def apply_pose(J, p):
     for name, e in J.items():
         e.rotation_euler = (0, 0, 0)
+    J["root"].scale = p.get("root_scale", (1, 1, 1))
     rest = getattr(apply_pose, "rest", None)
     if rest is None:
         apply_pose.rest = rest = {n: e.location.copy() for n, e in J.items()}
     for n, e in J.items():
         e.location = rest[n]
     for key, val in p.items():
+        if key == "root_scale":
+            continue
         if key == "root_loc":
             J["root"].location = rest["root"] + Vector(val)
         elif key == "root_rot":
             J["root"].rotation_euler = val
         elif key in J:
             J[key].rotation_euler = val
+
+
+def pose_full(M, name, kind, fn, t, wrap=True, face=None):
+    """Pose eines Clips plus Nachschwingen (Ohren), leichtes Stauchen auf dem Beat, Gesicht."""
+    p = fn(t)
+    if MODEL == 2:
+        p.update(secondary(fn, t, wrap))
+        k = 0.018 * onbeat(t) if kind not in ("talk", "shout") else 0.0
+        p["root_scale"] = (1 + k * 0.5, 1 + k * 0.5, 1 - k)
+        set_face(M, *(face or (name, kind)), t)
+    return p
+
+
+# --- Ein-/Ausstieg: jeder Clip kann in 1 Beat aus der Grundpose kommen bzw. in sie zurueck.
+# Der Bot plant Wechsel einen Beat vorher: alter Clip "@out", neuer "@in" -> kein Ueberblenden.
+def hub(t):
+    """Grundpose: Pfoten am Controller, leichtes Nicken."""
+    p = base(t, nod=0.1, bounce=0.03)
+    p["shoulder_L"] = (-0.85, -0.18, 0)
+    p["elbow_L"] = (-0.75, 0, 0)
+    p["shoulder_R"] = (-0.85, 0.15, 0)
+    p["elbow_R"] = (-0.8, 0, 0)
+    return p
+
+
+def _wrap_angle(a):
+    return (a + math.pi) % TAU - math.pi
+
+
+def blend_pose(a, b, w):
+    out = {}
+    for k in set(a) | set(b):
+        d = (1, 1, 1) if k == "root_scale" else (0, 0, 0)
+        va, vb = a.get(k, d), b.get(k, d)
+        if k == "root_rot":
+            va, vb = tuple(_wrap_angle(x) for x in va), tuple(_wrap_angle(x) for x in vb)
+        out[k] = tuple(x + (y - x) * w for x, y in zip(va, vb))
+    return out
+
+
+def edge_fn(fn, which):
+    if which == "in":
+        return lambda t: hub(t) if t < 0 else blend_pose(hub(t), fn(t), ss(t)) if t < 1 else fn(t)
+    return lambda t: blend_pose(fn(t), hub(t), ss(t - 3)) if t >= 3 else fn(t)
+
+
+EDGE_KINDS = ("groove", "hype", "special", "talk", "shout")   # Reden: sauber zurueck zum Tanzen
 
 
 def set_mouth(M, amount):
@@ -1130,13 +1773,16 @@ def set_extra(M, extra):
 
 
 def render_to(path):
+    import time
+    t0 = time.time()
     bpy.context.scene.render.filepath = path
     bpy.ops.render.render(write_still=True)
+    print(f"RT {time.time() - t0:.2f} {os.path.basename(os.path.dirname(path))}", flush=True)
 
 
 def main():
     reset()
-    J, M = build()
+    J, M = build_v2() if MODEL == 2 else build()
     D, regions = build_desk()
     lights_and_camera()
     os.makedirs(OUT, exist_ok=True)
@@ -1187,6 +1833,20 @@ def main():
             json.dump(info, fh, indent=1)
         print("DESK", json.dumps(info), flush=True)
         return
+    if FRAME:
+        for o in D:
+            try:
+                o.is_holdout = True
+            except AttributeError:
+                o.hide_render = True
+        for item in FRAME.split(","):
+            name, t = item.split(":")
+            fn, kind, mouth, extra = CLIPS[name]
+            set_extra(M, extra)
+            set_mouth(M, 1 if mouth else 0)
+            apply_pose(J, pose_full(M, name, kind, fn, float(t)))
+            render_to(os.path.join(OUT, f"frame_{name}_{t}.png"))
+        return
     if SHEET:
         sc.render.resolution_x, sc.render.resolution_y = PLATE
         sc.render.resolution_percentage = 50
@@ -1195,7 +1855,7 @@ def main():
             set_extra(M, extra)
             set_mouth(M, 1 if mouth else 0)
             for t in (0.0, 1.0, 2.0, 3.0):
-                apply_pose(J, fn(t))
+                apply_pose(J, pose_full(M, name, kind, fn, t))
                 render_to(os.path.join(OUT, f"sheet_{name}_{t:.0f}.png"))
         return
     if PREVIEW:
@@ -1208,7 +1868,7 @@ def main():
             fn, kind, mouth, extra = CLIPS[name]
             set_extra(M, extra)
             set_mouth(M, 1 if mouth else 0)
-            apply_pose(J, fn(t))
+            apply_pose(J, pose_full(M, name, kind, fn, t))
             render_to(os.path.join(OUT, f"preview_{name}.png"))
         return
     for o in D:                                   # Pult schneidet den Baeren aus, rendert selbst nicht
@@ -1229,15 +1889,31 @@ def main():
             continue
         set_extra(M, extra)
         variants = [("", 0), ("_open", 1)] if mouth == "both" else [("", mouth)]
-        for suffix, m in variants:
+        for suffix, m in ([] if EDGES_ONLY else variants):
             set_mouth(M, m)
             d = os.path.join(OUT, name + suffix)
             os.makedirs(d, exist_ok=True)
             for f in range(FPB * BEATS):
-                apply_pose(J, fn(f / FPB))
+                apply_pose(J, pose_full(M, name, kind, fn, f / FPB))
                 render_to(os.path.join(d, f"{f:03d}.png"))
             print("CLIP", name + suffix, flush=True)
-        manifest["clips"][name] = {"kind": kind, "talk": mouth == "both"}
+        entry = {"kind": kind, "talk": mouth == "both"}
+        if kind in EDGE_KINDS:
+            for which in ("in", "out"):
+                efn = edge_fn(fn, which)
+                d = os.path.join(OUT, f"{name}@{which}")
+                os.makedirs(d, exist_ok=True)
+                for f in range(FPB):
+                    t = f / FPB + (3 if which == "out" else 0)
+                    hubby = t < 0.5 if which == "in" else t >= 3.5     # Haelfte bei der Grundpose
+                    set_extra(M, None if hubby else extra)
+                    set_mouth(M, 0 if hubby or mouth == "both" else (1 if mouth else 0))
+                    face = ("_hub", "groove") if hubby else None
+                    apply_pose(J, pose_full(M, name, kind, efn, t, wrap=which == "out", face=face))
+                    render_to(os.path.join(d, f"{f:03d}.png"))
+                print("CLIP", f"{name}@{which}", flush=True)
+            entry["edges"] = True
+        manifest["clips"][name] = entry
     with open(os.path.join(OUT, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=1)
 

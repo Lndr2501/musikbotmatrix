@@ -160,16 +160,32 @@ Die LED-Wand hinter dem Bären zeigt einen Equalizer aus dem laufenden Audio.
 | `BAER_ASSETS` | eingebaut | Ordner mit eigenem Bär-Paket (z. B. `/data/baer-qwen`) |
 
 **Eigener Bär (3D):** Eingebaut ist ein einfacher Bär aus Einzelbildern. Ein
-richtig animiertes Paket entsteht mit Blender (z. B. auf einem Mac, ~1 s pro
-Bild, ~40 min für alle 32 Clips):
+richtig animiertes Paket entsteht mit Blender (z. B. auf einem Mac). Der Plüsch-Bär
+ist ein durchgehender, weicher Körper (Metaballs) mit Partikel-Fell, an dieselben
+Gelenke gebunden wie die Clips; Gesicht mit Glanzaugen, Brauen, Bäckchen, Blinzeln
+und Ausdruck je Move, Ohren schwingen nach, Kopfhörer auf dem Kopf. `--scale 1.5`
+rendert für 720p (~1,4 s pro Bild, ~75 min für alles):
 
 ```sh
-blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out clips [--clips mix,wave]
-blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out clips --desk   # DJ-Pult
-blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out clips --stage  # Bühne
-blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out sheet --sheet --clips dab,roof  # Posen-Vorschau
-python tools/baer3d/pack.py clips data/baer-paket      # PNG -> WebP, ~17 MB
+B="blender -b --factory-startup -P tools/baer3d/baer3d.py --"
+$B --out clips --scale 1.5 --desk                 # DJ-Pult
+$B --out clips --scale 1.5 --stage                # Bühne
+$B --out clips --scale 1.5 [--clips mix,wave]     # Clips (+ Ein-/Ausstiege)
+$B --out sheet --sheet --clips dab,roof           # Posen-Vorschau (schnell)
+$B --out frames --scale 1.5 --frame cheer:0.5     # ein Bild in voller Größe
+$B --out clips --scale 1.5 --clips talk --edges-only  # nur Ein-/Ausstiege
+python tools/baer3d/pack.py clips data/baer-paket # PNG -> WebP
 ```
+
+`--model 1` baut den alten Kugel-Bären, `--fur-kids` und `--samples` tauschen
+Qualität gegen Renderzeit.
+
+**Saubere Übergänge:** Jeder Move hat einen Ein- und einen Ausstieg (je 1 Beat)
+über eine gemeinsame Grundpose (Pfoten am Controller). Der Bot plant den Wechsel im
+letzten Beat: Der alte Move läuft in die Grundpose aus, der neue steigt dort ein. Es
+wird nicht mehr überblendet (keine halbdurchsichtigen Doppel-Arme). Spontane Wechsel:
+beim Drop ein harter Schnitt unter dem Blitz, beim Losreden eine kurze Überblendung
+(0,22 s). Zurück zum Tanzen geht es wieder über die Grundpose.
 
 Jeder Clip ist ein 4-Beat-Loop. Es gibt 32 Moves in fünf Sorten, die der Bot
 taktweise mischt (zuletzt gespielte werden gemieden). Welcher Move kommt, hängt vom
