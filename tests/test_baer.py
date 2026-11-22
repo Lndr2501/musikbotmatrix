@@ -714,11 +714,11 @@ def test_bpm_display_stays_calm():
     for i in range(24 * 20):
         now = i / 24
         shown.append(baer._shown_bpm(now, {"audible": True, "bpm": float(noisy[i % len(noisy)])}))
-    assert shown[24] == 0                                  # erste Sekunde: noch keine Zahl
-    assert set(shown[24 * 4:]) == {148}                    # danach eine ruhige Zahl
+    assert shown[24 * 5] == 0                              # erste Sekunden: noch keine Zahl
+    assert set(shown[24 * 7:]) == {148}                    # danach eine ruhige Zahl
     for i in range(24 * 20, 24 * 40):                      # Song wird wirklich schneller
         shown.append(baer._shown_bpm(i / 24, {"audible": True, "bpm": 174.0}))
-    assert shown[-1] == 174 and len(set(shown[24 * 4:])) <= 3
+    assert shown[-1] == 174 and len(set(shown[24 * 7:])) <= 3
 
 
 def test_tempo_between_block_steps():

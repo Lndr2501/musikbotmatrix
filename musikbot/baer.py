@@ -838,12 +838,13 @@ class BaerDJ:
             self._bpm_hist.append((now, st["bpm"]))
         while self._bpm_hist and now - self._bpm_hist[0][0] > 12.0:
             self._bpm_hist.popleft()
-        if len(self._bpm_hist) < 2 or self._bpm_hist[-1][0] - self._bpm_hist[0][0] < 3.0:
+        span = self._bpm_hist[-1][0] - self._bpm_hist[0][0] if self._bpm_hist else 0.0
+        if span < (3.0 if self._bpm_shown else 6.0):         # erste Zahl erst nach 6 s Messung
             return self._bpm_shown
         vals = sorted(b for _, b in self._bpm_hist)
         med = vals[len(vals) // 2]
         near = [b for b in vals if abs(b - med) <= 0.04 * med]
-        if len(near) < 0.6 * len(vals):                     # Intro/Wechsel: noch nicht einig
+        if len(near) < (0.6 if self._bpm_shown else 0.75) * len(vals):   # Intro/Wechsel: noch uneins
             return self._bpm_shown
         cand = round(sum(near) / len(near))
         if not self._bpm_shown or (abs(cand - self._bpm_shown) >= 3 and now - self._bpm_changed >= 4.0):

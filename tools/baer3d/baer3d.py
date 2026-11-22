@@ -64,6 +64,7 @@ def reset():
         sc.eevee.taa_render_samples = SAMPLES
     except AttributeError:
         pass
+    _try(sc.eevee, "shadow_pool_size", "1024")
     try:
         sc.view_settings.view_transform = "Standard"
         sc.view_settings.look = "None"
@@ -343,7 +344,8 @@ from mathutils import Matrix, Quaternion  # noqa: E402
 
 MB_K = 0.575                 # Metaball (Steifheit 2): Oberflaeche bei 0.575 * Radius
 A_POSE = 1.0                 # Arme beim Modellieren seitlich abgespreizt (rad) -> saubere Gewichte
-FUR_LEN = 0.038
+FUR_LEN = 0.034
+SHIRT_OUT = 0.028           # Shirt liegt so weit ueber der Haut (Fell sticht nicht durch)
 FUR_KIDS = int(argv[argv.index("--fur-kids") + 1]) if "--fur-kids" in argv else 14
 SAMPLES = int(argv[argv.index("--samples") + 1]) if "--samples" in argv else 20
 
@@ -433,8 +435,10 @@ def fabric_material(name, color):
     return m
 
 
-def add_fur(obj, mat, count, length, children=24, group=None, rough=0.012):
-    """Kurzes Pluesch-Fell als Partikel-Haar (folgt der Verformung)."""
+def add_fur(obj, mat, count, length, children=24, group=None, rough=0.012, clump=0.5, comb=0.45,
+            curl=0.003):
+    """Kurzes Pluesch-Fell als Partikel-Haar (folgt der Verformung). clump: Spitzen buescheln,
+    comb: nach unten gekaemmt (Anteil der Haarlaenge), curl: leichte Locke (Blender-Einheiten)."""
     obj.data.materials.append(mat)
     slot = len(obj.data.materials)
     mod = obj.modifiers.new("fur", "PARTICLE_SYSTEM")
@@ -451,19 +455,29 @@ def add_fur(obj, mat, count, length, children=24, group=None, rough=0.012):
     st.rendered_child_count = children
     st.child_length = 1.0
     _try(st, 'child_length_threshold', 0.25)
-    st.clump_factor = 0.28
+    st.clump_factor = clump
+    _try(st, "clump_shape", -0.35)
     st.roughness_1 = rough
     st.roughness_1_size = 0.6
     st.roughness_endpoint = rough * 0.8
     _try(st, 'roughness_end_shape', 1.0)
+    _try(st, "roughness_2", rough * 0.35)
+    _try(st, "roughness_2_size", 1.0)
+    if curl:
+        _try(st, "kink", "CURL")
+        _try(st, "kink_amplitude", curl)
+        _try(st, "kink_frequency", 2.0)
+        _try(st, "kink_shape", 0.0)
     st.root_radius = 1.0
-    st.tip_radius = 0.15
-    st.radius_scale = 0.006
+    st.tip_radius = 0.28
+    st.radius_scale = 0.0085
     st.display_step = 2
     st.render_step = 2
     _try(st, "length_random", 0.35)
     _try(st, 'use_close_tip', True)
     st.hair_length = length          # zuletzt: setzt intern die Normal-Geschwindigkeit
+    if comb:                         # Strich nach unten wie bei einem gebuersteten Teddy
+        _try(st, "object_align_factor", (0.0, 0.0, -comb * st.normal_factor))
     if group:
         ps.vertex_group_density = group
     ps.seed = 7
@@ -534,7 +548,7 @@ def place(o, loc, normal, spin=0.0):
 def build_v2():
     shirt_col = "#18181B" if VARIANT == "qwen" else "#3B2A8C"
     fur_skin = skin_material("fur_skin", "#C9782F", rough=0.7)
-    fur_hair = fur_material("fur_hair", "#9A5520", "#F2A954")
+    fur_hair = fur_material("fur_hair", "#8E4A18", "#E89A45")
     cream = skin_material("cream", "#F3D3A4", rough=0.65)
     cream_hair = fur_material("cream_hair", "#D9AE78", "#FFF0D8")
     ear_in = skin_material("ear_in", "#EBB98A", rough=0.7)
@@ -544,13 +558,26 @@ def build_v2():
     brow_m = skin_material("brow", "#6A3A16", rough=0.6)
     blush = material("blush", "#FF7F8F", rough=0.7)
     p_blush = blush.node_tree.nodes.get("Principled BSDF")
-    p_blush.inputs["Alpha"].default_value = 0.55
+    bnt = blush.node_tree
+    tco = bnt.nodes.new("ShaderNodeTexCoord")
+    vlen = bnt.nodes.new("ShaderNodeVectorMath")
+    vlen.operation = "LENGTH"
+    bnt.links.new(tco.outputs["Object"], vlen.inputs[0])
+    fall = bnt.nodes.new("ShaderNodeMapRange")
+    fall.inputs["From Min"].default_value = 0.25
+    fall.inputs["From Max"].default_value = 1.0
+    fall.inputs["To Min"].default_value = 0.5
+    fall.inputs["To Max"].default_value = 0.0
+    bnt.links.new(vlen.outputs["Value"], fall.inputs["Value"])
+    bnt.links.new(fall.outputs["Result"], p_blush.inputs["Alpha"])
     for attr, val in (("surface_render_method", "DITHERED"), ("blend_method", "HASHED")):
         try:
             setattr(blush, attr, val)
         except (AttributeError, TypeError):
             pass
     shirt = fabric_material("shirt", shirt_col)
+    rib = fabric_material("shirt_rib", shirt_col)
+    pad_m = skin_material("paw_pad", "#E6A98A", rough=0.5)
     phone = material("phone", "#16161A", rough=0.28, metal=0.3, coat=0.6)
     phone_pad = skin_material("phone_pad", "#2A2A30", rough=0.8)
     phone_metal = material("phone_metal", "#8D8D99", rough=0.2, metal=0.95)
@@ -725,7 +752,7 @@ def build_v2():
     shirt_o = bpy.data.objects.new("shirt", sh_me)
     bpy.context.collection.objects.link(shirt_o)
     disp = shirt_o.modifiers.new("inflate", "DISPLACE")
-    disp.strength = 0.022
+    disp.strength = SHIRT_OUT
     disp.mid_level = 0.0
     sol = shirt_o.modifiers.new("thick", "SOLIDIFY")
     sol.thickness = 0.014
@@ -735,6 +762,120 @@ def build_v2():
     m2.object = rig
     m2.use_deform_preserve_volume = True
     smooth(shirt_o)
+
+    # ---- Kragen, Aermelsaum, Pfotenballen: in A-Pose gebaut, Gewichte vom naechsten Koerperpunkt
+    from mathutils import kdtree
+    from mathutils.bvhtree import BVHTree
+    kd = kdtree.KDTree(len(body.data.vertices))
+    for v in body.data.vertices:
+        kd.insert(v.co, v.index)
+    kd.balance()
+    vw = [{body.vertex_groups[g.group].name: g.weight for g in v.groups} for v in body.data.vertices]
+    sh_bvh = BVHTree.FromPolygons([v.co.copy() for v in sh_me.vertices], [pl.vertices[:] for pl in sh_me.polygons])
+    body_bvh = BVHTree.FromPolygons([v.co.copy() for v in body.data.vertices],
+                                    [pl.vertices[:] for pl in body.data.polygons])
+
+    def bind(o):
+        bpy.context.view_layer.update()
+        o.data.transform(o.matrix_world)
+        o.matrix_world = Matrix.Identity(4)
+        for v in o.data.vertices:
+            _, idx, _ = kd.find(v.co)
+            for gname, w in vw[idx].items():
+                if w > 1e-3:
+                    vg = o.vertex_groups.get(gname) or o.vertex_groups.new(name=gname)
+                    vg.add([v.index], w, "REPLACE")
+        m = o.modifiers.new("arm", "ARMATURE")
+        m.object = rig
+        m.use_deform_preserve_volume = True
+
+    # Schnittkanten des Shirts als Schlaufen: Kragen (oben) und zwei Aermel
+    sh_me.calc_loop_triangles()
+    ecount = {}
+    for pl in sh_me.polygons:
+        for ek in pl.edge_keys:
+            ecount[ek] = ecount.get(ek, 0) + 1
+    nbr = {}
+    for (i, j), c in ecount.items():
+        if c == 1:
+            nbr.setdefault(i, []).append(j)
+            nbr.setdefault(j, []).append(i)
+    loops, seen = [], set()
+    for start in nbr:
+        if start in seen:
+            continue
+        loop, prev, cur = [start], None, start
+        seen.add(start)
+        while True:
+            nxt = [n for n in nbr[cur] if n != prev and n not in seen]
+            if not nxt:
+                break
+            prev, cur = cur, nxt[0]
+            seen.add(cur)
+            loop.append(cur)
+        if len(loop) > 12:
+            loops.append(loop)
+
+    def hem(name, loop, depth):
+        pts = [sh_me.vertices[i].co + sh_me.vertices[i].normal * (SHIRT_OUT * 0.8) for i in loop]
+        for _ in range(3):                                   # Treppen vom Schnitt glaetten
+            pts = [(pts[k - 1] + pts[k] * 2 + pts[(k + 1) % len(pts)]) / 4 for k in range(len(pts))]
+        cu = bpy.data.curves.new(name, "CURVE")
+        cu.dimensions = "3D"
+        cu.bevel_depth = depth
+        cu.bevel_resolution = 3
+        sp = cu.splines.new("POLY")
+        sp.points.add(len(pts) - 1)
+        for k, q in enumerate(pts):
+            sp.points[k].co = (q.x, q.y, q.z, 1)
+        sp.use_cyclic_u = True
+        o = bpy.data.objects.new(name, cu)
+        bpy.context.collection.objects.link(o)
+        bpy.ops.object.select_all(action="DESELECT")
+        bpy.context.view_layer.objects.active = o
+        o.select_set(True)
+        bpy.ops.object.convert(target="MESH")
+        o = bpy.context.active_object
+        o.data.materials.clear()
+        o.data.materials.append(rib)
+        smooth(o)
+        bind(o)
+        return o
+
+    for loop in loops:
+        zs = [sh_me.vertices[i].co.z for i in loop]
+        xm = sum(sh_me.vertices[i].co.x for i in loop) / len(loop)
+        if min(zs) > 1.45:
+            hem("collar", loop, 0.03)
+        elif abs(xm) > 0.3 and max(zs) > 1.0:
+            hem("sleeve_" + ("L" if xm > 0 else "R"), loop, 0.024)
+    print("HEMS", [(len(l_), round(min(sh_me.vertices[i].co.z for i in l_), 2)) for l_ in loops], flush=True)
+    # Pfotenballen + drei Zehenballen vorne auf der Pfote (sieht man beim Winken/Jubeln)
+    pad_spots = []
+    for s, x in (("L", 1), ("R", -1)):
+        f, rot = apose(s)
+        ha = joint_pos["hand_" + s]
+        hc = f(ha + Vector((0.005 * x, -0.015, -0.05)))
+        hit, nrm, _, _ = body_bvh.ray_cast(hc + Vector((0, -1.0, 0)), Vector((0, 1, 0)))
+        if hit is None:
+            continue
+        up = (chains["arm_" + s][3] - chains["arm_" + s][2]).normalized()
+        side = up.cross(nrm).normalized()
+        up = nrm.cross(side).normalized()
+        pad_spots.append(hit)
+        pad = sphere("paw_pad_" + s, (0, 0, 0), (0.07, 0.016, 0.058), pad_m, seg=32)
+        place(pad, hit + nrm * 0.014 - up * 0.012, nrm)
+        bind(pad)
+        PAWS.setdefault(s, []).append(pad)
+        for k, (ds, du) in enumerate(((-1, 0.0), (0, 0.012), (1, 0.0))):
+            q = hit + up * (0.072 + du) + side * (ds * 0.046)
+            loc, n2, _, _ = body_bvh.find_nearest(q)
+            if loc is None:
+                continue
+            bean = sphere(f"paw_bean_{s}{k}", (0, 0, 0), (0.024, 0.012, 0.022), pad_m, seg=24)
+            place(bean, loc + n2 * 0.013, n2)
+            bind(bean)
+            PAWS.setdefault(s, []).append(bean)
 
     # Fell nur wo kein Shirt ist (spart Haare)
     furg = body.vertex_groups.new(name="fur")
@@ -751,7 +892,9 @@ def build_v2():
         # Gesicht vorne: kuerzeres Fell, damit Augen/Brauen frei bleiben
         e = math.hypot(co.x / 0.36, (co.z - 2.02) / 0.2)
         front = _smooth01((-co.y - 0.12) / 0.15)
-        furl.add([v.index], 1.0 - 0.45 * front * (1 - _smooth01((e - 0.6) / 0.6)), "REPLACE")
+        paw = max((1 - _smooth01(((co - ps_).length - 0.12) / 0.1) for ps_ in pad_spots), default=0.0)
+        furl.add([v.index], (1.0 - 0.45 * front * (1 - _smooth01((e - 0.6) / 0.6))) * (1 - 0.6 * paw),
+                 "REPLACE")
     ps = add_fur(body, fur_hair, count=8000, length=FUR_LEN, children=FUR_KIDS, group="fur")
     ps.vertex_group_length = "furlen"
 
@@ -772,7 +915,20 @@ def build_v2():
     face = []
     muzzle = sphere("muzzle", (0, -0.37, 1.76), (0.205, 0.14, 0.155), cream, seg=64)
     face.append(muzzle)
-    add_fur(muzzle, cream_hair, count=1500, length=0.018, children=16, rough=0.006)
+    bpy.context.view_layer.update()
+    mlen = muzzle.vertex_groups.new(name="mfur_len")
+    mw = muzzle.matrix_world
+    for v in muzzle.data.vertices:
+        w = mw @ v.co
+        # Mund/Nase frei: kurzes Fell in einem weichen Feld um Mundlinie und Nase
+        dx = max(0.0, abs(w.x) - 0.07)
+        dz = max(0.0, 1.70 - w.z, w.z - 1.86)
+        d = math.hypot(dx, dz)
+        front = _smooth01((-w.y - 0.42) / 0.06)
+        mlen.add([v.index], 1.0 - 0.8 * front * (1 - _smooth01(d / 0.035)), "REPLACE")
+    mps = add_fur(muzzle, cream_hair, count=1500, length=0.018, children=16, rough=0.006, comb=0.15,
+                  curl=0.0015)
+    mps.vertex_group_length = "mfur_len"
     bpy.context.view_layer.update()
     nose_p, nose_n = surface_point(muzzle, 0, 1.86, 0.01)
     nose = sphere("nose", (0, 0, 0), (0.078, 0.05, 0.052), black)
@@ -813,8 +969,8 @@ def build_v2():
         place(brow, bp, bn, spin=math.radians(90))
         brow.rotation_mode = "XYZ"
         brows[s] = (brow, brow.location.copy(), brow.rotation_euler.copy())
-        cp, cn = surface_point(body, 0.33 * x, 1.85, 0.004)
-        bl = sphere("blush_" + s, (0, 0, 0), (0.075, 0.01, 0.045), blush)
+        cp, cn = surface_point(body, 0.33 * x, 1.85, 0.017)
+        bl = sphere("blush_" + s, (0, 0, 0), (0.085, 0.006, 0.055), blush)
         place(bl, cp, cn)
         face += [eye, happy[s], brow, bl]
     for p in face:
@@ -824,7 +980,7 @@ def build_v2():
     for s, x in (("L", 1), ("R", -1)):
         ear = sphere("ear_" + s, (0.40 * x, 0.05, 2.33), (0.165, 0.085, 0.155), fur_skin)
         ear.rotation_euler = (0, math.radians(-18 * x), 0)
-        add_fur(ear, fur_hair, count=700, length=FUR_LEN * 0.8, children=20)
+        add_fur(ear, fur_hair, count=700, length=FUR_LEN * 0.8, children=20, comb=0.2)
         inner = sphere("ear_in_" + s, (0.40 * x, -0.01, 2.32), (0.10, 0.04, 0.095), ear_in)
         inner.rotation_euler = (0, math.radians(-18 * x), 0)
         attach(ear, J["ear_" + s])
@@ -874,9 +1030,11 @@ def build_v2():
 FACE_KIND = {"groove": ("open", 0.0, (2.55,)), "hype": ("happy", 0.4, ()), "special": ("open", 0.2, (1.3,)),
              "talk": ("open", 0.25, (2.2,)), "shout": ("open", 0.8, ())}
 FACE_CLIP = {"heart": ("happy", 0.3, ()), "bow": ("happy", 0.0, ()), "stretch": ("happy", 0.5, ()),
-             "lookout": ("open", 0.7, ()), "coffee": ("open", 0.1, (0.7,)), "mix": ("open", 0.0, (1.55, 3.6)),
-             "sway": ("happy", 0.1, ()), "thumbsup": ("happy", 0.5, ()), "robot": ("open", 0.0, ()),
-             "disco": ("happy", 0.3, ()), "cue": ("open", 0.0, (3.1,)), "knobs": ("open", -0.2, (1.1,))}
+             "lookout": ("wide", 0.7, ()), "coffee": ("open", 0.1, (0.7,)), "mix": ("open", 0.0, (1.55, 3.6)),
+             "sway": ("happy", 0.1, ()), "thumbsup": ("wink", 0.5, ()), "robot": ("open", 0.0, ()),
+             "disco": ("happy", 0.3, ()), "cue": ("focus", -0.25, (3.1,)), "knobs": ("focus", -0.35, (1.1,)),
+             "scratch": ("focus", -0.3, (2.3,)), "point": ("wink", 0.3, ()), "dab": ("happy", 0.2, ()),
+             "shimmy": ("happy", 0.2, ()), "airdrum": ("focus", 0.1, ()), "explain": ("open", 0.35, (1.7,))}
 
 
 def set_face(M, name, kind, t):
@@ -889,15 +1047,20 @@ def set_face(M, name, kind, t):
         d = abs(((t - b + 2) % 4) - 2)
         if d < 0.18:
             blink = max(blink, 1 - d / 0.18)
+    hop = {"hype": 0.35, "groove": 0.15}.get(kind, 0.0) * punch(t)
     for s in "LR":
+        mode = ("happy" if s == "L" else "open") if eyes == "wink" else eyes
+        is_open = mode in ("open", "focus", "wide")
         e = M["eyes"][s]
-        e.hide_render = eyes != "open"
-        bpy.data.objects[e["shine"]].hide_render = eyes != "open" or blink > 0.5
-        M["happy"][s].hide_render = eyes == "open"
+        e.hide_render = not is_open
+        bpy.data.objects[e["shine"]].hide_render = not is_open or blink > 0.5
+        M["happy"][s].hide_render = is_open
         bx, by, bz = e["base_scale"]
-        e.scale = (bx, by, bz * max(0.08, 1 - blink))
+        sq = 0.78 if mode == "focus" else 1.1 if mode == "wide" else 1.0
+        wd = 1.06 if mode == "wide" else 1.0
+        e.scale = (bx * wd, by, bz * sq * max(0.08, 1 - blink))
         o, loc, rot = M["brows"][s]
-        o.location = loc + Vector((0, 0, 0.035 * brow - 0.02 * blink))
+        o.location = loc + Vector((0, 0, 0.035 * (brow + hop) - 0.02 * blink))
         x = 1 if s == "L" else -1
         o.rotation_euler = (rot.x, rot.y, rot.z)
         o.rotation_euler.rotate_axis("Y", math.radians(-12 * brow * x))
@@ -1235,18 +1398,20 @@ def anchor_rows(res):
 
 
 def lights_and_camera():
-    def area(name, loc, energy, color, size, target=(0, 0, 1.4)):
+    def area(name, loc, energy, color, size, target=(0, 0, 1.4), shadow=True):
         d = bpy.data.lights.new(name, "AREA")
         d.energy, d.color, d.size = energy, color, size
+        d.use_shadow = shadow                # weiche Aufheller brauchen keinen Schatten (spart Speicher)
         o = bpy.data.objects.new(name, d)
         bpy.context.collection.objects.link(o)
         o.location = loc
         direction = Vector(target) - Vector(loc)
         o.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
-    area("key", (-2.6, -4.0, 4.0), 420, (1.0, 0.95, 0.88), 3.0)
-    area("fill", (3.2, -3.5, 1.8), 130, (0.9, 0.93, 1.0), 4.0)
-    area("rim_pink", (-2.8, 2.6, 3.2), 380, (1.0, 0.35, 0.85), 2.0)
-    area("rim_cyan", (2.8, 2.6, 2.8), 380, (0.3, 0.85, 1.0), 2.0)
+    area("key", (-2.6, -4.0, 4.0), 470, (1.0, 0.93, 0.84), 3.0)
+    area("fill", (3.2, -3.5, 1.8), 85, (0.88, 0.92, 1.0), 4.0, shadow=False)
+    area("rim_pink", (-2.6, 2.4, 3.4), 1100, (1.0, 0.35, 0.85), 1.6)
+    area("rim_cyan", (2.6, 2.4, 3.0), 1100, (0.3, 0.85, 1.0), 1.6)
+    area("top", (0, 0.8, 5.0), 60, (1.0, 0.96, 0.9), 2.0, target=(0, 0, 1.9), shadow=False)
     area("desk_top", (0, -2.2, 3.2), 160, (0.85, 0.8, 1.0), 3.0, target=(0, -0.8, 0.75))
     cam_d = bpy.data.cameras.new("cam")
     cam_d.lens = LENS
@@ -1281,12 +1446,22 @@ def arms_down(p, swing=0.0):
     p["elbow_R"] = (-0.15, 0, 0)
 
 
+def punch(t, attack=0.08):
+    """Beat-Akzent: schiesst kurz vor dem Beat hoch, klingt danach weich ab (1-Beat-Loop).
+    Wirkt knackiger als ein Sinus – der Koerper 'trifft' den Beat statt zu schweben."""
+    u = t % 1.0
+    if u > 1 - attack:
+        return ss((u - (1 - attack)) / attack)
+    return math.exp(-u / 0.3) * (1 - ss(u / (1 - attack)))
+
+
 def base(t, nod=0.1, bounce=0.03, sway=0.03):
     p = {}
-    p["root_loc"] = (0, 0, -bounce * onbeat(t))
-    p["hips"] = (0, sway * wave(t, 2), 0)
-    p["chest"] = (0.04 * onbeat(t), -sway * 0.8 * wave(t, 2), 0.04 * wave(t, 4))
-    p["head"] = (nod * onbeat(t, 1) - 0.02, 0.05 * wave(t, 2, 0.25), 0.05 * wave(t, 4, 0.1))
+    k = punch(t)
+    p["root_loc"] = (0, 0, -bounce * (0.3 * onbeat(t) + 0.7 * k))
+    p["hips"] = (0, sway * wave(t, 2), 0.025 * wave(t, 4, 0.1))
+    p["chest"] = (0.05 * k, -sway * 0.8 * wave(t, 2), 0.065 * wave(t, 4))
+    p["head"] = (nod * (0.35 * onbeat(t) + 0.65 * k) - 0.02, 0.07 * wave(t, 2, 0.25), 0.075 * wave(t, 4, 0.1))
     arms_down(p, 0.06 * wave(t, 2))
     return p
 
@@ -1691,6 +1866,27 @@ CLIPS = {
 }
 
 
+PAWS = {}          # Seite -> Ballen-Objekte (Pfotenballen + Zehen)
+
+
+def update_paws():
+    """Ballen nur zeigen, wenn die Handflaeche nicht nach oben zeigt (Pfoten auf dem Pult)."""
+    if not PAWS:
+        return
+    bpy.context.view_layer.update()
+    dg = bpy.context.evaluated_depsgraph_get()
+    for s, objs in PAWS.items():
+        ev = objs[0].evaluated_get(dg)
+        me = ev.data
+        n = Vector((0, 0, 0))
+        for pl in me.polygons:
+            n += pl.normal * pl.area
+        n = (ev.matrix_world.to_3x3() @ n).normalized()
+        hide = n.z > 0.12 or n.y > 0.35         # nach oben oder vom Betrachter weg
+        for o in objs:
+            o.hide_render = hide
+
+
 def apply_pose(J, p):
     for name, e in J.items():
         e.rotation_euler = (0, 0, 0)
@@ -1709,16 +1905,48 @@ def apply_pose(J, p):
             J["root"].rotation_euler = val
         elif key in J:
             J[key].rotation_euler = val
+    update_paws()
+
+
+# Mund bei Clips ohne Reden: laecheln, mitsingen (offen auf 1 und 3) oder einmal je Takt
+MOUTH_KIND = {"groove": "smile", "special": "smile", "hype": "sing"}
+MOUTH_CLIP = {"wave": "sing", "shimmy": "sing", "lowpump": "once", "sway": "once", "heart": "smile",
+              "thumbsup": "smile", "bow": "smile", "lookout": "smile", "coffee": "smile"}
+
+
+def mouth_at(name, kind, t):
+    mode = MOUTH_CLIP.get(name, MOUTH_KIND.get(kind, "smile"))
+    u = t % 4.0
+    if mode == "sing":
+        return 1 if (u % 2.0) < 0.55 else 0
+    if mode == "once":
+        return 1 if 2.0 <= u < 2.6 else 0
+    return 0
+
+
+def follow(fn, t, wrap):
+    """Overlap: der Kopf haengt der Rumpfbewegung kurz hinterher und holt dann auf."""
+    def at(tt):
+        return fn(tt % 4.0 if wrap else tt)
+    a, b = at(t), at(t - 0.14)
+    ca, cb = a.get("chest", (0, 0, 0)), b.get("chest", (0, 0, 0))
+    za, zb = a.get("root_loc", (0, 0, 0))[2], b.get("root_loc", (0, 0, 0))[2]
+    h = a.get("head", (0, 0, 0))
+    return (h[0] + 0.45 * (cb[0] - ca[0]) + 1.1 * (zb - za), h[1] + 0.45 * (cb[1] - ca[1]),
+            h[2] + 0.45 * (cb[2] - ca[2]))
 
 
 def pose_full(M, name, kind, fn, t, wrap=True, face=None):
-    """Pose eines Clips plus Nachschwingen (Ohren), leichtes Stauchen auf dem Beat, Gesicht."""
+    """Pose eines Clips plus Overlap (Kopf), Nachschwingen (Ohren), Stauchen auf dem Beat, Gesicht."""
     p = fn(t)
     if MODEL == 2:
+        p["head"] = follow(fn, t, wrap)
         p.update(secondary(fn, t, wrap))
-        k = 0.018 * onbeat(t) if kind not in ("talk", "shout") else 0.0
+        k = 0.022 * punch(t) if kind not in ("talk", "shout") else 0.0
         p["root_scale"] = (1 + k * 0.5, 1 + k * 0.5, 1 - k)
         set_face(M, *(face or (name, kind)), t)
+        if face is None and name in CLIPS and CLIPS[name][2] == 0:
+            set_mouth(M, mouth_at(name, kind, t))
     return p
 
 

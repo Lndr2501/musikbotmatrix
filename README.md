@@ -163,10 +163,14 @@ Die LED-Wand hinter dem Bären zeigt einen Equalizer aus dem laufenden Audio.
 
 **Eigener Bär (3D):** Eingebaut ist ein einfacher Bär aus Einzelbildern. Ein
 richtig animiertes Paket entsteht mit Blender (z. B. auf einem Mac). Der Plüsch-Bär
-ist ein durchgehender, weicher Körper (Metaballs) mit Partikel-Fell, an dieselben
-Gelenke gebunden wie die Clips; Gesicht mit Glanzaugen, Brauen, Bäckchen, Blinzeln
-und Ausdruck je Move, Ohren schwingen nach, Kopfhörer auf dem Kopf. `--scale 1.5`
-rendert für 720p (~1,4 s pro Bild, ~75 min für alles):
+ist ein durchgehender, weicher Körper (Metaballs) mit Partikel-Fell (gebüschelt, leicht
+gelockt, nach unten gekämmt), an dieselben Gelenke gebunden wie die Clips. T-Shirt mit
+Kragen und Ärmelsaum entlang der echten Schnittkanten, Pfotenballen (nur sichtbar, wenn
+die Handfläche zum Publikum zeigt), Kopfhörer, Gegenlicht in Pink/Cyan. Gesicht mit
+Glanzaugen, Brauen, weichen Bäckchen, Blinzeln, Zwinkern, konzentriertem und staunendem
+Blick, Mitsingen; der Kopf folgt dem Körper leicht verzögert, Ohren schwingen nach, der
+Beat-Akzent sitzt knackig auf der Eins. `--scale 1.5` rendert für 720p (~1,1 s pro Bild,
+~65 min für alles):
 
 ```sh
 B="blender -b --factory-startup -P tools/baer3d/baer3d.py --"
