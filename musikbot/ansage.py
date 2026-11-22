@@ -44,8 +44,9 @@ def text_for(title: str, artist: str = "") -> str:
 
 
 class Ansager:
-    def __init__(self, model_path: str) -> None:
+    def __init__(self, model_path: str, say_as: dict[str, str] | None = None) -> None:
         self.model_path = model_path
+        self.say_as = {k: v for k, v in (say_as or {}).items() if k and v}   # Schreibweise -> Aussprache
         self._voice = None
         self._lock = threading.Lock()
         self.available = bool(model_path) and os.path.exists(model_path)
@@ -64,6 +65,8 @@ class Ansager:
         mit kurzer Stille davor und danach. Blockiert – im Thread aufrufen."""
         if not self.available:
             return None
+        for written, spoken in self.say_as.items():
+            text = text.replace(written, spoken)
         try:
             with self._lock:
                 voice = self._load()

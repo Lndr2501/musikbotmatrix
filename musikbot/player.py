@@ -174,8 +174,9 @@ class Player:
         if cfg.baer_enabled:
             h = int(cfg.video_height) // 2 * 2
             self.baer = BaerDJ((h * 16 // 9) // 2 * 2, h, cfg.baer_assets or None)
-        self.ansager = Ansager(cfg.ansage_voice) if cfg.ansage_enabled else None
-        self.moderator = Moderator(cfg.moderation_tz)
+        self.ansager = Ansager(cfg.ansage_voice, {cfg.dj_name: cfg.dj_name_spoken}) \
+            if cfg.ansage_enabled else None
+        self.moderator = Moderator(cfg.moderation_tz, dj=cfg.dj_name)
         self._gen = 0                  # zaehlt hoch bei play/stop/skip: laufende Moderation bricht ab
         self._no_intro_key: str | None = None   # in der Pause schon angesagt
         self._speaking = False                  # Moderation laeuft (Baer rendert ohne Quelle)
@@ -466,7 +467,7 @@ class Player:
         self._last_speech = asyncio.get_running_loop().time()
         log.info("Zuruf: %s", text)
         if self.baer is not None:
-            self.baer.announce(self._wall_base + self._pos, voice, headline="DJ Bär:", title=text, artist="",
+            self.baer.announce(self._wall_base + self._pos, voice, headline=f"{self.cfg.dj_name}:", title=text, artist="",
                                kind="shout")
         return True
 
@@ -848,7 +849,7 @@ class Player:
             self._no_intro_key = key
         else:
             await self._speak(self.moderator.end(self._info(prev), song),
-                              "Danke fürs Zuhören!", "DJ Bär macht Pause", "")
+                              "Danke fürs Zuhören!", f"{self.cfg.dj_name} macht Pause", "")
 
     async def _speak(self, text: str, headline: str, title: str, artist: str) -> None:
         """Text sprechen, ohne Musik (direkt in den Hub, im Echtzeit-Takt)."""

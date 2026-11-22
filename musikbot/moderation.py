@@ -28,7 +28,7 @@ WAS_NO_ARTIST = [w for w in WAS if "{prev_artist}" not in w]
 SPRUCH = [
     "Ich hoffe, ihr habt alle was zu trinken. Ich hab meinen Kaffee.",
     "Kurzer Kaffee-Check: Becher ist noch halb voll.",
-    "Hier ist euer DJ Bär, und es ist {tageszeit}.",
+    "Hier ist euer {dj}, und es ist {tageszeit}.",
     "Wenn ihr Wünsche habt: Ausrufezeichen play, und los geht's.",
     "Grüße an alle im Call!",
     "Lautstärke passt? Sonst sagt Bescheid.",
@@ -66,8 +66,8 @@ JETZT = [
 JETZT_NO_ARTIST = [j for j in JETZT if "{next_artist}" not in j]
 
 START = [
-    "Hallo zusammen, hier ist DJ Bär! Wir starten mit {next}.",
-    "Guten {gruss}! DJ Bär am Pult. Los geht's mit {next}!",
+    "Hallo zusammen, hier ist {dj}! Wir starten mit {next}.",
+    "Guten {gruss}! {dj} am Pult. Los geht's mit {next}!",
     "Hey! Schön, dass ihr da seid. Zum Anfang: {next}.",
 ]
 
@@ -194,7 +194,7 @@ SONG_ARTIST = [
 ENDE = [
     "Das war {prev}. Und das war's erstmal von mir! Danke fürs Zuhören.",
     "{prev} war der letzte Titel. Danke, ihr wart super! Bis zum nächsten Mal.",
-    "Und das war {prev}. DJ Bär macht Pause. Tschüss!",
+    "Und das war {prev}. {dj} macht Pause. Tschüss!",
 ]
 
 
@@ -209,8 +209,10 @@ def who(requester: str) -> str:
 
 
 class Moderator:
-    def __init__(self, tz: str = "Europe/Zurich", rng: random.Random | None = None) -> None:
+    def __init__(self, tz: str = "Europe/Zurich", rng: random.Random | None = None,
+                 dj: str = "DJ Bär") -> None:
         self.rng = rng or random.Random()
+        self.dj = dj
         try:
             self.tz = ZoneInfo(tz)
         except Exception:  # noqa: BLE001
@@ -235,7 +237,7 @@ class Moderator:
         if 18 <= h:
             tageszeit = f"{tag}abend"
         return {"prev": prev[0], "prev_artist": prev[1], "next": nxt[0], "next_artist": nxt[1],
-                "tageszeit": tageszeit, "gruss": gruss, "nummer": self.count}
+                "tageszeit": tageszeit, "gruss": gruss, "nummer": self.count, "dj": self.dj}
 
     # ---------------------------------------------------------------- Texte
     def _recap(self, song: dict | None) -> list[str] | None:
@@ -295,7 +297,8 @@ class Moderator:
         energy = v.get("energy", 0.6)
         section = v.get("section", "groove")
         bpm = v.get("bpm") or 0.0
-        fill = {"{name}": name, "{bpm}": str(round(bpm)), "{title}": song[0], "{artist}": song[1]}
+        fill = {"{name}": name, "{bpm}": str(round(bpm)), "{title}": song[0], "{artist}": song[1],
+                "{dj}": self.dj}
 
         def say(pool: list[str]) -> str:
             text = self._pick(pool)

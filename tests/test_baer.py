@@ -189,7 +189,7 @@ def test_baer_announce_kind_reaches_director(tmp_path):
     baer = BaerDJ(256, 144, _pack(tmp_path, {"mix": {"kind": "groove"},
                                              "shout": {"kind": "shout", "talk": True}}))
     baer.render(0.0)
-    baer.announce(1.0, None, headline="DJ Bär:", title="Hey!", artist="", kind="shout")
+    baer.announce(1.0, None, headline="DJ Qwen:", title="Hey!", artist="", kind="shout")
     baer.render(1.2)
     assert baer.director.clip == "shout"
     baer.announce(3.0, None)                                          # ohne Talk-Clips: weiter grooven
@@ -636,7 +636,7 @@ def test_bubble_pops_and_drop_punches():
     baer.set_track("Voll", "suehnung")
     baer.render(0.0)
     base = baer.render(0.5).to_ndarray(format="rgb24")
-    baer.announce(1.0, None, headline="DJ Bär:", title="Lndr, du bist geil!", artist="", kind="shout")
+    baer.announce(1.0, None, headline="DJ Qwen:", title="Lndr, du bist geil!", artist="", kind="shout")
     early = baer.render(1.03).to_ndarray(format="rgb24")
     full = baer.render(1.4).to_ndarray(format="rgb24")
     box = (slice(20, 90), slice(15, 220))                           # oben links: dort sitzt die Blase
@@ -686,3 +686,20 @@ def test_drop_cuts_hard_and_talk_returns_through_edges(tmp_path):
     at = d.pending[1]
     d.update(at + 0.05, 6.0, st, talking=False)
     assert d.planned and d.prev is None and d.start == at              # sauber ueber die Grundpose
+
+
+def test_dj_name_shows_and_is_spoken_right():
+    """DJ-Name aus der Config: in Moderation und Zurufen; die Stimme bekommt die Aussprache."""
+    import random
+    from musikbot.ansage import Ansager
+    from musikbot.moderation import Moderator
+    m = Moderator(rng=random.Random(3), dj="DJ Qwen")
+    texts = [m.start(("Voll", "suehnung"), first=True) for _ in range(30)]
+    texts += [m.end(("Voll", "")) for _ in range(30)]
+    assert any("DJ Qwen" in t for t in texts) and not any("Bär" in t or "{" in t for t in texts)
+    a = Ansager("", {"DJ Qwen": "DJ Quenn", "": "x"})
+    assert a.say_as == {"DJ Qwen": "DJ Quenn"}
+    spoken = []
+    a.available, a._load = True, lambda: SimpleNamespace(synthesize=lambda t: spoken.append(t) or [])
+    a.synth("Hier ist DJ Qwen!")
+    assert spoken == ["Hier ist DJ Quenn!"]

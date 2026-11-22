@@ -90,6 +90,10 @@ class Config:
     # Zwischen zwei Titeln der Warteschlange: Musik aus, der Baer moderiert (statt Crossfade).
     moderation_enabled: bool = True
     moderation_tz: str = "Europe/Zurich"
+    # Name des DJs in Sprechblase und Moderation; `dj_name_spoken` = wie die Stimme ihn sagt
+    # (Piper liest z. B. "Qwen" als "Ku-wehn", "DJ Quenn" klingt wie "DJ Kwen").
+    dj_name: str = "DJ Bär"
+    dj_name_spoken: str = ""
     # Zurufe mitten im Song ("Lndr, du bist geil!"), im Schnitt alle `zuruf_every` Sekunden.
     zuruf_enabled: bool = True
     zuruf_every: float = 75.0
@@ -222,6 +226,8 @@ class Config:
             ansage_voice=_str("ANSAGE_VOICE", "/opt/piper/de_DE-thorsten-medium.onnx"),
             moderation_enabled=_bool("MODERATION_ENABLED", True),
             moderation_tz=_str("MODERATION_TZ", "Europe/Zurich"),
+            dj_name=_str("DJ_NAME", "DJ Bär"),
+            dj_name_spoken=_str("DJ_NAME_SPOKEN"),
             zuruf_enabled=_bool("ZURUF_ENABLED", True),
             zuruf_every=_float("ZURUF_EVERY", 75.0),
             baer_assets=_str("BAER_ASSETS"),

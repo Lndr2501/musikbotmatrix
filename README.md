@@ -154,6 +154,8 @@ Die LED-Wand hinter dem Bären zeigt einen Equalizer aus dem laufenden Audio.
 | `ANSAGE_ENABLED` | `true` | Ansagen/Moderation mit Stimme |
 | `MODERATION_ENABLED` | `true` | `false`: wieder Crossfade, nur kurze Ansage über dem Intro |
 | `MODERATION_TZ` | `Europe/Zurich` | für „Guten Abend“, „Freitagabend“ |
+| `DJ_NAME` | `DJ Bär` | Name in Sprechblase und Moderation |
+| `DJ_NAME_SPOKEN` | – | so spricht die Stimme den Namen (z. B. `DJ Quenn` für „DJ Kwen“) |
 | `BAER_OVER_VIDEO` | `true` | Bär auch bei Titeln mit eigenem Video (YouTube); `false` zeigt das Video |
 | `ZURUF_ENABLED` | `true` | Zurufe mitten im Song („Lndr, du bist geil!“, „Hände hoch!“, nach Drops) |
 | `ZURUF_EVERY` | `75` | Abstand der Zurufe im Schnitt (Sekunden, zufällig ±40 %) |

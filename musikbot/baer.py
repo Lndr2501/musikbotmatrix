@@ -854,7 +854,7 @@ class BaerDJ:
         layer = Image.new("RGBA", (bw + 8, bh + tail + 8), (0, 0, 0, 0))
         d = ImageDraw.Draw(layer, "RGBA")
         r = max(6, H // 28)
-        accent = hue if headline.startswith("DJ") else (180, 80, 255)
+        accent = hue if self._talk_kind == "shout" else (180, 80, 255)      # Zuruf: Songfarbe
         d.rounded_rectangle([5, 7, bw + 5, bh + 7], radius=r, fill=(0, 0, 0, 120))             # Schatten
         tip = (int(bw * .93), bh + tail)
         d.polygon([(int(bw * .72), bh - 2), (int(bw * .86), bh - 2), tip], fill=accent + (255,))
