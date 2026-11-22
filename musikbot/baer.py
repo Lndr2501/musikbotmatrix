@@ -66,6 +66,14 @@ def _font(size: int, bold: bool = True):
 
 
 # ---------------------------------------------------------------- Audio-Merkmale
+def _tempo(gaps: list[float]) -> float:
+    """BPM aus Kick-Abstaenden. Die Abstaende sind auf 20-ms-Bloecke gerastert (0,40 s = 150,
+    0,41 s = 146 BPM); der Mittelwert der Abstaende nahe am Median trifft das Tempo dazwischen."""
+    med = float(np.median(gaps))
+    near = [g for g in gaps if abs(g - med) <= 0.08 * med] or [med]   # zweigipflig: Median
+    return 60.0 / (sum(near) / len(near))
+
+
 class Beat:
     """Bass, Lautheit, Kicks und Tempo aus den ausgegebenen Audio-Bloecken.
 
@@ -152,7 +160,7 @@ class Beat:
             ks = list(self.kicks)
             gaps = [b - a for a, b in zip(ks, ks[1:]) if 0.28 <= b - a <= 0.9]
             if len(gaps) >= 6:
-                self._song_bpms.append(60.0 / float(np.median(gaps[-12:])))
+                self._song_bpms.append(_tempo(gaps[-12:]))
 
     def _section(self, now: float, drop_at: float | None) -> str:
         """drop | build | break | calm | groove – grob, aus Energie und Bass."""
@@ -206,7 +214,7 @@ class Beat:
             section = self._section(now, drops[-1] if drops else None)
             energy, low, bright = self._e_fast, self._low, self._bright
         gaps = [b - a for a, b in zip(kicks, kicks[1:]) if 0.28 <= b - a <= 0.9]
-        bpm = 60.0 / float(np.median(gaps[-12:])) if len(gaps) >= 6 else 0.0
+        bpm = _tempo(gaps[-12:]) if len(gaps) >= 6 else 0.0
         return {
             "bass": min(1.0, bass),
             "loud": min(1.0, rms * 4.0),
@@ -588,6 +596,9 @@ class BaerDJ:
         self._ready = False
         self._lock = threading.Lock()
         self._particles: list[list] = []
+        self._bpm_hist: deque[tuple[float, float]] = deque()   # (now, gemessen) fuer die Anzeige
+        self._bpm_shown = 0
+        self._bpm_changed = -1e9
         self._rng = random.Random(1)
         self.title = ""
         self.artist = ""
@@ -606,6 +617,8 @@ class BaerDJ:
     # ------------------------------------------------------------ Steuerung
     def set_track(self, title: str, artist: str, cover: "av.VideoFrame | None" = None) -> None:
         self.title, self.artist = title, artist
+        self._bpm_hist.clear()
+        self._bpm_shown = 0
         self._cover = None
         if cover is not None:
             try:
@@ -749,7 +762,7 @@ class BaerDJ:
                        fill=col + (int(14 + 40 * pulse * loud),))
         img.paste(glow, (0, 0), glow)
         if self._audience:
-            self._draw_audience(img, pos, loud)
+            self._draw_audience(img, pos, loud, now)
 
         desk = getattr(self.pack, "desk", None)
         if desk is not None:                                 # 3D-Pult unter dem Baeren
@@ -810,13 +823,40 @@ class BaerDJ:
         dcx, dcy = W * .015 + H * .018, (cy0 + cy1) / 2
         dr.ellipse([dcx - dot, dcy - dot, dcx + dot, dcy + dot], fill=(255, 255, 255, int(150 + 105 * pulse)))
         dr.text((W * .015 + H * .036, (cy0 + cy1) / 2), chip, font=f, fill=(255, 255, 255), anchor="lm")
-        bpm = self.clock.song_bpm
-        line = f"♪ {self.title}" + (f"  ·  {bpm:.0f} BPM" if bpm and st["audible"] else "")
+        bpm = self._shown_bpm(now, st)
+        line = f"♪ {self.title}" + (f"  ·  {bpm} BPM" if bpm and st["audible"] else "")
         tx = W * .015 + cw + W * .015
         dr.text((tx, (cy0 + cy1) / 2), _fit(dr, line, f, W - tx - W * .02), font=f,
                 fill=(235, 235, 245), anchor="lm")
         return img
 
+
+    def _shown_bpm(self, now: float, st: dict) -> int:
+        """Ruhige BPM-Anzeige: Median der letzten 12 s, erst nach 3 s Messung, springt nur bei
+        echter Aenderung (>= 3 BPM) und hoechstens alle 4 s."""
+        if st["audible"] and st["bpm"]:
+            self._bpm_hist.append((now, st["bpm"]))
+        while self._bpm_hist and now - self._bpm_hist[0][0] > 12.0:
+            self._bpm_hist.popleft()
+        if len(self._bpm_hist) < 2 or self._bpm_hist[-1][0] - self._bpm_hist[0][0] < 3.0:
+            return self._bpm_shown
+        vals = sorted(b for _, b in self._bpm_hist)
+        med = vals[len(vals) // 2]
+        near = [b for b in vals if abs(b - med) <= 0.04 * med]
+        if len(near) < 0.6 * len(vals):                     # Intro/Wechsel: noch nicht einig
+            return self._bpm_shown
+        cand = round(sum(near) / len(near))
+        if not self._bpm_shown or (abs(cand - self._bpm_shown) >= 3 and now - self._bpm_changed >= 4.0):
+            self._bpm_shown, self._bpm_changed = cand, now
+        return self._bpm_shown
+
+    def _bubble_vis(self, now: float) -> float:
+        """0..1: wie sehr die Sprechblase gerade steht (fuer Platz-Machen der Avatare)."""
+        headline, title, _ = self._bubble
+        if not (title or headline) or not self.talking(now):
+            return 0.0
+        k = max(0.0, min(1.0, (now - self._talk_from) / 0.25, (self._talk_until + 0.3 - now) / 0.3))
+        return k * k * (3 - 2 * k)
 
     def _draw_particles(self, img: Image.Image, now: float, hue: tuple) -> None:
         """Noten/Herzen bei Hype-Moves: steigen links und rechts neben dem Baeren auf
@@ -942,20 +982,29 @@ class BaerDJ:
                     dr.rectangle([cx - cell * 0.32, y + cell * 0.2, cx + cell * 0.32, y + cell * 0.8],
                                  fill=col + (int(150 + 90 * t),))
 
-    def _draw_audience(self, img, pos: float, loud: float) -> None:
-        """Teilnehmer als leuchtende Kreise; huepfen versetzt im Takt."""
+    def _draw_audience(self, img, pos: float, loud: float, now: float = 0.0) -> None:
+        """Teilnehmer als leuchtende Kreise; huepfen versetzt im Takt. Wer unter der Sprechblase
+        sitzt, tritt waehrenddessen zurueck (blendet fast aus) statt hervorzulugen."""
         W, H = self.w, self.h
         dr = ImageDraw.Draw(img, "RGBA")
+        vis = self._bubble_vis(now)
+        bub = (0, 0, W * .37, H * .34)                       # Sprechblase samt Spitze
         for i, (name, face) in enumerate(self._audience):
             sx, sy = AUDIENCE_SLOTS[i]
             hop = abs(math.sin(math.pi * (pos + i * 0.37)))   # jeder springt etwas anders
             d = face.width
             x = int(W * sx - d / 2)
             y = int(H * sy - d / 2 - H * 0.018 * (0.3 + 0.7 * loud) * hop)
+            k = 1.0
+            if vis > 0 and x < bub[2] and y < bub[3]:
+                k = 1 - 0.85 * vis
             col = HUES[(i + int(pos) // 4) % len(HUES)]
             g = max(2, d // 14)
-            dr.ellipse([x - 2 * g, y - 2 * g, x + d + 2 * g, y + d + 2 * g], fill=col + (40,))
-            dr.ellipse([x - g, y - g, x + d + g, y + d + g], fill=col + (200,))
+            dr.ellipse([x - 2 * g, y - 2 * g, x + d + 2 * g, y + d + 2 * g], fill=col + (int(40 * k),))
+            dr.ellipse([x - g, y - g, x + d + g, y + d + g], fill=col + (int(200 * k),))
+            if k < 1:
+                face = face.copy()
+                face.putalpha(face.getchannel("A").point(lambda a, k=k: int(a * k)))
             img.paste(face, (x, y), face)
 
     def _draw_desk(self, img, desk: dict, pos: float, bass: float, loud: float, pulse: float) -> None:

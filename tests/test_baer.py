@@ -703,3 +703,26 @@ def test_dj_name_shows_and_is_spoken_right():
     a.available, a._load = True, lambda: SimpleNamespace(synthesize=lambda t: spoken.append(t) or [])
     a.synth("Hier ist DJ Qwen!")
     assert spoken == ["Hier ist DJ Quenn!"]
+
+
+def test_bpm_display_stays_calm():
+    """BPM-Anzeige: erst nach ein paar Sekunden, dann ruhig – Ausreisser springen nicht durch."""
+    baer = BaerDJ(256, 144)
+    baer.set_track("Voll", "suehnung")
+    noisy = [146, 150, 147, 162, 148, 167, 149, 146, 151, 148]
+    shown = []
+    for i in range(24 * 20):
+        now = i / 24
+        shown.append(baer._shown_bpm(now, {"audible": True, "bpm": float(noisy[i % len(noisy)])}))
+    assert shown[24] == 0                                  # erste Sekunde: noch keine Zahl
+    assert set(shown[24 * 4:]) == {148}                    # danach eine ruhige Zahl
+    for i in range(24 * 20, 24 * 40):                      # Song wird wirklich schneller
+        shown.append(baer._shown_bpm(i / 24, {"audible": True, "bpm": 174.0}))
+    assert shown[-1] == 174 and len(set(shown[24 * 4:])) <= 3
+
+
+def test_tempo_between_block_steps():
+    """Kick-Abstaende im 20-ms-Raster: Tempo liegt zwischen den Rasterstufen; zweigipflig kein Absturz."""
+    from musikbot.baer import _tempo
+    assert abs(_tempo([0.40, 0.41] * 6) - 148.1) < 0.2
+    assert _tempo([0.3, 0.3, 0.3, 0.6, 0.6, 0.6]) > 0
