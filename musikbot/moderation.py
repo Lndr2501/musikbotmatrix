@@ -79,6 +79,43 @@ DIREKT = [
     "Alles klar, {next} kommt sofort.",
 ]
 
+# Zurufe mitten im Song (Musik wird kurz leiser)
+ZURUF_NAME = [
+    "{name}, du bist geil!",
+    "Shoutout an {name}!",
+    "{name}, ich seh dich tanzen!",
+    "Grüße gehen raus an {name}!",
+    "{name}, du hast einen super Musikgeschmack!",
+    "Hey {name}, alles klar bei dir?",
+    "Das hier ist für dich, {name}!",
+    "{name}, bester Mensch im Call!",
+    "{name}, hör auf zu arbeiten und tanz!",
+    "Wo ist {name}? Ah, da! Hände hoch!",
+    "{name}, ich hab dich lieb! Also, rein platonisch.",
+    "{name}, du siehst heute übrigens fantastisch aus!",
+    "Applaus für {name}!",
+]
+ZURUF = [
+    "Hände hoch!",
+    "Lauter!",
+    "Geht ab hier!",
+    "Ist das ein Brett oder was?",
+    "Ich liebe diesen Track!",
+    "Wer tanzt mit?",
+    "Jaaa, Leute!",
+    "Party im Call!",
+    "Kaffee hoch, wer mitfeiert!",
+    "Ich krieg Gänsefell!",
+    "Alle zusammen jetzt!",
+    "Was für eine Stimmung hier!",
+]
+DROP = [
+    "Wooo! Was für ein Drop!",
+    "Da ist der Drop!",
+    "Bäm! Genau so!",
+    "Jetzt geht's richtig los!",
+]
+
 ENDE = [
     "Das war {prev}. Und das war's erstmal von mir! Danke fürs Zuhören.",
     "{prev} war der letzte Titel. Danke, ihr wart super! Bis zum nächsten Mal.",
@@ -143,6 +180,14 @@ class Moderator:
         self.count += 1
         v = self._vars(nxt=nxt)
         return self._pick(START if first else DIREKT).format(**v)
+
+    def zuruf(self, names: list[str], drop: bool = False) -> str:
+        """Kurzer Zuruf mitten im Song; oft an jemanden aus dem Call."""
+        if drop:
+            return self._pick(DROP)
+        if names and self.rng.random() < 0.6:
+            return self._pick(ZURUF_NAME).replace("{name}", self.rng.choice(names))
+        return self._pick(ZURUF)
 
     def end(self, prev: tuple[str, str]) -> str:
         return self._pick(ENDE).format(**self._vars(prev=prev))

@@ -11,6 +11,10 @@ Alles laeuft auf der CPU.
 
 Bildpakete (``BAER_ASSETS``): Ordner mit ``manifest.json`` und je Clip einem Unterordner
 mit Bildern (webp/png, RGBA). Clips mit nur einem Bild (``"static": true``) wippen per Code.
+Optional ``desk/``: das DJ-Pult aus derselben Kamera, einmal gedimmt (``base``) und einmal
+voll leuchtend (``glow``). Der Bot legt es unter den Baeren (die Clips sind dort, wo das Pult
+vor ihm steht, schon ausgeschnitten) und blendet LED-Front, Kanten, Pegel und Jogwheels live
+zwischen beiden Bildern.
 """
 
 from __future__ import annotations
@@ -34,12 +38,21 @@ ASSETS = Path(__file__).with_name("baer_assets")
 SAMPLE_RATE = 48000
 FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
 HUES = ((255, 60, 200), (60, 220, 255), (255, 200, 40), (120, 255, 120))
+# Plaetze fuers Publikum (Mitte x, Mitte y als Anteil des Bilds), abwechselnd links/rechts;
+# frei von Baer, Sprechblase (oben links) und Titelbild (oben rechts)
+AUDIENCE_SLOTS = ((0.13, 0.47), (0.87, 0.47), (0.25, 0.33), (0.75, 0.33),
+                  (0.05, 0.31), (0.95, 0.31), (0.19, 0.62), (0.81, 0.62))
+AUDIENCE_R = 0.08            # Radius (Anteil der Bildhoehe)
 DESK_Y = 0.70             # Oberkante Pult (Anteil der Bildhoehe)
 HEAD_Y = 0.11             # Kopf-Oberkante des Baeren
+FLOOR_Y = 0.935           # Boden unter dem Pult (Pakete mit "anchors")
+HEAD_Y_3D = 0.10          # Kopf-Oberkante bei Paketen mit "anchors"
 XFADE = 0.3               # Ueberblendung zwischen Clips (s)
 MOUTH_OPEN = 0.3          # ab dieser Lautheit der Stimme ist der Mund offen
 HALF_TIME_ABOVE = 135.0   # schnellere Songs: Baer tanzt halbes Tempo (sieht natuerlicher aus)
 CACHE_FRAMES = 96
+# FFT-Bins (1024 @ 48 kHz, ~47 Hz je Bin) -> 12 Baender von ~94 Hz bis ~7,7 kHz fuer die EQ-Wand
+BAND_EDGES = (2, 3, 4, 6, 9, 13, 19, 27, 39, 56, 80, 115, 165)
 
 
 def _font(size: int, bold: bool = True):
@@ -68,6 +81,7 @@ class Beat:
         self._short = 0.0
         self._long = 0.0
         self._window = np.hanning(1024).astype(np.float32)
+        self._band_peak = np.full(len(BAND_EDGES) - 1, 1e-3, np.float32)
 
     def feed(self, block: np.ndarray, at: float) -> None:
         mono = block.reshape(-1, 2).astype(np.float32).mean(1) / 32768.0
@@ -80,8 +94,11 @@ class Beat:
         bass = float(spec[1:4].sum())                          # ~47..190 Hz
         self._bass_peak = max(bass, self._bass_peak * 0.9995)  # langsam vergessen
         level = bass / (self._bass_peak + 1e-9)
+        bands = np.add.reduceat(spec[:BAND_EDGES[-1]], BAND_EDGES[:-1]).astype(np.float32)
+        self._band_peak = np.maximum(bands, self._band_peak * 0.9993)
+        bands = np.sqrt(np.clip(bands / (self._band_peak + 1e-9), 0.0, 1.0))
         with self._lock:
-            self.features.append((at, level, rms))
+            self.features.append((at, level, rms, bands))
             last = self.kicks[-1] if self.kicks else -1e9
             if level > 0.35 and level > 1.45 * self._bass_avg and at - last > 0.28:
                 self.kicks.append(at)
@@ -103,11 +120,12 @@ class Beat:
         """Was gerade zu hoeren ist: Bass, Lautheit, Kicks, gemessenes Tempo, Drop."""
         with self._lock:
             bass = rms = 0.0
+            bands = None
             heard = False
-            for at, b, r in reversed(self.features):
+            for at, b, r, bd in reversed(self.features):
                 if at <= now:
                     if now - at < 0.5:          # sonst: Pause/Stille
-                        bass, rms, heard = b, r, True
+                        bass, rms, heard, bands = b, r, True, bd
                     break
             kicks = [k for k in self.kicks if k <= now]
             drops = [d for d in self.drops if d <= now]
@@ -120,6 +138,7 @@ class Beat:
             "kicks": kicks,
             "bpm": bpm,
             "drop_at": drops[-1] if drops else None,
+            "bands": bands if bands is not None else np.zeros(len(BAND_EDGES) - 1, np.float32),
         }
 
 
@@ -191,14 +210,77 @@ class Pack:
         if self.static:                  # einzelne Posen: wie gehabt, Fuesse knapp unter dem Pult
             self.scale = height * float(m.get("height", 0.78)) / float(m.get("cell", 512))
             self.top_y = None
-        else:                            # Blender-Leinwand: Taille am Pult, Kopf oben
+        elif "anchors" in m:             # Bildzeilen von Boden und Kopf im Quellbild
+            a = m["anchors"]
+            self.scale = (FLOOR_Y - HEAD_Y_3D) * height / (a["floor"] - a["head"])
+            self.top_y = int(HEAD_Y_3D * height - a["head"] * self.scale)
+        else:                            # aeltere Pakete: Taille am Pult, Kopf oben
             u = m["units"]
             ppu = (DESK_Y - HEAD_Y) * height / (u["head"] - u["desk"])
             self.scale = (u["top"] - u["bottom"]) * ppu / src_h
             self.top_y = int(DESK_Y * height - (u["top"] - u["desk"]) * ppu)
         self.size = (max(1, int(src_w * self.scale)), max(1, int(src_h * self.scale)))
+        self.stage = None
+        if not self.static and m.get("stage"):
+            try:
+                self.stage = self._load_stage(path / "stage", m["stage"], width, height)
+            except Exception:  # noqa: BLE001
+                log.exception("Buehnenbild unbrauchbar – nehme den einfachen Hintergrund")
+        self.desk = None
+        if not self.static and m.get("desk"):
+            try:
+                self.desk = self._load_desk(path / "desk", m["desk"], width, height)
+            except Exception:  # noqa: BLE001
+                log.exception("Pult-Bilder unbrauchbar – zeichne das einfache Pult")
         self._cache: OrderedDict[tuple[str, int], Image.Image] = OrderedDict()
         self._lock = threading.Lock()
+
+    def _load_stage(self, d: Path, info: dict, width: int, height: int) -> dict | None:
+        """Buehnenbild aufs Ausgabebild legen; EQ-Wand und Scheinwerfer in Ausgabe-Pixeln."""
+        f = next((d / f"bg.{ext}" for ext in ("webp", "jpg", "png") if (d / f"bg.{ext}").exists()), None)
+        if f is None:
+            return None
+        pw, ph = info["size"]
+        sw, sh = max(1, round(pw * self.scale)), max(1, round(ph * self.scale))
+        x0 = (width - sw) // 2
+        y0 = int(self.top_y - float(info.get("oy", 0)) * self.scale)
+        canvas = Image.new("RGB", (width, height), (8, 6, 14))
+        canvas.paste(Image.open(f).convert("RGB").resize((sw, sh), Image.LANCZOS), (x0, y0))
+        eq = info.get("regions", {}).get("eq")
+        if eq:
+            eq = (int(x0 + eq[0] * self.scale), int(y0 + eq[1] * self.scale),
+                  int(x0 + eq[2] * self.scale), int(y0 + eq[3] * self.scale))
+        spots = [(x0 + a * self.scale, y0 + b * self.scale) for a, b in info.get("spots", [])]
+        return {"bg": canvas, "eq": eq, "spots": [p for p in spots if -20 <= p[1] < height * 0.5]}
+
+    def _load_desk(self, d: Path, info: dict, width: int, height: int) -> dict | None:
+        """Pult-Bilder auf Ausgabegroesse bringen (gleiche Skala/Lage wie die Clips)."""
+        def find(key):
+            return next((d / f"{key}.{ext}" for ext in ("webp", "png") if (d / f"{key}.{ext}").exists()), None)
+        files = {k: find(k) for k in ("base", "glow")}
+        if None in files.values():
+            return None
+        pw, ph = info["size"]
+        sw, sh = max(1, round(pw * self.scale)), max(1, round(ph * self.scale))
+        x0 = (width - sw) // 2
+        full = {}
+        for key, f in files.items():
+            img = Image.open(f).convert("RGBA").resize((sw, sh), Image.LANCZOS)
+            canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            canvas.paste(img, (x0, self.top_y))
+            full[key] = canvas
+        box = full["base"].getbbox()
+        if box is None:
+            return None
+        regions = {}
+        for name, (a, b, c, e) in info.get("regions", {}).items():
+            r = (max(0, int(x0 + a * self.scale)), max(0, int(self.top_y + b * self.scale)),
+                 min(width, int(math.ceil(x0 + c * self.scale))),
+                 min(height, int(math.ceil(self.top_y + e * self.scale))))
+            if r[2] > r[0] and r[3] > r[1]:
+                regions[name] = r
+        return {"box": box, "base": full["base"].crop(box), "base_full": full["base"],
+                "glow_full": full["glow"], "regions": regions}
 
     def names(self, kind: str) -> list[str]:
         return [n for n, k in self.kind.items() if k == kind]
@@ -319,6 +401,8 @@ class BaerDJ:
         self._voice_env: np.ndarray | None = None   # Lautheit der Ansage, 50 Werte/s
         self._bass = 0.0
         self._loud = 0.0
+        self._meters = [0.0] * 8
+        self._audience: list[tuple[str, Image.Image]] = []
         self._t = None
 
     # ------------------------------------------------------------ Steuerung
@@ -335,6 +419,19 @@ class BaerDJ:
                 self._cover = img.convert("RGB")
             except Exception:  # noqa: BLE001
                 log.debug("Titelbild fuer Baer unbrauchbar", exc_info=True)
+
+    def set_audience(self, faces: list) -> None:
+        """Call-Teilnehmer [(Name, runder Avatar|None)] -> fertige Kreise fuers Bild."""
+        d = max(8, int(self.h * AUDIENCE_R * 2))
+        ready = []
+        for i, (name, img) in enumerate(faces[:len(AUDIENCE_SLOTS)]):
+            if img is None:
+                img = _initials(name, d, HUES[i % len(HUES)])
+            else:
+                img = img.convert("RGBA").resize((d, d), Image.LANCZOS)
+            ready.append((name, img))
+        with self._lock:
+            self._audience = ready
 
     def announce(self, start: float, voice: np.ndarray | None, *, headline: str = "Jetzt kommt:",
                  title: str | None = None, artist: str | None = None, seconds: float = 4.0) -> None:
@@ -371,8 +468,12 @@ class BaerDJ:
             self.pack = Pack(ASSETS, W, H)
         log.info("Baer-Paket: %s (%d Clips)", self.assets, len(self.pack.kind))
         self.director = Director(self.pack, self._rng)
-        club = Image.open(ASSETS / "club.jpg").convert("RGB").resize((W, H), Image.LANCZOS)
-        self._bg = [ImageEnhance.Brightness(club).enhance(0.55 + 0.08 * i) for i in range(8)]
+        stage = getattr(self.pack, "stage", None)
+        if stage is not None:
+            self._bg = [ImageEnhance.Brightness(stage["bg"]).enhance(0.8 + 0.05 * i) for i in range(8)]
+        else:
+            club = Image.open(ASSETS / "club.jpg").convert("RGB").resize((W, H), Image.LANCZOS)
+            self._bg = [ImageEnhance.Brightness(club).enhance(0.55 + 0.08 * i) for i in range(8)]
         self._f_big = _font(max(12, H // 22))
         self._f_small = _font(max(9, H // 34))
         self._f_note = _font(max(12, H // 14), bold=False)
@@ -425,14 +526,26 @@ class BaerDJ:
         hue = HUES[(k // 4) % 4]
 
         img = self._bg[min(7, int(bass * 7.99))].copy()
+        stage = getattr(self.pack, "stage", None)
+        if stage is not None and stage["eq"]:
+            self._draw_eq(img, stage["eq"], st["bands"])
         glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         gd = ImageDraw.Draw(glow)
-        for i in range(4):
-            x = W * (0.15 + 0.23 * i) + math.sin(now * 0.9 + i) * W * 0.05
-            gd.polygon([(x, 0), (x - W * .12, H), (x + W * .12, H)],
-                       fill=hue + (int(24 + 55 * pulse * loud),))
+        spots = stage["spots"] if stage is not None and stage["spots"] else \
+            [(W * (0.15 + 0.23 * i), 0.0) for i in range(4)]
+        for i, (sx, sy) in enumerate(spots):
+            col = HUES[(i + k // 4) % len(HUES)] if stage is not None else hue
+            x = sx + math.sin(now * 0.7 + i * 1.3) * W * 0.12
+            wid = W * (0.07 + 0.03 * pulse)
+            gd.polygon([(sx - 3, sy), (sx + 3, sy), (x + wid, H), (x - wid, H)],
+                       fill=col + (int(14 + 40 * pulse * loud),))
         img.paste(glow, (0, 0), glow)
+        if self._audience:
+            self._draw_audience(img, pos, loud)
 
+        desk = getattr(self.pack, "desk", None)
+        if desk is not None:                                 # 3D-Pult unter dem Baeren
+            self._draw_desk(img, desk, pos, bass, loud, pulse)
         spr = self._bear(now, pos, talking)
         if self.pack.static:                                 # einzelne Posen: Wippen per Code
             amp = 0.25 + 0.75 * loud
@@ -445,22 +558,8 @@ class BaerDJ:
             img.paste(spr, ((W - spr.width) // 2, self.pack.top_y), spr)
 
         dr = ImageDraw.Draw(img, "RGBA")
-        top = int(H * DESK_Y)
-        dr.polygon([(W * .18, top), (W * .82, top), (W * .88, H), (W * .12, H)], fill=(22, 20, 34))
-        dr.rectangle([W * .18, top - H * .03, W * .82, top], fill=(48, 44, 70))
-        n = 16
-        lit = bass * n
-        for i in range(n):
-            x0 = W * .22 + i * (W * .56 / n)
-            on = max(0.0, min(1.0, lit - i))
-            c = tuple(int(40 + (hc - 40) * on) for hc in hue)
-            dr.rectangle([x0, top - H * .022, x0 + W * .56 / n * .7, top - H * .008], fill=c)
-        for j, cx in enumerate((W * .32, W * .68)):           # Plattenteller drehen im Takt
-            r, cy = H * .05, top + H * .05
-            dr.ellipse([cx - r, cy - r * .4, cx + r, cy + r * .4], fill=(10, 10, 14))
-            ang = pos * math.pi / 2 + j
-            dr.line([cx, cy, cx + r * math.cos(ang), cy + r * .4 * math.sin(ang)],
-                    fill=(230, 230, 240), width=max(1, H // 240))
+        if desk is None:
+            self._draw_simple_desk(dr, pos, bass, hue)
 
         if self.pack.kind.get(self.director.clip) == "hype" and self._rng.random() < 0.35:
             self._particles.append([W / 2 + self._rng.uniform(-W * .22, W * .22), H * .45,
@@ -492,8 +591,17 @@ class BaerDJ:
             inner = box[2] - box[0] - 2 * pad
             dr.text((box[0] + pad, box[1] + H * .025), _fit(dr, headline, self._f_small, inner),
                     font=self._f_small, fill=(90, 90, 110))
-            dr.text((box[0] + pad, box[1] + H * .07), _fit(dr, b_title, self._f_big, inner),
+            line1, line2 = b_title, b_artist
+            if not b_artist and dr.textlength(b_title, font=self._f_big) > inner:   # Zuruf: umbrechen
+                words, line1 = b_title.split(), ""
+                while words and dr.textlength((line1 + " " + words[0]).strip(), font=self._f_big) <= inner:
+                    line1 = (line1 + " " + words.pop(0)).strip()
+                line1, line2 = (line1 or b_title), " ".join(words)
+            dr.text((box[0] + pad, box[1] + H * .07), _fit(dr, line1, self._f_big, inner),
                     font=self._f_big, fill=(20, 20, 30))
+            if line2 and not b_artist:
+                dr.text((box[0] + pad, box[1] + H * .125), _fit(dr, line2, self._f_big, inner),
+                        font=self._f_big, fill=(20, 20, 30))
             if b_artist:
                 dr.text((box[0] + pad, box[1] + H * .135), _fit(dr, b_artist, self._f_small, inner),
                         font=self._f_small, fill=(60, 60, 80))
@@ -504,6 +612,122 @@ class BaerDJ:
         dr.text((W * .02, H * .948), _fit(dr, line, self._f_small, W * .96), font=self._f_small,
                 fill=(230, 230, 240))
         return img
+
+
+    def _draw_simple_desk(self, dr, pos: float, bass: float, hue) -> None:
+        """Einfaches Pult (Pakete ohne eigene Pult-Bilder)."""
+        W, H = self.w, self.h
+        top = int(H * DESK_Y)
+        dr.polygon([(W * .18, top), (W * .82, top), (W * .88, H), (W * .12, H)], fill=(22, 20, 34))
+        dr.rectangle([W * .18, top - H * .03, W * .82, top], fill=(48, 44, 70))
+        n = 16
+        lit = bass * n
+        for i in range(n):
+            x0 = W * .22 + i * (W * .56 / n)
+            on = max(0.0, min(1.0, lit - i))
+            c = tuple(int(40 + (hc - 40) * on) for hc in hue)
+            dr.rectangle([x0, top - H * .022, x0 + W * .56 / n * .7, top - H * .008], fill=c)
+        for j, cx in enumerate((W * .32, W * .68)):           # Plattenteller drehen im Takt
+            r, cy = H * .05, top + H * .05
+            dr.ellipse([cx - r, cy - r * .4, cx + r, cy + r * .4], fill=(10, 10, 14))
+            ang = pos * math.pi / 2 + j
+            dr.line([cx, cy, cx + r * math.cos(ang), cy + r * .4 * math.sin(ang)],
+                    fill=(230, 230, 240), width=max(1, H // 240))
+
+    def _draw_eq(self, img, box, bands) -> None:
+        """LED-Wand: Pegel je Frequenzband als Punktsaeulen, Bass innen am Baeren, Hoehen aussen."""
+        W, H = self.w, self.h
+        x0, y0, x1, y1 = box
+        n = len(bands)
+        if not hasattr(self, "_eq") or len(self._eq) != n:
+            self._eq = np.zeros(n, np.float32)
+        self._eq = np.maximum(bands, self._eq * 0.86)        # schnell hoch, weich runter
+        cell = max(3, H // 70)
+        rows = max(4, (y1 - y0) // cell)
+        dr = ImageDraw.Draw(img, "RGBA")
+        gap_l, gap_r = W * 0.36, W * 0.64                  # dort steht der Baer
+        for side, (a, b) in enumerate(((x0, min(gap_l, x1)), (max(gap_r, x0), x1))):
+            if b - a < cell * 2:
+                continue
+            cols = max(4, int((b - a) // (cell * 1.6)))
+            for c in range(cols):
+                f = c / max(1, cols - 1)
+                band = int(round((1 - f if side == 0 else f) * (n - 1)))
+                lit = int(self._eq[band] * rows)
+                cx = a + (b - a) * (c + 0.5) / cols
+                for r in range(lit):
+                    t = r / rows
+                    col = ((190, 70, 255) if side == 0 else (70, 140, 255))
+                    col = tuple(int(v + (255 - v) * t * 0.5) for v in col)
+                    y = y1 - (r + 1) * cell
+                    dr.rectangle([cx - cell * 0.32, y + cell * 0.2, cx + cell * 0.32, y + cell * 0.8],
+                                 fill=col + (int(150 + 90 * t),))
+
+    def _draw_audience(self, img, pos: float, loud: float) -> None:
+        """Teilnehmer als leuchtende Kreise; huepfen versetzt im Takt."""
+        W, H = self.w, self.h
+        dr = ImageDraw.Draw(img, "RGBA")
+        for i, (name, face) in enumerate(self._audience):
+            sx, sy = AUDIENCE_SLOTS[i]
+            hop = abs(math.sin(math.pi * (pos + i * 0.37)))   # jeder springt etwas anders
+            d = face.width
+            x = int(W * sx - d / 2)
+            y = int(H * sy - d / 2 - H * 0.018 * (0.3 + 0.7 * loud) * hop)
+            col = HUES[(i + int(pos) // 4) % len(HUES)]
+            g = max(2, d // 14)
+            dr.ellipse([x - 2 * g, y - 2 * g, x + d + 2 * g, y + d + 2 * g], fill=col + (40,))
+            dr.ellipse([x - g, y - g, x + d + g, y + d + g], fill=col + (200,))
+            img.paste(face, (x, y), face)
+
+    def _draw_desk(self, img, desk: dict, pos: float, bass: float, loud: float, pulse: float) -> None:
+        """Pult aus Blender: gedimmtes Bild, darueber Leuchtflaechen live hochgeblendet."""
+        base, glow_full, base_full, R = desk["base"], desk["glow_full"], desk["base_full"], desk["regions"]
+        img.paste(base, desk["box"][:2], base)
+
+        def glow(box, k):
+            if box is None or k <= 0.03:
+                return
+            part = Image.blend(base_full.crop(box), glow_full.crop(box), min(1.0, k))
+            img.paste(part, box[:2], part)
+
+        glow(R.get("edges"), 0.3 + 0.7 * pulse * (0.35 + 0.65 * loud))
+        glow(R.get("pads"), 0.35 + 0.65 * pulse)
+        glow(R.get("front"), 0.12 + 0.88 * bass)
+        for i in range(8):
+            box = R.get(f"meter_{i}")
+            if box is None:
+                break
+            target = min(1.0, bass * (0.75 + 0.1 * (i % 2)) + 0.35 * loud + self._rng.uniform(-0.08, 0.08))
+            self._meters[i] += (target - self._meters[i]) * 0.5
+            lit = max(0.0, self._meters[i])
+            x0, y0, x1, y1 = box
+            top = int(round(y1 - lit * (y1 - y0)))
+            if top < y1:
+                glow((x0, top, x1, y1), 1.0)
+        dr = ImageDraw.Draw(img, "RGBA")
+        for j, name in enumerate(("jog_L", "jog_R")):        # Jogwheels drehen im Takt
+            box = R.get(name)
+            if box is None:
+                continue
+            glow(box, 0.45 + 0.55 * loud)
+            cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            rx, ry = (box[2] - box[0]) / 2 * 0.62, (box[3] - box[1]) / 2 * 0.62
+            ang = pos * math.pi / 2 * (1 if j == 0 else -1) + j * math.pi
+            px, py = cx + rx * math.cos(ang), cy + ry * math.sin(ang)
+            r = max(1.5, self.h / 200)
+            dr.ellipse([px - r, py - r * 0.6, px + r, py + r * 0.6], fill=(235, 240, 255, 230))
+
+
+def _initials(name: str, d: int, col) -> Image.Image:
+    """Kreis mit Anfangsbuchstaben, wenn jemand kein Profilbild hat."""
+    img = Image.new("RGBA", (d, d), (0, 0, 0, 0))
+    dr = ImageDraw.Draw(img)
+    dr.ellipse([0, 0, d - 1, d - 1], fill=tuple(int(c * 0.55) for c in col) + (255,))
+    letter = (name.strip().lstrip("@")[:1] or "?").upper()
+    font = _font(int(d * 0.5))
+    w = dr.textlength(letter, font=font)
+    dr.text(((d - w) / 2, d * 0.18), letter, font=font, fill=(255, 255, 255))
+    return img
 
 
 def _fit(draw, text: str, font, width: float) -> str:

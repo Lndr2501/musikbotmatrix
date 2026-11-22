@@ -118,6 +118,34 @@ def test_frame_pack_loops_on_beat_and_lipsyncs(tmp_path):
     assert (frame.width, frame.height) == (256, 144)
 
 
+def test_desk_pack_glows_with_the_bass(tmp_path):
+    import json
+    from PIL import Image
+    assets = _pack(tmp_path, {"mix": {"kind": "groove"}})
+    m = json.loads((tmp_path / "manifest.json").read_text())
+    del m["units"]
+    m["anchors"] = {"floor": 130.0, "head": 10.0}
+    m["desk"] = {"size": [224, 140], "regions": {"front": [60, 100, 160, 130], "meter_0": [100, 80, 104, 95],
+                                                 "jog_L": [40, 80, 70, 90], "edges": [20, 90, 200, 135]}}
+    (tmp_path / "manifest.json").write_text(json.dumps(m))
+    (tmp_path / "desk").mkdir()
+    for key, val in (("base", 20), ("glow", 250)):
+        img = Image.new("RGBA", (224, 140), (0, 0, 0, 0))
+        img.paste(Image.new("RGBA", (200, 50), (val, val, val, 255)), (12, 88))
+        img.save(tmp_path / "desk" / f"{key}.png")
+    baer = BaerDJ(256, 144, assets)
+    baer.render(0.0)
+    desk = baer.pack.desk
+    assert desk is not None and set(desk["regions"]) == {"front", "meter_0", "jog_L", "edges"}
+    fx = (desk["regions"]["front"][0] + desk["regions"]["front"][2]) // 2
+    fy = (desk["regions"]["front"][1] + desk["regions"]["front"][3]) // 2
+    quiet = baer.render(0.5).to_ndarray()[fy, fx, 0]
+    for at, block in _kick_track(128, 3):
+        baer.beat.feed(block, at)
+    loud = max(int(baer.render(t).to_ndarray()[fy, fx, 0]) for t in (1.0, 1.5, 2.0, 2.5))
+    assert loud > quiet + 40                                   # LED-Front leuchtet mit dem Bass
+
+
 def test_director_jumps_to_hype_on_drop(tmp_path):
     assets = _pack(tmp_path, {"mix": {"kind": "groove"}, "cheer": {"kind": "hype"},
                               "jump": {"kind": "hype"}})
@@ -357,3 +385,84 @@ def test_moderation_replaces_crossfade():
     off = _player(moderation_enabled=False)
     off.ansager = _FakeAnsager()
     assert not off.moderation_on
+
+
+def test_publikum_avatars_and_identities():
+    import io
+    from PIL import Image
+    from musikbot.publikum import round_avatar, user_of
+    assert user_of("@lndr:matrix.tllx.eu:ABCDEF") == "@lndr:matrix.tllx.eu"
+    assert user_of("@lndr:matrix.tllx.eu") == "@lndr:matrix.tllx.eu"
+    buf = io.BytesIO()
+    Image.new("RGB", (300, 200), (200, 30, 90)).save(buf, "PNG")
+    av_img = round_avatar(buf.getvalue(), 64)
+    assert av_img.size == (64, 64) and av_img.getpixel((0, 0))[3] == 0 and av_img.getpixel((32, 32))[3] == 255
+    assert round_avatar(b"kein bild") is None
+
+
+def test_audience_drawn_in_background():
+    baer = BaerDJ(256, 144)
+    baer.render(0.0)
+    plain = baer.render(0.5).to_ndarray()
+    from PIL import Image
+    face = Image.new("RGBA", (40, 40), (0, 255, 0, 255))
+    baer.set_audience([("Luis", face), ("Lndr", None)])
+    with_faces = baer.render(1.0).to_ndarray()
+    x, y = int(256 * 0.13), int(144 * 0.47)
+    assert with_faces[y, x, 1] > 200 and plain[y, x, 1] < 200      # gruener Avatar links
+    baer.set_audience([])
+    assert baer._audience == []
+
+
+def test_beat_reports_frequency_bands():
+    b = Beat()
+    for at, block in _kick_track(120, 2):
+        b.feed(block, at)
+    bands = b.state(1.5)["bands"]
+    assert len(bands) == 12 and float(np.max(bands)) <= 1.0
+    assert b.state(10.0)["bands"].sum() == 0                    # Stille: alles aus
+
+
+def test_element_call_audience_order():
+    from musikbot.elementcall import ElementCall
+    ec = ElementCall.__new__(ElementCall)
+    ec.cfg = SimpleNamespace(matrix_user_id="@music:x", user="@music:x", device_id="BOT")
+    ec._lk = SimpleNamespace(remote_participants={
+        "a": SimpleNamespace(identity="@luis:x:D1"), "b": SimpleNamespace(identity="@lndr:x:D2"),
+        "c": SimpleNamespace(identity="@luis:x:D3")})
+    ec.members = {}
+    assert ec.audience("!r") == ["@luis:x", "@lndr:x", "@music:x"]
+
+
+def test_zuruf_names_people_in_call():
+    import random
+    from musikbot.moderation import DROP, Moderator
+    m = Moderator(rng=random.Random(3))
+    texts = [m.zuruf(["Lndr", "Luis"]) for _ in range(30)]
+    assert any("Lndr" in t or "Luis" in t for t in texts)
+    assert all("{" not in t for t in texts)
+    assert m.zuruf([], drop=True) in DROP
+    assert all("{name}" not in m.zuruf([]) for _ in range(10))
+
+
+def test_shout_over_running_song(tmp_path):
+    async def run():
+        p = _mod_player(tmp_path)
+        p.baer = BaerDJ(160, 90)
+        p.hub.new_sink()
+        p.set_audience([("Lndr", None), ("music", None)], ["Lndr"])
+        assert p._listeners == ["Lndr"]
+        await p.play(p.store.get("a"), "@lndr:x")
+        assert not p._zuruf_ok()                             # Titelanfang: nicht reinrufen
+        p._voice = None
+        p._pos = 30.0
+        p._source.duration = 120.0
+        assert p._zuruf_ok()
+        assert await p.shout("Lndr, du bist geil!")
+        assert p._voice is not None and p.baer._bubble[1] == "Lndr, du bist geil!"
+        assert not p._zuruf_ok()                             # waehrend er redet: kein zweiter Zuruf
+        p._voice = None
+        p._pos = 110.0
+        assert not p._zuruf_ok()                             # kurz vor Schluss: auch nicht
+        await p.shutdown()
+    asyncio.run(run())

@@ -143,6 +143,11 @@ den Titel über dem (leiser gedrehten) Intro an. Stimme: Piper
 nicht vorgelesen, „Interpret - Titel“ wird aufgeteilt. `!skip`/`!stop` brechen
 die Moderation sofort ab.
 
+**Zurufe und Publikum:** Mitten im Song ruft der Bär ab und zu etwas rein, oft an
+jemanden aus dem Call („Lndr, du bist geil!“), nach einem Drop „Wooo! Was für ein
+Drop!“. Wer im Call ist, schwebt als runder Avatar im Hintergrund und hüpft im Takt.
+Die LED-Wand hinter dem Bären zeigt einen Equalizer aus dem laufenden Audio.
+
 | Variable | Standard | |
 |---|---|---|
 | `BAER_ENABLED` | `true` | Bär statt Titelbild |
@@ -150,6 +155,8 @@ die Moderation sofort ab.
 | `MODERATION_ENABLED` | `true` | `false`: wieder Crossfade, nur kurze Ansage über dem Intro |
 | `MODERATION_TZ` | `Europe/Zurich` | für „Guten Abend“, „Freitagabend“ |
 | `BAER_OVER_VIDEO` | `true` | Bär auch bei Titeln mit eigenem Video (YouTube); `false` zeigt das Video |
+| `ZURUF_ENABLED` | `true` | Zurufe mitten im Song („Lndr, du bist geil!“, „Hände hoch!“, nach Drops) |
+| `ZURUF_EVERY` | `75` | Abstand der Zurufe im Schnitt (Sekunden, zufällig ±40 %) |
 | `BAER_ASSETS` | eingebaut | Ordner mit eigenem Bär-Paket (z. B. `/data/baer-qwen`) |
 
 **Eigener Bär (3D):** Eingebaut ist ein einfacher Bär aus Einzelbildern. Ein
@@ -158,8 +165,13 @@ Bild, ~15 min für alle Clips):
 
 ```sh
 blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out clips [--clips mix,wave]
-python tools/baer3d/pack.py clips data/baer-paket      # PNG -> WebP, ~16 MB
+blender -b --factory-startup -P tools/baer3d/baer3d.py -- --out clips --desk   # DJ-Pult
+python tools/baer3d/pack.py clips data/baer-paket      # PNG -> WebP, ~17 MB
 ```
+
+Das Pult (Booth mit LED-Front, Controller mit Jogwheels, Mixer und Pads) wird aus
+derselben Kamera gerendert, einmal gedimmt und einmal voll leuchtend. Der Bot blendet
+LED-Front, Kanten, Pegel und Jogwheels live im Takt zwischen beiden Bildern.
 
 Den Ordner nach `data/` legen (lesbar für UID 10000) und
 `BAER_ASSETS=/data/baer-paket` setzen. Ein kaputtes Paket fällt auf den

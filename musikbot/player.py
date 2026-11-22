@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import time
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Awaitable, Callable, Iterator, Optional
@@ -16,8 +18,6 @@ from typing import Awaitable, Callable, Iterator, Optional
 import numpy as np
 from aiortc import MediaStreamTrack
 from av import AudioFrame, VideoFrame
-
-import time
 
 from .ansage import Ansager, spoken_title, text_for
 from .baer import BaerDJ
@@ -183,6 +183,9 @@ class Player:
         self._voice: np.ndarray | None = None   # laufende Ansage (Bloecke wie im Mix)
         self._voice_i = 0
         self._baer_task: asyncio.Task | None = None
+        self._zuruf_task: asyncio.Task | None = None
+        self._listeners: list[str] = []          # Namen der Leute im Call (ohne Bot)
+        self._last_speech = 0.0
 
     # ------------------------------------------------------------ Peers (WebRTC)
     def add_peer_audio(self, peer) -> PeerAudioTrack:
@@ -210,6 +213,9 @@ class Player:
             self._mix_task = asyncio.create_task(self._mix(), name="mix-loop")
         if self.baer is not None and (self._baer_task is None or self._baer_task.done()):
             self._baer_task = asyncio.create_task(self._baer_loop(), name="baer")
+        if (self.ansager is not None and self.cfg.zuruf_enabled
+                and (self._zuruf_task is None or self._zuruf_task.done())):
+            self._zuruf_task = asyncio.create_task(self._zuruf_loop(), name="zuruf")
 
     async def _mix(self) -> None:
         loop = asyncio.get_running_loop()
@@ -401,6 +407,58 @@ class Player:
     def set_volume(self, value: int) -> int:
         self.volume = max(0, min(MAX_VOLUME, value))
         return self.volume
+
+    def set_audience(self, faces: list, listeners: list[str] | None = None) -> None:
+        """Call-Teilnehmer [(Name, Avatar|None)] fuer den Hintergrund des Baer-Bilds;
+        `listeners`: Namen, die der Baer zurufen darf (ohne ihn selbst)."""
+        self._listeners = list(listeners or [])
+        if self.baer is not None:
+            self.baer.set_audience(faces)
+
+    # ------------------------------------------------------------ Zurufe
+    def _zuruf_ok(self) -> bool:
+        """Darf der Baer jetzt reinrufen? Nur mitten in einem laufenden Song, ohne andere Ansage."""
+        if self.ansager is None or not self.ansager.available or self.state != "playing":
+            return False
+        if self._voice is not None or self._speaking or self.hub.count == 0:
+            return False
+        if self._source is None or self._pos < 20.0:
+            return False
+        dur = self._source.duration
+        return dur is None or dur - self._pos > 15.0
+
+    def _zuruf_gap(self) -> float:
+        return self.cfg.zuruf_every * random.uniform(0.6, 1.4)
+
+    async def _zuruf_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        next_at = loop.time() + self._zuruf_gap()
+        last_drop = None
+        while True:
+            await asyncio.sleep(0.5)
+            now = loop.time()
+            drop = False
+            if self.baer is not None:
+                d = self.baer.beat.state(now)["drop_at"]
+                if d is not None and d != last_drop:
+                    last_drop = d
+                    drop = now - d < 1.5 and now - self._last_speech > 20
+            if (drop or now >= next_at) and self._zuruf_ok():
+                await self.shout(self.moderator.zuruf(self._listeners, drop=drop))
+                next_at = loop.time() + self._zuruf_gap()
+
+    async def shout(self, text: str) -> bool:
+        """Zuruf ueber die laufende Musik legen (Musik kurz leiser, Baer redet)."""
+        key = self.current.key if self.current else None
+        voice = await asyncio.to_thread(self.ansager.synth, text) if self.ansager else None
+        if voice is None or not self._zuruf_ok() or self.current is None or self.current.key != key:
+            return False
+        self._voice, self._voice_i = voice, 0
+        self._last_speech = asyncio.get_running_loop().time()
+        log.info("Zuruf: %s", text)
+        if self.baer is not None:
+            self.baer.announce(self._wall_base + self._pos, voice, headline="DJ Bär:", title=text, artist="")
+        return True
 
     def set_video(self, enabled: bool | None = None) -> bool:
         """Video an/aus; beim Einschalten wird der Video-Decoder nachgezogen."""
@@ -886,10 +944,11 @@ class Player:
             self._mix_task.cancel()
             await asyncio.gather(self._mix_task, return_exceptions=True)
             self._mix_task = None
-        if self._baer_task is not None:
-            self._baer_task.cancel()
-            await asyncio.gather(self._baer_task, return_exceptions=True)
-            self._baer_task = None
+        for task in (self._baer_task, self._zuruf_task):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self._baer_task = self._zuruf_task = None
         self._discard_prepared()
         await self._teardown()
         self.store.release_all()

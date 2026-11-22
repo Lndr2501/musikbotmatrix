@@ -90,6 +90,9 @@ class Config:
     # Zwischen zwei Titeln der Warteschlange: Musik aus, der Baer moderiert (statt Crossfade).
     moderation_enabled: bool = True
     moderation_tz: str = "Europe/Zurich"
+    # Zurufe mitten im Song ("Lndr, du bist geil!"), im Schnitt alle `zuruf_every` Sekunden.
+    zuruf_enabled: bool = True
+    zuruf_every: float = 75.0
     # Eigenes Bildpaket fuer den Baeren (Ordner mit manifest.json); leer = eingebautes.
     baer_assets: str = ""
 
@@ -219,6 +222,8 @@ class Config:
             ansage_voice=_str("ANSAGE_VOICE", "/opt/piper/de_DE-thorsten-medium.onnx"),
             moderation_enabled=_bool("MODERATION_ENABLED", True),
             moderation_tz=_str("MODERATION_TZ", "Europe/Zurich"),
+            zuruf_enabled=_bool("ZURUF_ENABLED", True),
+            zuruf_every=_float("ZURUF_EVERY", 75.0),
             baer_assets=_str("BAER_ASSETS"),
             web_enabled=_bool("WEB_ENABLED", True),
             web_host=_str("WEB_HOST", "0.0.0.0"),
