@@ -43,6 +43,7 @@ class FakePlayer:
         self.said = []
         self.current = SimpleNamespace(key="k")
         self.speech_idle = 999.0
+        self.state = "playing"
 
     def _zuruf_ok(self):
         return self.ok
@@ -145,6 +146,44 @@ async def test_waits_while_dj_is_busy_and_drops_line_when_cameras_went_off():
         return "Max, hallo!"
     ki.chat = gone
     assert await b.look() is True
+    assert player.said == []
+
+
+async def test_manual_look_comments_even_unchanged_pictures_and_says_it():
+    b, ki, call, player = make([("@max:x:D1", "camera")], ["Max, hi!", "Max, schon wieder du!"])
+    assert await b.look()
+    assert await b.look_now() == ("said", "Max, schon wieder du!")     # gleiches Bild, trotzdem
+    assert player.said == ["Max, hi!", "Max, schon wieder du!"] and len(ki.seen) == 2
+    texts = " ".join(p["text"] for p in ki.seen[1][1]["content"] if p["type"] == "text")
+    assert "Deine letzten Sprüche (sag etwas anderes): Max, hi!" in texts
+
+
+async def test_manual_look_without_music_or_gap_goes_to_chat(monkeypatch):
+    import musikbot.blick as bl
+    b, ki, call, player = make([("@max:x:D1", "camera")], ["Max, hi!", "Max, Lampe an!"])
+    player.state = "paused"
+    assert await b.look_now() == ("text", "Max, hi!") and player.said == []
+    player.state, player.ok = "playing", False                       # Musik laeuft, aber Ansage/Songanfang
+    monkeypatch.setattr(bl, "SAY_WAIT", 0.1)
+    assert await b.look_now() == ("text", "Max, Lampe an!") and player.said == []
+
+
+async def test_manual_look_at_one_person_respects_opt_out():
+    vids = [("@max:x:D1", "camera"), ("@anna:x:D2", "screen")]
+    b, ki, call, player = make(vids, ["Anna, fleißig!"], allowed=lambda u: u != "@max:x")
+    assert await b.look_now(lambda i: i.startswith("@max")) == ("nobody", None)
+    assert await b.look_now(lambda i: i.startswith("@anna")) == ("said", "Anna, fleißig!")
+    assert call.shots == [("@anna:x:D2", "screen")]
+
+
+async def test_manual_look_reports_busy_nothing_and_missing_picture():
+    b, ki, call, player = make([("@max:x:D1", "camera")], [SKIP])
+    async with b._lock:
+        assert b.busy and await b.look_now() == ("busy", None)
+        assert await b.look()                                      # Schleife wartet einfach die naechste Runde ab
+    assert await b.look_now() == ("nothing", None)
+    call.img = None
+    assert await b.look_now() == ("noimage", None)
     assert player.said == []
 
 
@@ -255,7 +294,7 @@ async def test_everyone_can_opt_out_for_themselves_and_it_sticks(tmp_path):
     assert "für dich aus" in notes[-1]
     again, notes2 = _ki_bot(tmp_path, blick_enabled=True)                 # nach Neustart noch da
     assert not again._ki_allowed("@max:x")
-    await again._dispatch("!r:x", "@max:x", "blick", "")
+    await again._dispatch("!r:x", "@max:x", "blick", "status")
     assert "allgemein an, für dich aus" in notes2[-1]
     await again._dispatch("!r:x", "@max:x", "blick", "an")
     assert again._ki_allowed("@max:x")
@@ -274,3 +313,32 @@ async def test_off_by_default_and_join_tells_the_room_once(tmp_path):
     await asyncio.sleep(0.01)
     assert len(notes) == 1
     assert "Kameras" in notes[0] and "!blick aus" in notes[0] and "Nichts davon wird gespeichert" in notes[0]
+
+
+async def test_blick_command_looks_now_for_people_in_the_call(tmp_path):
+    from musikbot.commands import is_read_only
+    assert is_read_only("blick", "aus") and is_read_only("blick", "status")
+    assert not is_read_only("blick", "") and not is_read_only("blick", "mich")   # hinschauen: nur wer im Call ist
+    bot, notes = _ki_bot(tmp_path, blick_enabled=True)
+    await bot._dispatch("!r:x", "@max:x", "blick", "")
+    assert "keinem Call" in notes[-1]
+    bot.ecall.room_id = "!r:x"
+    seen = []
+
+    async def look_now(match=None):
+        seen.append(match)
+        return "text", "Max, schicke Lampe!"
+    bot.blick.look_now = look_now
+    await bot._dispatch("!r:x", "@Max:x", "blick", "mich")
+    await asyncio.gather(*list(bot._bg_tasks))
+    assert notes[-2].startswith("Moment") and notes[-1] == "DJ Qwen: Max, schicke Lampe!"
+    assert seen[0]("@max:x:DEV") and not seen[0]("@anna:x:DEV")
+    await bot._dispatch("!r:x", "@max:x", "blick", "anna")
+    await asyncio.gather(*list(bot._bg_tasks))
+    assert seen[1]("@anna:x:DEV") and not seen[1]("@max:x:DEV")
+    await bot._dispatch("!r:x", "@max:x", "blick", "")
+    await asyncio.gather(*list(bot._bg_tasks))
+    assert seen[2] is None
+    await bot._dispatch("!r:x", "@max:x", "blick", "aus")
+    await bot._dispatch("!r:x", "@max:x", "blick", "mich")
+    assert "erst !blick an" in notes[-1] and len(seen) == 3

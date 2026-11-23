@@ -78,7 +78,8 @@ unabhängig vom Ordnernamen.)
 | `!playlist add <name> [Link]` · `remove <name> <nr>` | Titel hinzufügen (ohne Link: laufender Titel) / entfernen |
 | `!playlist show <name>` · `list` | Inhalt / alle Playlists |
 | `!playlist play <name> [shuffle]` · `enqueue <name>` | abspielen (ersetzt Queue) / hinten anhängen |
-| `!blick an\|aus` | DJ kommentiert deine Kamera / deinen Bildschirm – nur für dich ab-/anschalten |
+| `!blick [mich\|Name]` | DJ schaut **jetzt** auf alle Kameras/Bildschirme (oder nur deine / die einer Person) und sagt was dazu |
+| `!blick an\|aus\|status` | Kamera-Sprüche nur für dich ab-/anschalten |
 | `!help` | Kommandoliste |
 
 **Wer darf steuern?** Nur Leute, die selbst im Call sind (Element Call oder
@@ -229,6 +230,10 @@ Der DJ kann im Element Call **hinschauen**. Das ist standardmäßig aus.
   Bildschirm 640 px, JPEG 55) und schickt alle in **einer** Anfrage ans Bildmodell. Er sucht
   sich das Interessanteste aus und ruft einen Spruch über die Musik („Max, du zockst ja schon
   wieder!“). Hat sich kein Bild verändert, sagt er nichts.
+- **Von Hand:** `!blick` schaut sofort hin (auch auf unveränderte Bilder), `!blick mich` nur auf
+  deine Kamera/deinen Bildschirm, `!blick max` nur auf Max. Darf jeder, der im Call ist. Läuft
+  gerade Musik, ruft er den Spruch darüber (wartet bis zu 20 s auf eine Lücke), sonst schreibt
+  er ihn in den Chat.
   Das Modell soll nie Aussehen/Körper bewerten und nichts Privates vom Bildschirm vorlesen.
 
 **Datenschutz:** Bilder werden nicht gespeichert; sie gehen nur an den konfigurierten

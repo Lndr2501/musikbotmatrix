@@ -21,7 +21,7 @@ import nio
 
 from . import cards
 from .calls import CallManager
-from .commands import HELP, LOOKUP, is_read_only, parse
+from .commands import BLICK_OFF, BLICK_ON, HELP, LOOKUP, is_read_only, parse
 from .blick import Blick
 from .elementcall import ElementCall
 from .ki import KI
@@ -1358,18 +1358,64 @@ class Bot:
         dj = self.cfg.dj_name
         label = "Blick (Kamera und Bildschirm kommentieren)"
         mode = arg.strip().lower()
-        if mode in ("aus", "off", "nein", "stop"):
+        if mode in BLICK_OFF:
             self._ki_set(sender, False)
             await self._note(room_id, f"{label}: für dich aus. {dj} lässt dich in Ruhe.", "info", "🙈")
-        elif mode in ("an", "on", "ja"):
+        elif mode in BLICK_ON:
             self._ki_set(sender, True)
             await self._note(room_id, f"{label}: für dich an." + ("" if self.blick is not None else
                              " (Auf diesem Bot ist es gerade allgemein ausgeschaltet.)"), "info", "🐻")
-        else:
+        elif mode in ("status", "?"):
             mine = "an" if self._ki_allowed(sender) else "aus"
             general = "an" if self.blick is not None else "aus (Admin)"
             await self._note(room_id, f"{label}: allgemein {general}, für dich {mine}. "
                              "!blick aus / !blick an", "info", "🐻")
+        else:
+            await self._blick_now(room_id, sender, mode)
+
+    async def _blick_now(self, room_id: str, sender: str, who: str) -> None:
+        """`!blick [mich|Name]`: jetzt hinschauen. Laeuft im Hintergrund (das Modell braucht etwas)."""
+        if self.blick is None:
+            await self._note(room_id, "Blick ist auf diesem Bot ausgeschaltet.", "warning", "🙈")
+            return
+        if self.ecall.room_id != room_id:
+            await self._note(room_id, "Ich bin hier in keinem Call – erst !joincall.", "warning", "📵")
+            return
+        if self.blick.busy:
+            await self._note(room_id, "Ich schau gerade schon hin …", "info", "👀")
+            return
+        match, whom = None, ""
+        if who in ("mich", "ich", "me", "selbst"):
+            if not self._ki_allowed(sender):
+                await self._note(room_id, "Blick ist für dich aus – erst !blick an.", "warning", "🙈")
+                return
+            match, whom = (lambda i: user_of(i).lower() == sender.lower()), "dir"
+        elif who not in ("", "jetzt", "alle", "now", "los"):
+            q = who.lstrip("@")
+            match = lambda i: q in self._call_name(i).lower() or q in user_of(i).lower()  # noqa: E731
+            whom = who
+        await self._note(room_id, "Moment, ich schau mal hin …", "info", "👀")
+        task = asyncio.create_task(self._blick_report(room_id, match, whom), name="blick-manuell")
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _blick_report(self, room_id: str, match, whom: str) -> None:
+        try:
+            result, text = await self.blick.look_now(match)
+        except Exception:  # noqa: BLE001
+            log.exception("Blick (manuell) fehlgeschlagen")
+            result, text = "nothing", None
+        msg = {
+            "busy": ("Ich schau gerade schon hin …", "👀"),
+            "nobody": ((f"Bei {whom} ist keine Kamera und kein Bildschirm an." if whom else
+                        "Keine Kamera und kein Bildschirm an.")
+                       + " (Wer !blick aus hat, wird nicht angeschaut.)", "🙈"),
+            "noimage": ("Ich hab kein Bild bekommen – versuch's gleich nochmal.", "📵"),
+            "nothing": ("Ich seh da nichts, wozu mir was einfällt.", "🤷"),
+            "text": (f"{self.cfg.dj_name}: {text}", "🐻"),
+        }.get(result)
+        if msg is not None:
+            await self._note(room_id, msg[0], "info", msg[1])
 
     def _load_fade_settings(self) -> None:
         for name in ("crossfade_seconds", "fade_in_seconds"):

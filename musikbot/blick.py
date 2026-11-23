@@ -1,7 +1,7 @@
 """Blick: der DJ schaut ab und zu auf alle Kameras und geteilten Bildschirme im Call
 und ruft einen kurzen Spruch dazu rein.
 
-Ablauf pro Blick: von allen Quellen gleichzeitig ein Standbild (`ElementCall.snapshot`, kurzes
+Von selbst alle paar Minuten, oder sofort per `!blick` (`look_now`). Ablauf: von allen Quellen gleichzeitig ein Standbild (`ElementCall.snapshot`, kurzes
 Abo), stark verkleinert und komprimiert, alle zusammen in EINER Anfrage ans Bildmodell -> ein
 Satz -> `Player.shout`. Das ist schneller als reihum (ein Aufruf statt vieler) und er sieht
 trotzdem alle. Bilder werden nicht gespeichert; pro Quelle bleibt nur ein 16x9-Graustufen-
@@ -31,6 +31,7 @@ SNAP_TIMEOUT = 8.0             # pro Standbild; alle laufen gleichzeitig
 SIDE = {"camera": 448, "screen": 640}
 QUALITY = 55
 SKIP = "-"                     # Antwort des Modells: nichts Sinnvolles zu sehen
+SAY_WAIT = 20.0                # manuell: so lange auf eine Luecke zum Reinrufen warten, sonst Chat
 
 KIND_LABEL = {"camera": "Kamerabild", "screen": "geteilter Bildschirm"}
 
@@ -75,6 +76,7 @@ class Blick:
         self._task: Optional[asyncio.Task] = None
         self._last_print: dict[tuple[str, str], np.ndarray] = {}   # Quelle -> Fingerabdruck
         self._lines: deque[str] = deque(maxlen=4)                  # letzte Sprueche
+        self._lock = asyncio.Lock()                                # ein Blick zur Zeit (Schleife/manuell)
 
     # ------------------------------------------------------------ Ablauf
     @property
@@ -113,12 +115,17 @@ class Blick:
             await asyncio.sleep(self._gap() if done else RETRY_S)
 
     # ------------------------------------------------------------ ein Blick
-    def candidates(self) -> list[tuple[str, str]]:
-        """Alle erlaubten Quellen, geteilte Bildschirme zuerst, hoechstens MAX_SOURCES."""
+    @property
+    def busy(self) -> bool:
+        return self._lock.locked()
+
+    def candidates(self, match: Optional[Callable[[str], bool]] = None) -> list[tuple[str, str]]:
+        """Alle erlaubten Quellen (optional nur die, auf deren Identity `match` passt),
+        geteilte Bildschirme zuerst, hoechstens MAX_SOURCES."""
         out = []
         for ident, kind in self.ecall.remote_videos():
             try:
-                if self.allowed(user_of(ident)):
+                if self.allowed(user_of(ident)) and (match is None or match(ident)):
                     out.append((ident, kind))
             except Exception:  # noqa: BLE001
                 continue
@@ -129,12 +136,21 @@ class Blick:
         """Ein Blick auf alle. False = Moment passt nicht (gleich nochmal versuchen), True = erledigt."""
         if not self.player._zuruf_ok() or self.player.speech_idle < 25:
             return False
+        if self.busy:                                    # gerade manuell geschaut
+            return True
+        async with self._lock:
+            return await self._look_auto()
+
+    async def _snap(self, cands: list) -> list:
+        shots = await asyncio.gather(*(self.ecall.snapshot(i, k, timeout=SNAP_TIMEOUT) for i, k in cands),
+                                     return_exceptions=True)
+        return [(c, img) for c, img in zip(cands, shots) if img is not None and not isinstance(img, BaseException)]
+
+    async def _look_auto(self) -> bool:
         cands = self.candidates()
         if not cands:
             return True
-        shots = await asyncio.gather(*(self.ecall.snapshot(i, k, timeout=SNAP_TIMEOUT) for i, k in cands),
-                                     return_exceptions=True)
-        got = [(c, img) for c, img in zip(cands, shots) if img is not None and not isinstance(img, BaseException)]
+        got = await self._snap(cands)
         if not got:
             return True
         new = set()
@@ -156,6 +172,41 @@ class Blick:
             self._lines.append(text)
             log.info("Blick: %d Bilder angeschaut, Spruch gesagt", len(got))
         return True
+
+    async def look_now(self, match: Optional[Callable[[str], bool]] = None) -> tuple[str, Optional[str]]:
+        """Manuell (`!blick`): sofort hinschauen, auch auf unveraenderte Bilder.
+        -> (Ergebnis, Spruch). Ergebnis: "busy", "nobody", "noimage", "nothing",
+        "said" (ueber die Musik gesagt) oder "text" (gerade keine Luecke/keine Musik: Spruch fuer den Chat)."""
+        if self.busy:
+            return "busy", None
+        async with self._lock:
+            cands = self.candidates(match)
+            if not cands:
+                return "nobody", None
+            got = await self._snap(cands)
+            if not got:
+                return "noimage", None
+            for c, img in got:
+                self._last_print[c] = fingerprint(img)
+            text = await self.comment(got, {c for c, _ in got})
+            if not text:
+                return "nothing", None
+            self._lines.append(text)
+            said = await self._say_soon(text)
+            log.info("Blick (manuell): %d Bilder angeschaut, %s", len(got), "gesagt" if said else "in den Chat")
+            return ("said" if said else "text"), text
+
+    async def _say_soon(self, text: str) -> bool:
+        """Reinrufen, sobald es passt (hoechstens SAY_WAIT s warten). Ohne laufende Musik gar nicht."""
+        loop = asyncio.get_running_loop()
+        end = loop.time() + SAY_WAIT
+        while getattr(self.player, "state", "playing") == "playing":
+            if self.player._zuruf_ok():
+                return await self.player.shout(text)     # ein Versuch (Sprachsynthese kostet)
+            if loop.time() >= end:
+                break
+            await asyncio.sleep(0.5)
+        return False
 
     def _song(self) -> str:
         cur = getattr(self.player, "current", None)

@@ -64,7 +64,8 @@ Audio-/Videodatei an die Nachricht anhängen – der Bot spielt sie direkt ab
     (ohne Link bei add: der laufende Titel)
 !fav – laufenden Titel merken · !fav list · !fav remove <nr> · !fav play [shuffle] (deine Favoriten)
 !stats – meistgespielte Titel und wer am meisten Musik hört
-!blick an|aus – DJ kommentiert ab und zu deine Kamera / deinen Bildschirm (für dich ab-/anschalten)
+!blick [mich | Name] – DJ schaut jetzt auf Kameras/Bildschirme (alle, nur deine, nur die einer Person) und sagt was dazu
+!blick an|aus|status – Kamera-Sprüche für dich ab-/anschalten
 !dashboard – Link + persönliches Passwort fürs Web-Dashboard per Direktnachricht
 !hilfe – diese Liste
 Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue,
@@ -97,7 +98,11 @@ def parse(text: str, prefixes: tuple[str, ...] = ("/",)) -> Optional[Parsed]:
     return Parsed(name, tail.strip())
 
 
-_READ_ONLY = {"help", "status", "queue", "stats", "dashboard", "blick"}   # blick: nur fuer sich selbst
+BLICK_OFF = ("aus", "off", "nein", "stop")
+BLICK_ON = ("an", "on", "ja")
+BLICK_SETTINGS = BLICK_OFF + BLICK_ON + ("status", "?")
+
+_READ_ONLY = {"help", "status", "queue", "stats", "dashboard"}
 
 
 def is_read_only(name: str, arg: str = "") -> bool:
@@ -109,4 +114,6 @@ def is_read_only(name: str, arg: str = "") -> bool:
         return sub in ("", "list", "show", "liste", "zeige")
     if name == "fav":                      # merken/ansehen darf jeder, abspielen steuert
         return sub != "play"
+    if name == "blick":                    # fuer sich ab-/anschalten darf jeder, hinschauen nur wer im Call ist
+        return sub in BLICK_SETTINGS
     return False
