@@ -20,11 +20,12 @@ import base64
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
 
 from .hub import Sink
+from .matrix import on_rtc_key
 from .media import silence_block
 from .player import SAMPLE_RATE
 from .publikum import Publikum, user_of
@@ -45,6 +46,38 @@ BLOCK_SAMPLES = 960                      # 20 ms bei 48 kHz
 # (niedrige Opus-Bitrate, DTX schneidet leise Stellen weg) -> klingt dumpf/komisch.
 AUDIO_BITRATE = 128_000
 STATS_S = 30                             # Aussetzer-Statistik so oft loggen
+EAR_RATE = 16_000                        # Mikrofone der anderen: 16 kHz mono reicht fuer Sprache
+EAR_CHECK_S = 2.0                        # so oft abgleichen, wessen Mikrofon wir hoeren
+
+
+def _b64(text: str) -> bytes:
+    text = text.strip().replace("-", "+").replace("_", "/")
+    return base64.b64decode(text + "=" * (-len(text) % 4))
+
+
+def remote_key_targets(sender: str, device: Optional[str], content: dict) -> tuple[set[str], list[tuple[int, bytes]]]:
+    """Element-Call-Schluessel-Event -> (LiveKit-Identities, [(Index, Schluessel)]).
+    Akzeptiert altes (`keys` als Liste) und neues Format (`keys`/`media_key` als Objekt).
+    Identities nur fuer den Absender selbst: `member.id` muss mit seiner Matrix-ID beginnen."""
+    member = content.get("member") if isinstance(content.get("member"), dict) else {}
+    claimed = member.get("claimed_device_id") or content.get("device_id")
+    dev = device or claimed
+    ids: set[str] = set()
+    if dev:
+        ids.add(f"{sender}:{dev}")
+    mid = member.get("id")
+    if isinstance(mid, str) and mid.startswith(sender + ":") and (device is None or mid.endswith(":" + device)):
+        ids.add(mid)
+    raw = content.get("keys") or content.get("media_key") or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    keys: list[tuple[int, bytes]] = []
+    for k in raw if isinstance(raw, list) else []:
+        try:
+            keys.append((int(k.get("index", 0)), _b64(str(k["key"]))))
+        except Exception:  # noqa: BLE001
+            continue
+    return ids, keys
 
 
 def audio_publish_options():
@@ -97,6 +130,14 @@ class ElementCall:
         # Vom Bot gesetzt: wird aufgerufen, wenn in einem Raum, in dem wir (noch) nicht
         # im Call sind, jemand dem Call beitritt (Play kam vor dem Call).
         self.on_call_started = None
+        # Medien der anderen (Blick/Ohr): ihre E2EE-Schluessel und unsere Abos
+        self._remote_keys: dict[str, dict[int, bytes]] = {}
+        self.on_voice: Optional[Callable[[str, np.ndarray], None]] = None   # (Identity, int16 16 kHz)
+        self.listen_ok: Callable[[str], bool] = lambda user: False         # Nutzer-ID -> mithoeren?
+        self._ears: dict[str, asyncio.Task] = {}                            # Track-SID -> Pumpe
+        self.on_joined: Optional[Callable[[str], None]] = None              # Raum (Blick/Ohr starten)
+        self.on_left: Optional[Callable[[str], None]] = None                # Raum (Blick/Ohr stoppen)
+        on_rtc_key(self._on_rtc_key)
 
     # ------------------------------------------------------------ Zustand
     @property
@@ -242,6 +283,7 @@ class ElementCall:
             log.warning("LiveKit-Identity %s statt erwartet %s", lid, identity)
         if encrypted:
             room.e2ee_manager.key_provider.set_key(lid, self._key, 0)
+            self._apply_remote_keys()
 
         self._sink = self.player.hub.new_sink()
         audio_src = rtc.AudioSource(SAMPLE_RATE, 2)
@@ -265,12 +307,18 @@ class ElementCall:
         self.room_id = room_id
         await self._send_membership(service_url)
         self._tasks.append(asyncio.create_task(self._refresh(service_url), name="ec-refresh"))
+        self._tasks.append(asyncio.create_task(self._ear_loop(), name="ec-ohr"))
         self._keyed.clear()
         if encrypted:
             await self._send_key(list(self.others_in_call(room_id)))
         log.info("Element Call beigetreten: %s als %s (E2EE %s, %d andere)",
                  room_id, lid, "an" if encrypted else "aus",
                  len(self.others_in_call(room_id)))
+        if self.on_joined is not None:
+            try:
+                self.on_joined(room_id)
+            except Exception:  # noqa: BLE001
+                log.exception("on_joined")
 
     def _on_lk_disconnected(self, room, room_id: str) -> None:
         """Medienserver hat die Verbindung beendet: Zustand aufraeumen, sonst haelt sich
@@ -419,6 +467,178 @@ class ElementCall:
         except Exception:
             log.exception("Video-Pumpe abgestuerzt")
 
+    # ------------------------------------------------------------ Medien der anderen
+    def _on_rtc_key(self, sender: str, device: Optional[str], content: dict) -> None:
+        """Medien-Schluessel eines anderen Teilnehmers (aus dem Olm-Hook in matrix.py)."""
+        ids, keys = remote_key_targets(sender, device, content)
+        if not ids or not keys:
+            return
+        for ident in ids:
+            ring = self._remote_keys.setdefault(ident, {})
+            for index, key in keys:
+                ring[index] = key
+        log.info("Medien-Schluessel von %s empfangen (Index %s)", sorted(ids)[0],
+                 ",".join(str(i) for i, _ in keys))
+        self._apply_remote_keys(ids)
+
+    def _apply_remote_keys(self, only: Optional[set[str]] = None) -> None:
+        lk = self._lk
+        if lk is None or self._key is None:
+            return
+        try:
+            kp = lk.e2ee_manager.key_provider
+        except Exception:  # noqa: BLE001
+            return
+        for ident, ring in self._remote_keys.items():
+            if only is not None and ident not in only:
+                continue
+            for index, key in ring.items():
+                try:
+                    kp.set_key(ident, key, index)
+                except Exception:  # noqa: BLE001
+                    log.debug("set_key %s/%d", ident, index, exc_info=True)
+
+    def _publications(self):
+        """(Identity, Publication) aller entfernten Tracks."""
+        lk = self._lk
+        if lk is None:
+            return []
+        out = []
+        try:
+            for p in list(lk.remote_participants.values()):
+                for pub in list(p.track_publications.values()):
+                    out.append((p.identity, pub))
+        except Exception:  # noqa: BLE001
+            return []
+        return out
+
+    def remote_videos(self) -> list[tuple[str, str]]:
+        """[(Identity, "camera"|"screen")] fuer alle eingeschalteten Kameras und geteilten Bildschirme."""
+        from livekit import rtc
+        out = []
+        for ident, pub in self._publications():
+            if pub.kind != rtc.TrackKind.KIND_VIDEO or pub.muted:
+                continue
+            if pub.source == rtc.TrackSource.SOURCE_SCREENSHARE:
+                out.append((ident, "screen"))
+            elif pub.source == rtc.TrackSource.SOURCE_CAMERA:
+                out.append((ident, "camera"))
+        return out
+
+    async def snapshot(self, identity: str, kind: str, timeout: float = 10.0):
+        """Ein Standbild (PIL, RGB) von Kamera oder Bildschirm eines Teilnehmers, sonst None.
+        Abonniert den Track nur kurz; nichts wird gespeichert."""
+        from livekit import rtc
+        from PIL import Image
+        want = rtc.TrackSource.SOURCE_SCREENSHARE if kind == "screen" else rtc.TrackSource.SOURCE_CAMERA
+        pub = next((p for i, p in self._publications()
+                    if i == identity and p.kind == rtc.TrackKind.KIND_VIDEO and p.source == want), None)
+        if pub is None:
+            return None
+        loop = asyncio.get_running_loop()
+        was = pub.subscribed
+        stream = None
+        try:
+            pub.set_subscribed(True)
+            try:
+                pub.set_video_quality(rtc.VideoQuality.VIDEO_QUALITY_HIGH if kind == "screen"
+                                      else rtc.VideoQuality.VIDEO_QUALITY_MEDIUM)
+            except Exception:  # noqa: BLE001
+                pass
+            end = loop.time() + timeout
+            while pub.track is None and loop.time() < end:
+                await asyncio.sleep(0.1)
+            if pub.track is None:
+                log.info("Kein Bild von %s (%s): Abo kam nicht zustande", identity, kind)
+                return None
+            stream = rtc.VideoStream(pub.track, format=rtc.VideoBufferType.RGBA)
+            frame, n, first = None, 0, None
+            try:
+                async with asyncio.timeout(max(0.5, end - loop.time())):
+                    async for ev in stream:
+                        frame, n = ev.frame, n + 1
+                        first = first or loop.time()
+                        if n >= 3 or loop.time() - first > 1.5:   # erste Bilder nach dem Keyframe sind oft grau
+                            break
+            except TimeoutError:
+                pass
+            if frame is None:
+                log.info("Kein Bild von %s (%s): nichts dekodiert (Schluessel fehlt?)", identity, kind)
+                return None
+            w, h = frame.width, frame.height
+            buf = np.frombuffer(bytes(frame.data), dtype=np.uint8)
+            stride = len(buf) // h if h else 0
+            if not w or not h or stride < w * 4:
+                return None
+            arr = buf[: stride * h].reshape(h, stride)[:, : w * 4].reshape(h, w, 4)
+            return Image.fromarray(arr[..., :3].copy(), "RGB")
+        except Exception:  # noqa: BLE001
+            log.warning("Standbild von %s fehlgeschlagen", identity, exc_info=True)
+            return None
+        finally:
+            if stream is not None:
+                try:
+                    await stream.aclose()
+                except Exception:  # noqa: BLE001
+                    pass
+            if not was:
+                try:
+                    pub.set_subscribed(False)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def refresh_listening(self) -> None:
+        """Mikrofone abonnieren/abbestellen: nur wenn das Ohr an ist und der Nutzer nicht widersprochen hat."""
+        from livekit import rtc
+        live: set[str] = set()
+        for ident, pub in self._publications():
+            if pub.kind != rtc.TrackKind.KIND_AUDIO or pub.source != rtc.TrackSource.SOURCE_MICROPHONE:
+                continue
+            want = self.on_voice is not None and bool(self.listen_ok(user_of(ident)))
+            if not want:
+                if pub.subscribed:
+                    t = self._ears.pop(pub.sid, None)
+                    if t:
+                        t.cancel()
+                    pub.set_subscribed(False)
+                continue
+            live.add(pub.sid)
+            if not pub.subscribed:
+                pub.set_subscribed(True)
+            elif pub.track is not None and pub.sid not in self._ears:
+                self._ears[pub.sid] = asyncio.create_task(
+                    self._pump_ear(ident, pub.sid, pub.track), name=f"ohr-{pub.sid}")
+        for sid in [s for s in self._ears if s not in live]:
+            self._ears.pop(sid).cancel()
+
+    async def _ear_loop(self) -> None:
+        while True:
+            try:
+                self.refresh_listening()
+            except Exception:  # noqa: BLE001
+                log.debug("Mikrofone abgleichen", exc_info=True)
+            await asyncio.sleep(EAR_CHECK_S)
+
+    async def _pump_ear(self, identity: str, sid: str, track) -> None:
+        from livekit import rtc
+        stream = rtc.AudioStream(track, sample_rate=EAR_RATE, num_channels=1)
+        try:
+            async for ev in stream:
+                cb = self.on_voice
+                if cb is not None:
+                    cb(identity, np.frombuffer(bytes(ev.frame.data), dtype=np.int16))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.warning("Mikrofon von %s abgebrochen", identity, exc_info=True)
+        finally:
+            try:
+                await stream.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+            if self._ears.get(sid) is asyncio.current_task():
+                self._ears.pop(sid, None)
+
     # ------------------------------------------------------------ Verlassen
     async def leave(self) -> None:
         async with self._lock:
@@ -429,6 +649,10 @@ class ElementCall:
         for t in self._tasks:
             t.cancel()
         self._tasks = []
+        for t in self._ears.values():
+            t.cancel()
+        self._ears.clear()
+        self._remote_keys.clear()
         if self._sink is not None:
             self.player.hub.drop_sink(self._sink)
             self._sink = None
@@ -446,5 +670,10 @@ class ElementCall:
             except Exception:
                 log.warning("Membership entfernen fehlgeschlagen", exc_info=True)
             log.info("Element Call verlassen: %s", room_id)
+            if self.on_left is not None:
+                try:
+                    self.on_left(room_id)
+                except Exception:  # noqa: BLE001
+                    log.exception("on_left")
         self._key = None
         self._keyed.clear()

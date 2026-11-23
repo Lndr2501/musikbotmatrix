@@ -78,6 +78,8 @@ unabhängig vom Ordnernamen.)
 | `!playlist add <name> [Link]` · `remove <name> <nr>` | Titel hinzufügen (ohne Link: laufender Titel) / entfernen |
 | `!playlist show <name>` · `list` | Inhalt / alle Playlists |
 | `!playlist play <name> [shuffle]` · `enqueue <name>` | abspielen (ersetzt Queue) / hinten anhängen |
+| `!blick an\|aus` | DJ kommentiert deine Kamera / deinen Bildschirm – nur für dich ab-/anschalten |
+| `!ohr an\|aus` | DJ hört dein Mikrofon und antwortet auf seinen Namen – nur für dich |
 | `!help` | Kommandoliste |
 
 **Wer darf steuern?** Nur Leute, die selbst im Call sind (Element Call oder
@@ -217,6 +219,42 @@ LED-Front, Kanten, Pegel und Jogwheels live im Takt zwischen beiden Bildern.
 Den Ordner nach `data/` legen (lesbar für UID 10000) und
 `BAER_ASSETS=/data/baer-paket` setzen. Ein kaputtes Paket fällt auf den
 eingebauten Bären zurück.
+
+## KI im Call: Blick und Ohr (optional)
+
+Der DJ kann im Element Call **hinschauen** und **zuhören**. Beides ist standardmäßig aus.
+
+- **Blick** (`BLICK_ENABLED=true`): Alle paar Minuten (`BLICK_EVERY`, Standard 180 s ± 40 %)
+  nimmt er ein Standbild einer eingeschalteten Kamera oder eines geteilten Bildschirms
+  (Bildschirme zuerst, reihum), schickt es an ein Bildmodell und ruft einen kurzen Spruch
+  über die Musik („Max, du zockst ja schon wieder!“). Unverändertes Bild = kein neuer Spruch.
+  Das Modell soll nie Aussehen/Körper bewerten und nichts Privates vom Bildschirm vorlesen.
+- **Ohr** (`OHR_ENABLED=true`): Er hört die Mikrofone mit, wandelt Sprache per Whisper in Text
+  und antwortet, wenn jemand ihn beim Namen anspricht („DJ Qwen, was läuft da?“). Ab und zu
+  (`OHR_EVERY`, 0 = nie) redet er von sich aus beim Gespräch mit. Die Texte der letzten drei
+  Minuten liegen nur im Arbeitsspeicher und fließen auch in die Blick-Sprüche ein.
+
+**Datenschutz:** Bilder und Ton werden nicht gespeichert; sie gehen nur an die
+konfigurierten Endpunkte (`KI_URL`, `STT_URL` – nimm eigene Server). Beim ersten Beitritt
+sagt der Bot im Raum, dass er schaut/zuhört. Jede Person schaltet es für sich ab:
+`!blick aus`, `!ohr aus` (bleibt gespeichert; abgeschaltete Mikrofone werden gar nicht erst
+abonniert).
+
+**Verschlüsselte Calls:** Element Call schickt jedem Teilnehmer seinen Medien-Schlüssel als
+Olm-To-Device (`io.element.call.encryption_keys`). matrix-nio verwirft diesen Typ; der Bot fängt
+ihn ab und gibt die Schlüssel an LiveKit weiter, sonst bekäme er nur verschlüsselte Pakete.
+
+| Variable | Standard | Bedeutung |
+|---|---|---|
+| `KI_URL` · `KI_KEY` · `KI_MODEL` | – | OpenAI-kompatibler Endpunkt mit Bild-Eingang (Antwort gestreamt) |
+| `KI_TIMEOUT` | `120` | Sekunden bis eine Antwort verworfen wird |
+| `BLICK_ENABLED` · `BLICK_EVERY` | `false` · `180` | Blick an, Abstand in Sekunden |
+| `OHR_ENABLED` · `OHR_EVERY` | `false` · `240` | Ohr an, Abstand fürs Mitreden (0 = nur auf Ansprache) |
+| `STT_URL` · `STT_KEY` | `KI_URL` · `KI_KEY` | Whisper-Endpunkt (`/audio/transcriptions`, OpenAI-Format) |
+| `STT_MODEL` · `STT_LANGUAGE` | `whisper-1` · `de` | Modell und Sprache |
+
+Schläft der Whisper-Server (z. B. ein Laptop), pausiert das Ohr von selbst und meldet sich
+im Log, sobald er wieder erreichbar ist.
 
 ## Mediathek (Ordner `radio/`)
 

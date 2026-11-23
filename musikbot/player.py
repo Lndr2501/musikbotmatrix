@@ -417,16 +417,22 @@ class Player:
             self.baer.set_audience(faces)
 
     # ------------------------------------------------------------ Zurufe
-    def _zuruf_ok(self) -> bool:
-        """Darf der Baer jetzt reinrufen? Nur mitten in einem laufenden Song, ohne andere Ansage."""
+    def _zuruf_ok(self, urgent: bool = False) -> bool:
+        """Darf der Baer jetzt reinrufen? Nur mitten in einem laufenden Song, ohne andere Ansage.
+        `urgent` (jemand hat ihn angesprochen): auch kurz nach Songstart und kurz vor Schluss."""
         if self.ansager is None or not self.ansager.available or self.state != "playing":
             return False
         if self._voice is not None or self._speaking or self.hub.count == 0:
             return False
-        if self._source is None or self._pos < 20.0:
+        if self._source is None or self._pos < (3.0 if urgent else 20.0):
             return False
         dur = self._source.duration
-        return dur is None or dur - self._pos > 15.0
+        return dur is None or dur - self._pos > (4.0 if urgent else 15.0)
+
+    @property
+    def speech_idle(self) -> float:
+        """Sekunden seit der letzten Ansage/dem letzten Zuruf."""
+        return asyncio.get_running_loop().time() - self._last_speech
 
     def _zuruf_gap(self) -> float:
         return self.cfg.zuruf_every * random.uniform(0.6, 1.4)
@@ -451,17 +457,19 @@ class Player:
                 # Build-up, das sich ein paar Sekunden haelt: ankuendigen ("Gleich kommt's!")
                 build_since = (build_since or now) if vibe["section"] == "build" else None
                 build = build_since is not None and now - build_since >= 1.5 and now - self._last_speech > 25
-            if (drop or build or now >= next_at) and self._zuruf_ok():
+            if (drop or build or (now >= next_at and now - self._last_speech > 30)) and self._zuruf_ok():
                 song = self._info(self.current) if self.current else ("", "")
                 await self.shout(self.moderator.zuruf(self._listeners, drop=drop, vibe=vibe, song=song))
                 next_at = loop.time() + self._zuruf_gap()
                 build_since = None
 
-    async def shout(self, text: str) -> bool:
+    async def shout(self, text: str, urgent: bool = False) -> bool:
         """Zuruf ueber die laufende Musik legen (Musik kurz leiser, Baer redet)."""
+        if not self._zuruf_ok(urgent):
+            return False
         key = self.current.key if self.current else None
         voice = await asyncio.to_thread(self.ansager.synth, text) if self.ansager else None
-        if voice is None or not self._zuruf_ok() or self.current is None or self.current.key != key:
+        if voice is None or not self._zuruf_ok(urgent) or self.current is None or self.current.key != key:
             return False
         self._voice, self._voice_i = voice, 0
         self._last_speech = asyncio.get_running_loop().time()

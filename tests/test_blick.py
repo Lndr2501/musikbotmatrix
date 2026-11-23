@@ -1,0 +1,264 @@
+"""Blick: Kamera/Bildschirm anschauen und kommentieren – mit Attrappen, ohne Netz."""
+from __future__ import annotations
+
+import asyncio
+import random
+from types import SimpleNamespace
+
+from PIL import Image
+
+from musikbot.blick import SKIP, Blick, fingerprint, same_image
+from musikbot.elementcall import remote_key_targets
+from musikbot.ki import KI, clean_line
+
+
+class FakeKI(KI):
+    def __init__(self, answers):
+        super().__init__("http://ki", "", "m")
+        self.answers = list(answers)
+        self.seen = []
+
+    async def chat(self, messages, max_tokens=120, temperature=0.9):
+        self.seen.append(messages)
+        return self.answers.pop(0) if self.answers else None
+
+
+class FakeCall:
+    def __init__(self, videos, img=None):
+        self.videos = list(videos)
+        self.img = img or Image.new("RGB", (640, 360), (40, 120, 200))
+        self.shots = []
+
+    def remote_videos(self):
+        return list(self.videos)
+
+    async def snapshot(self, ident, kind, timeout=10.0):
+        self.shots.append((ident, kind))
+        return self.img
+
+
+class FakePlayer:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.said = []
+        self.current = SimpleNamespace(key="k")
+        self.speech_idle = 999.0
+
+    def _zuruf_ok(self, urgent=False):
+        return self.ok
+
+    def _info(self, cur):
+        return ("Voll", "Künstler")
+
+    async def shout(self, text, urgent=False):
+        self.said.append(text)
+        return True
+
+
+def make(videos, answers, allowed=lambda u: True, img=None, context=None):
+    cfg = SimpleNamespace(dj_name="DJ Qwen", blick_every=180.0)
+    ki = FakeKI(answers)
+    call = FakeCall(videos, img)
+    player = FakePlayer()
+    b = Blick(cfg, ki, call, player, name_of=lambda i: i.split(":")[0].lstrip("@").title(),
+              allowed=allowed, context=context, rng=random.Random(1))
+    return b, ki, call, player
+
+
+def test_screens_first_then_round_robin():
+    vids = [("@max:x:D1", "camera"), ("@anna:x:D2", "screen"), ("@tom:x:D3", "camera")]
+    b, *_ = make(vids, [])
+    first = b.pick()
+    assert first == ("@anna:x:D2", "screen")
+    b._last_at[first] = 100.0
+    second = b.pick()
+    assert second[1] == "camera"
+    b._last_at[second] = 101.0
+    third = b.pick()
+    assert third not in (first, second)
+
+
+def test_opted_out_people_are_never_looked_at():
+    vids = [("@max:x:D1", "camera"), ("@anna:x:D2", "screen")]
+    b, *_ = make(vids, [], allowed=lambda u: u != "@anna:x")
+    assert b.candidates() == [("@max:x:D1", "camera")]
+
+
+async def test_look_comments_with_name_song_and_image():
+    b, ki, call, player = make([("@max:x:D1", "camera")], ["„Max, schickes Licht da hinten! 🎧“"],
+                               context=lambda: [("Anna", "ich hab Hunger")])
+    assert await b.look()
+    assert call.shots == [("@max:x:D1", "camera")]
+    assert player.said == ["Max, schickes Licht da hinten!"]
+    sys_msg, user_msg = ki.seen[0]
+    assert "DJ Qwen" in sys_msg["content"] and "Aussehen" in sys_msg["content"]
+    text = user_msg["content"][0]["text"]
+    assert "Kamerabild von Max" in text and "Voll von Künstler" in text and "Anna: ich hab Hunger" in text
+    assert user_msg["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+async def test_nothing_to_see_means_silence():
+    b, ki, call, player = make([("@max:x:D1", "camera")], [SKIP, "-  ", "ok"])
+    for _ in range(3):
+        await b.look()
+        b._last_print.clear()
+    assert player.said == []
+
+
+async def test_unchanged_picture_is_not_commented_twice():
+    b, ki, call, player = make([("@max:x:D1", "screen")], ["Max, wieder am Coden?", "Max, immer noch?"])
+    await b.look()
+    await b.look()
+    assert player.said == ["Max, wieder am Coden?"]
+    assert len(ki.seen) == 1
+    call.img = Image.new("RGB", (640, 360), (250, 240, 30))   # neues Bild: wieder Spruch, mit Hinweis
+    await b.look()
+    assert player.said[-1] == "Max, immer noch?"
+    assert "letzter Spruch zu Max war: Max, wieder am Coden?" in ki.seen[-1][1]["content"][0]["text"]
+
+
+async def test_waits_while_dj_is_busy_and_drops_line_when_camera_went_off():
+    b, ki, call, player = make([("@max:x:D1", "camera")], ["Max, hallo!"])
+    player.ok = False
+    assert await b.look() is False and call.shots == []
+    player.ok = True
+
+    async def gone(*a, **k):
+        call.videos.clear()
+        return "Max, hallo!"
+    ki.chat = gone
+    assert await b.look() is True
+    assert player.said == []
+
+
+def test_fingerprint_detects_same_picture():
+    a = Image.new("RGB", (320, 180), (10, 10, 10))
+    b = Image.new("RGB", (640, 360), (12, 10, 10))
+    c = Image.new("RGB", (640, 360), (200, 200, 200))
+    assert same_image(fingerprint(a), fingerprint(b))
+    assert not same_image(fingerprint(a), fingerprint(c))
+
+
+def test_clean_line_makes_it_speakable():
+    assert clean_line('**„Hey Max!“** 🐻🎧') == "Hey Max!"
+    long = " ".join(["wort"] * 40)
+    assert clean_line(long, max_words=5) == "wort wort wort wort wort…"
+
+
+def test_remote_keys_only_for_the_sender_himself():
+    import base64
+    key = base64.b64encode(b"k" * 32).decode().rstrip("=")
+    ids, keys = remote_key_targets("@max:x", "DEV1", {
+        "keys": {"index": 3, "key": key},
+        "member": {"id": "@max:x:DEV1", "claimed_device_id": "DEV1"}})
+    assert ids == {"@max:x:DEV1"} and keys == [(3, b"k" * 32)]
+    ids, keys = remote_key_targets("@max:x", None, {        # altes Format, Geraet nur behauptet
+        "keys": [{"index": 0, "key": key}], "device_id": "DEV2",
+        "member": {"id": "@anna:x:DEV9"}})                   # fremde Identity: ignoriert
+    assert ids == {"@max:x:DEV2"} and keys == [(0, b"k" * 32)]
+
+
+async def test_rtc_key_hook_feeds_the_key_provider():
+    """Der Olm-Hook reicht Element-Call-Schluessel an ElementCall weiter, der setzt sie im LiveKit-Keyring."""
+    import base64
+
+    from musikbot.elementcall import ElementCall
+    ec = ElementCall.__new__(ElementCall)
+    ec._remote_keys = {}
+    ec._key = b"x" * 32
+    got = []
+    ec._lk = SimpleNamespace(e2ee_manager=SimpleNamespace(key_provider=SimpleNamespace(
+        set_key=lambda ident, key, idx: got.append((ident, key, idx)))))
+    ec._on_rtc_key("@max:x", "DEV1", {"keys": [{"index": 1, "key": base64.b64encode(b"a" * 32).decode()}]})
+    assert got == [("@max:x:DEV1", b"a" * 32, 1)]
+    ec._lk = None                                    # vor dem Beitritt: merken, spaeter setzen
+    ec._on_rtc_key("@anna:x", "DEV2", {"keys": [{"index": 0, "key": base64.b64encode(b"b" * 32).decode()}]})
+    ec._lk = SimpleNamespace(e2ee_manager=SimpleNamespace(key_provider=SimpleNamespace(
+        set_key=lambda ident, key, idx: got.append((ident, key, idx)))))
+    ec._apply_remote_keys()
+    assert ("@anna:x:DEV2", b"b" * 32, 0) in got
+
+
+def test_olm_hook_catches_element_call_keys():
+    from nio.crypto import Olm
+
+    from musikbot import matrix
+    calls = []
+    matrix.on_rtc_key(lambda s, d, c: calls.append((s, d, c)))
+    fake = SimpleNamespace(device_store=SimpleNamespace(active_user_devices=lambda u: [
+        SimpleNamespace(id="DEVX", curve25519="CURVE")]))
+    out = Olm._handle_olm_event(fake, "@max:x", "CURVE",
+                                {"type": matrix.RTC_KEYS_EVENT, "content": {"keys": []}})
+    assert out is None and calls[-1] == ("@max:x", "DEVX", {"keys": []})
+    matrix._rtc_key_listeners.remove(matrix._rtc_key_listeners[-1])
+
+
+async def test_loop_runs_and_stops_cleanly():
+    b, ki, call, player = make([("@max:x:D1", "camera")], ["Max, hi!"])
+    b.cfg.blick_every = 0.01
+    import musikbot.blick as bl
+    old = bl.FIRST_LOOK
+    bl.FIRST_LOOK = (0.0, 0.0)
+    try:
+        b.start()
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if player.said:
+                break
+        assert player.said == ["Max, hi!"]
+    finally:
+        bl.FIRST_LOOK = old
+        b.stop()
+    assert not b.running and not b._last_line
+
+
+# ---------------------------------------------------------------- im Bot: Schalter, Widerspruch, Hinweis
+def _ki_bot(tmp_path, **kw):
+    from musikbot.bot import Bot
+    from musikbot.config import Config
+    cfg = Config(homeserver="http://h", user="@bot:x", password="p", data_dir=str(tmp_path / "d"),
+                 matrix_user_id="@bot:x", dj_name="DJ Qwen", ki_url="http://ki/v1", ki_model="m",
+                 stt_url="http://stt/v1", **kw)
+    bot = Bot(cfg)
+    notes = []
+
+    async def note(room, text, tone="info", icon=""):
+        notes.append(text)
+    bot._note = note
+    return bot, notes
+
+
+async def test_everyone_can_opt_out_for_themselves_and_it_sticks(tmp_path):
+    from musikbot.commands import is_read_only
+    bot, notes = _ki_bot(tmp_path, blick_enabled=True, ohr_enabled=True)
+    assert bot.blick is not None and bot.ohr is not None
+    assert is_read_only("blick", "aus") and is_read_only("ohr", "aus")     # auch wer nicht im Call ist
+    bot.ohr._ready = True
+    assert bot.ecall.listen_ok("@max:x")
+    await bot._dispatch("!r:x", "@Max:x", "ohr", "aus")
+    await bot._dispatch("!r:x", "@max:x", "blick", "aus")
+    assert not bot.ecall.listen_ok("@max:x") and not bot._ki_allowed("blick", "@max:x")
+    assert bot.ecall.listen_ok("@anna:x")
+    assert "für dich aus" in notes[-1]
+    again, _ = _ki_bot(tmp_path, blick_enabled=True, ohr_enabled=True)   # nach Neustart noch da
+    assert not again._ki_allowed("ohr", "@max:x")
+    await again._dispatch("!r:x", "@max:x", "ohr", "an")
+    assert again._ki_allowed("ohr", "@max:x")
+    await again._dispatch("!r:x", "@max:x", "blick", "")
+    assert "allgemein an, für dich aus" in notes[-1] or "allgemein an, für dich aus" in _[-1]
+
+
+async def test_off_by_default_and_join_tells_the_room_once(tmp_path):
+    bot, notes = _ki_bot(tmp_path)
+    assert bot.blick is None and bot.ohr is None
+    bot._ki_joined("!r:x")
+    await asyncio.sleep(0)
+    assert notes == []
+    bot, notes = _ki_bot(tmp_path / "2", blick_enabled=True, ohr_enabled=True)
+    bot.blick.start = bot.ohr.start = lambda: None
+    bot._ki_joined("!r:x")
+    bot._ki_joined("!r:x")
+    await asyncio.sleep(0.01)
+    assert len(notes) == 1
+    assert "Kameras" in notes[0] and "hört mit" in notes[0] and "!blick aus" in notes[0] and "!ohr aus" in notes[0]
+    assert "nicht gespeichert" in notes[0] or "Nichts davon wird gespeichert" in notes[0]

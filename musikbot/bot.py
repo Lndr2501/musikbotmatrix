@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import random
@@ -21,11 +22,15 @@ import nio
 from . import cards
 from .calls import CallManager
 from .commands import HELP, LOOKUP, is_read_only, parse
+from .blick import Blick
 from .elementcall import ElementCall
+from .ki import KI, STT
 from .config import Config
 from .hub import Hub
 from .matrix import Matrix
+from .ohr import Ohr
 from .player import AUTOPLAY, Player
+from .publikum import user_of
 from .store import TrackStore
 from .util import fmt_time, now_ms, parse_time
 from .webauth import WebAuth
@@ -124,6 +129,7 @@ class Bot:
         self._recent: list[str] = []                # zuletzt gespielte Titel (keine Wiederholung)
         self._last_finished = None
         self._load_fade_settings()
+        self._setup_ki()
 
         m = self.matrix
         m.on_media = self._on_media
@@ -905,6 +911,8 @@ class Bot:
                              if self._autoplay else "Autoplay aus.", "info", "✨")
             if p.state in ("playing", "paused"):     # Knopf im Menue "⋯" zeigt den neuen Stand
                 await self._now_card_state(room_id, p.state)
+        elif name in ("blick", "ohr"):
+            await self._ki_command(room_id, sender, name, arg)
         elif name == "dashboard":
             await self._send_dashboard_login(room_id, sender)
         elif name == "help":
@@ -1287,6 +1295,116 @@ class Bot:
         task = asyncio.create_task(deliver(), name="dashboard-dm")
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+
+    # ------------------------------------------------------------------ KI im Call (Blick/Ohr)
+    def _setup_ki(self) -> None:
+        """Blick (Kamera/Bildschirm kommentieren) und Ohr (Mikrofone mithoeren) einrichten.
+        Wer nicht will, schaltet es fuer sich ab (`!blick aus`, `!ohr aus`); das merkt die Datenbank."""
+        cfg = self.cfg
+        self._optout: dict[str, set[str]] = {}
+        for what in ("blick", "ohr"):
+            try:
+                self._optout[what] = {u.lower() for u in json.loads(self.store.setting(f"{what}_aus", "[]"))}
+            except (ValueError, TypeError):
+                self._optout[what] = set()
+        self._ki_hello: dict[str, float] = {}           # Raum -> wann zuletzt der Hinweis kam
+        self.ki = KI(cfg.ki_url, cfg.ki_key, cfg.ki_model, cfg.ki_timeout)
+        self.stt = STT(cfg.stt_url or cfg.ki_url, cfg.stt_key or cfg.ki_key, cfg.stt_model, cfg.stt_language)
+        self.blick: Blick | None = None
+        self.ohr: Ohr | None = None
+        if cfg.ohr_enabled and self.stt.available:
+            self.ohr = Ohr(cfg, self.ki, self.stt, self.player, self._call_name)
+            self.ecall.on_voice = self.ohr.feed
+            # Mikrofone nur abonnieren, wenn die Spracherkennung erreichbar ist und die Person nicht widersprochen hat
+            self.ecall.listen_ok = lambda u: (self.ohr is not None and self.ohr.ready
+                                              and self._ki_allowed("ohr", u))
+            if not self.ki.available:
+                log.warning("OHR_ENABLED ohne KI_URL/KI_MODEL – er hört zu, antwortet aber nicht")
+        elif cfg.ohr_enabled:
+            log.warning("OHR_ENABLED, aber STT_URL/KI_URL fehlt – Ohr bleibt aus")
+        if cfg.blick_enabled and self.ki.available:
+            self.blick = Blick(cfg, self.ki, self.ecall, self.player, name_of=self._call_name,
+                               allowed=lambda u: self._ki_allowed("blick", u),
+                               context=lambda: self.ohr.recent() if self.ohr is not None else [])
+        elif cfg.blick_enabled:
+            log.warning("BLICK_ENABLED, aber KI_URL/KI_MODEL fehlen – Blick bleibt aus")
+        self.ecall.on_joined = self._ki_joined
+        self.ecall.on_left = self._ki_left
+
+    def _ki_allowed(self, what: str, user: str) -> bool:
+        return user.lower() not in self._optout.get(what, set())
+
+    def _ki_set(self, what: str, user: str, on: bool) -> None:
+        users = self._optout.setdefault(what, set())
+        (users.discard if on else users.add)(user.lower())
+        self.store.set_setting(f"{what}_aus", json.dumps(sorted(users)))
+        part = self.blick if what == "blick" else self.ohr
+        if not on and part is not None:
+            part.forget(user)
+        if what == "ohr" and self.ecall.active:
+            try:
+                self.ecall.refresh_listening()
+            except Exception:  # noqa: BLE001
+                log.debug("Mikrofone abgleichen", exc_info=True)
+
+    def _call_name(self, identity: str) -> str:
+        """LiveKit-Identity -> Anzeigename im Raum des Calls (ohne '(@id)'-Zusatz)."""
+        uid = user_of(identity)
+        name = None
+        try:
+            room = self.matrix.client.rooms.get(self.ecall.room_id or "")
+            name = room.user_name(uid) if room is not None else None
+        except Exception:  # noqa: BLE001
+            name = None
+        name = re.sub(r"\s*\(@[^)]*\)$", "", name or "").strip()
+        return name or self._who(uid)
+
+    def _ki_joined(self, room_id: str) -> None:
+        if self.blick is not None:
+            self.blick.start()
+        if self.ohr is not None:
+            self.ohr.start()
+        if self.blick is None and self.ohr is None:
+            return
+        now = time.time()
+        if now - self._ki_hello.get(room_id, 0.0) < 6 * 3600:
+            return
+        self._ki_hello[room_id] = now
+        dj = self.cfg.dj_name
+        parts = []
+        if self.blick is not None:
+            parts.append(f"👀 {dj} schaut ab und zu auf Kameras und geteilte Bildschirme und sagt was dazu.")
+        if self.ohr is not None:
+            parts.append(f"👂 {dj} hört mit und antwortet, wenn ihr ihn ansprecht.")
+        offs = " · ".join(c for c, part in (("!blick aus", self.blick), ("!ohr aus", self.ohr)) if part is not None)
+        text = " ".join(parts) + f" Nichts davon wird gespeichert. Für dich abschalten: {offs}"
+        task = asyncio.create_task(self._note(room_id, text, "info", "🐻"), name="ki-hinweis")
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    def _ki_left(self, room_id: str) -> None:
+        for part in (self.blick, self.ohr):
+            if part is not None:
+                part.stop()
+
+    async def _ki_command(self, room_id: str, sender: str, what: str, arg: str) -> None:
+        part = self.blick if what == "blick" else self.ohr
+        dj = self.cfg.dj_name
+        label = ("Blick (Kamera und Bildschirm kommentieren)" if what == "blick"
+                 else "Ohr (Mikrofon mithören, antwortet auf seinen Namen)")
+        mode = arg.strip().lower()
+        if mode in ("aus", "off", "nein", "stop"):
+            self._ki_set(what, sender, False)
+            await self._note(room_id, f"{label}: für dich aus. {dj} lässt dich in Ruhe.", "info", "🙈")
+        elif mode in ("an", "on", "ja"):
+            self._ki_set(what, sender, True)
+            await self._note(room_id, f"{label}: für dich an." + ("" if part is not None else
+                             " (Auf diesem Bot ist es gerade allgemein ausgeschaltet.)"), "info", "🐻")
+        else:
+            mine = "an" if self._ki_allowed(what, sender) else "aus"
+            general = "an" if part is not None else "aus (Admin)"
+            await self._note(room_id, f"{label}: allgemein {general}, für dich {mine}. "
+                             f"!{what} aus / !{what} an", "info", "🐻")
 
     def _load_fade_settings(self) -> None:
         for name in ("crossfade_seconds", "fade_in_seconds"):
