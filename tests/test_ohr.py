@@ -80,7 +80,7 @@ def test_segments_check():
 
 
 def test_health_url():
-    assert health_url("http://192.168.178.62:8000/v1") == "http://192.168.178.62:8000/health"
+    assert health_url("http://whisper.lan:8000/v1") == "http://whisper.lan:8000/health"
     assert health_url("http://h:8000/v1/") == "http://h:8000/health"
     assert health_url("https://x.example/api") == "https://x.example/api/health"
 
