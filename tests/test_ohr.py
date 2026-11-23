@@ -360,3 +360,11 @@ async def test_stt_failures_return_none_and_mark_unreachable():
     assert await stt.transcribe(_tone(0.3)) is None
     assert await stt.reachable() is False
     assert STT("").available is False and await STT("").reachable() is False
+
+
+def test_prompt_echo_on_silence_is_dropped():
+    from musikbot.ki import prompt_echo
+    assert prompt_echo("Qwen", "DJ Qwen, Sandstorm")
+    assert prompt_echo("DJ Qwen.", "DJ Qwen")
+    assert not prompt_echo("DJ Qwen, spiel was Schnelles", "DJ Qwen")
+    assert not prompt_echo("Hallo", "")

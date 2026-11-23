@@ -140,6 +140,13 @@ def stt_clean(text: Optional[str]) -> Optional[str]:
     return t
 
 
+def prompt_echo(text: str, prompt: str) -> bool:
+    """Whisper gibt bei Stille/Rauschen gern den Prompt zurueck ("Qwen"): nur Prompt-Woerter = Echo."""
+    words = re.findall(r"[\wäöüß]+", (text or "").lower())
+    known = set(re.findall(r"[\wäöüß]+", (prompt or "").lower()))
+    return bool(words) and bool(known) and all(w in known for w in words)
+
+
 def wav_bytes(pcm: np.ndarray, rate: int = STT_RATE) -> bytes:
     """int16 mono -> WAV-Datei im Speicher."""
     data = np.asarray(pcm, dtype=np.int16).reshape(-1)
@@ -255,4 +262,7 @@ class STT:
                 text = data.get("text") or ""
         except ValueError:
             pass
-        return stt_clean(text)
+        text = stt_clean(text)
+        if text and prompt_echo(text, prompt):
+            return None
+        return text
