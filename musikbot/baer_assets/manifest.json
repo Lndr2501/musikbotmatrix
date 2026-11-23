@@ -1,0 +1,11 @@
+{
+ "static": true,
+ "cell": 512,
+ "height": 0.78,
+ "clips": {
+  "idle": {"kind": "groove"},
+  "cheer": {"kind": "hype"},
+  "jump": {"kind": "hype"},
+  "talk": {"kind": "talk"}
+ }
+}

@@ -137,7 +137,8 @@ def test_player_shows_cover_only_for_tracks_without_video():
     from musikbot.store import TrackStore
     import tempfile
     d = tempfile.mkdtemp()
-    cfg = Config(homeserver="http://h", user="@b:x", password="p", data_dir=d, matrix_user_id="@b:x")
+    cfg = Config(homeserver="http://h", user="@b:x", password="p", data_dir=d, matrix_user_id="@b:x",
+                 baer_enabled=False)
     from musikbot.hub import Hub
     p = Player(cfg, Hub(), TrackStore(d + "/db", d + "/tmp"))
     p.current = SimpleNamespace(key="k1")

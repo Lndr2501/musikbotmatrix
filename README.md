@@ -120,6 +120,104 @@ geladen, damit er pünktlich bereitliegt. Länge per `CROSSFADE_SECONDS`
 damit es nicht knackt. Kein Crossfade gibt es, wenn derselbe Titel direkt
 nochmal kommt (Schleife mit leerer Warteschlange).
 
+## Bär-DJ und Moderation
+
+Die Kamera des Bots zeigt einen Bären am DJ-Pult – bei MP3s und Streams statt
+des Titelbilds, standardmäßig auch bei YouTube-Titeln statt ihres Videos
+(`BAER_OVER_VIDEO=false` zeigt dort wieder das Video).
+Takt, Bass und Drops kommen live aus dem Audio, das der Bot gerade ausgibt; eine
+gleichmäßige Beat-Uhr rastet auf die Kicks ein. Der Bär spielt vorgerenderte
+Tanz-Loops (je 4 Beats, 16 Bilder pro Beat) im Songtempo ab, wechselt am
+Taktanfang mit Überblendung die Pose, jubelt bei Drops, trinkt in Ruhephasen
+Kaffee und bewegt beim Reden den Mund nach der Stimme. Licht, LEDs und
+Plattenteller laufen im Takt mit. Alles läuft auf der CPU (480p/24 fps: ~25 %
+eines Kerns, ~470 MB RAM).
+
+**Moderation:** Zwischen zwei Titeln gibt es keinen Crossfade, sondern eine
+kurze Pause, in der der Bär redet: was lief, manchmal ein Spruch („Ich hoffe,
+euch hat das gefallen“), wer sich den nächsten Titel gewünscht hat, was jetzt
+kommt. Die Texte werden zufällig zusammengesetzt und wiederholen sich nicht
+gleich. Ist die Warteschlange leer, verabschiedet er sich. Bei `!play` sagt er
+den Titel über dem (leiser gedrehten) Intro an. Stimme: Piper
+(`de_DE-thorsten-medium`, liegt im Image). „(Official Video)“ & Co. werden
+nicht vorgelesen, „Interpret - Titel“ wird aufgeteilt. `!skip`/`!stop` brechen
+die Moderation sofort ab.
+
+**Zurufe und Publikum:** Mitten im Song ruft der Bär ab und zu etwas rein, oft an
+jemanden aus dem Call („Lndr, du bist geil!“), nach einem Drop „Wooo! Was für ein
+Drop!“. Wer im Call ist, schwebt als runder Avatar im Hintergrund und hüpft im Takt.
+Die LED-Wand hinter dem Bären zeigt einen Equalizer aus dem laufenden Audio.
+
+| Variable | Standard | |
+|---|---|---|
+| `BAER_ENABLED` | `true` | Bär statt Titelbild |
+| `ANSAGE_ENABLED` | `true` | Ansagen/Moderation mit Stimme |
+| `MODERATION_ENABLED` | `true` | `false`: wieder Crossfade, nur kurze Ansage über dem Intro |
+| `MODERATION_TZ` | `Europe/Zurich` | für „Guten Abend“, „Freitagabend“ |
+| `DJ_NAME` | `DJ Bär` | Name in Sprechblase und Moderation |
+| `DJ_NAME_SPOKEN` | – | so spricht die Stimme den Namen (z. B. `DJ Quenn` für „DJ Kwen“) |
+| `BAER_OVER_VIDEO` | `true` | Bär auch bei Titeln mit eigenem Video (YouTube); `false` zeigt das Video |
+| `ZURUF_ENABLED` | `true` | Zurufe mitten im Song („Lndr, du bist geil!“, „Hände hoch!“, nach Drops) |
+| `ZURUF_EVERY` | `75` | Abstand der Zurufe im Schnitt (Sekunden, zufällig ±40 %) |
+| `BAER_ASSETS` | eingebaut | Ordner mit eigenem Bär-Paket (z. B. `/data/baer-qwen`) |
+
+**Eigener Bär (3D):** Eingebaut ist ein einfacher Bär aus Einzelbildern. Ein
+richtig animiertes Paket entsteht mit Blender (z. B. auf einem Mac). Der Plüsch-Bär
+ist ein durchgehender, weicher Körper (Metaballs) mit Partikel-Fell (gebüschelt, leicht
+gelockt, nach unten gekämmt), an dieselben Gelenke gebunden wie die Clips. T-Shirt mit
+Kragen und Ärmelsaum entlang der echten Schnittkanten, Pfotenballen (nur sichtbar, wenn
+die Handfläche zum Publikum zeigt), Kopfhörer, Gegenlicht in Pink/Cyan. Gesicht mit
+Glanzaugen, Brauen, weichen Bäckchen, Blinzeln, Zwinkern, konzentriertem und staunendem
+Blick, Mitsingen; der Kopf folgt dem Körper leicht verzögert, Ohren schwingen nach, der
+Beat-Akzent sitzt knackig auf der Eins. `--scale 1.5` rendert für 720p (~1,1 s pro Bild,
+~65 min für alles):
+
+```sh
+B="blender -b --factory-startup -P tools/baer3d/baer3d.py --"
+$B --out clips --scale 1.5 --desk                 # DJ-Pult
+$B --out clips --scale 1.5 --stage                # Bühne
+$B --out clips --scale 1.5 [--clips mix,wave]     # Clips (+ Ein-/Ausstiege)
+$B --out sheet --sheet --clips dab,roof           # Posen-Vorschau (schnell)
+$B --out frames --scale 1.5 --frame cheer:0.5     # ein Bild in voller Größe
+$B --out clips --scale 1.5 --clips talk --edges-only  # nur Ein-/Ausstiege
+python tools/baer3d/pack.py clips data/baer-paket # PNG -> WebP
+```
+
+`--model 1` baut den alten Kugel-Bären, `--fur-kids` und `--samples` tauschen
+Qualität gegen Renderzeit.
+
+**Saubere Übergänge:** Jeder Move hat einen Ein- und einen Ausstieg (je 1 Beat)
+über eine gemeinsame Grundpose (Pfoten am Controller). Der Bot plant den Wechsel im
+letzten Beat: Der alte Move läuft in die Grundpose aus, der neue steigt dort ein. Es
+wird nicht mehr überblendet (keine halbdurchsichtigen Doppel-Arme). Spontane Wechsel:
+beim Drop ein harter Schnitt unter dem Blitz, beim Losreden eine kurze Überblendung
+(0,22 s). Zurück zum Tanzen geht es wieder über die Grundpose.
+
+Jeder Clip ist ein 4-Beat-Loop. Es gibt 32 Moves in fünf Sorten, die der Bot
+taktweise mischt (zuletzt gespielte werden gemieden). Welcher Move kommt, hängt vom
+Song ab: Der Bot hört mit (Lautheit, Bass, Höhen, Tempo) und erkennt grob ruhige
+Stellen, Build-ups, Breaks und Drops. Ruhige Songs bekommen Schunkeln und Herz,
+Build-ups Schrauben am Pult, Drops Jubel, schnelle Songs mit vielen Hi-Hats Luftschlagzeug
+und Roboter. Auch was er sagt, passt dazu: „Achtung, gleich kommt's!“ im Build-up,
+„140 Beats pro Minute!“ bei schnellen Songs, nach dem Song „Vier Drops in einem Song!“
+oder „Schön entspannt war das“.
+
+| Sorte | Moves | wann |
+|---|---|---|
+| groove | mix, groove, pump, scratch, knobs, cue, sway, shimmy, lowpump | normal, wechselt oft |
+| hype | headbang, cheer, jump, clap, spin, airdrum, fistpump, roof, disco, robot, crowdwave, dab | Drops, laute Stellen |
+| special | wave, coffee, heart, thumbsup, stretch, lookout, bow | alle paar Takte, Kaffee in Stille |
+| talk | talk, point, explain | Ansagen und Moderation |
+| shout | shout | Zurufe mitten im Song |
+
+Das Pult (Booth mit LED-Front, Controller mit Jogwheels, Mixer und Pads) wird aus
+derselben Kamera gerendert, einmal gedimmt und einmal voll leuchtend. Der Bot blendet
+LED-Front, Kanten, Pegel und Jogwheels live im Takt zwischen beiden Bildern.
+
+Den Ordner nach `data/` legen (lesbar für UID 10000) und
+`BAER_ASSETS=/data/baer-paket` setzen. Ein kaputtes Paket fällt auf den
+eingebauten Bären zurück.
+
 ## Mediathek (Ordner `radio/`)
 
 MP3s (auch m4a, ogg, opus, flac, wav; Unterordner gehen) in `radio/` neben der

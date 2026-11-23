@@ -27,6 +27,7 @@ import numpy as np
 from .hub import Sink
 from .media import silence_block
 from .player import SAMPLE_RATE
+from .publikum import Publikum, user_of
 
 if TYPE_CHECKING:
     from .config import Config
@@ -92,6 +93,7 @@ class ElementCall:
         self._tasks: list[asyncio.Task] = []
         self._service_url: Optional[str] = None
         self._lock = asyncio.Lock()
+        self.publikum = Publikum(matrix)
         # Vom Bot gesetzt: wird aufgerufen, wenn in einem Raum, in dem wir (noch) nicht
         # im Call sind, jemand dem Call beitritt (Play kam vor dem Call).
         self.on_call_started = None
@@ -115,6 +117,46 @@ class ElementCall:
             return len(self._lk.remote_participants)
         except Exception:  # noqa: BLE001
             return None
+
+    def audience(self, room_id: str) -> list[str]:
+        """Wer im Call ist (Reihenfolge des Beitritts), der Bot zuletzt – fuers Publikum im Bild."""
+        users: list[str] = []
+        lk = self._lk
+        if lk is not None:
+            try:
+                for p in list(lk.remote_participants.values()):
+                    u = user_of(p.identity)
+                    if u not in users:
+                        users.append(u)
+            except Exception:  # noqa: BLE001
+                users = []
+        if not users:
+            for (u, _d) in self.others_in_call(room_id):
+                if u not in users:
+                    users.append(u)
+        me = self.cfg.matrix_user_id or self.cfg.user
+        if me and me not in users:
+            users.append(me)
+        return users
+
+    async def _audience_loop(self, room_id: str) -> None:
+        """Teilnehmer -> Avatare im Baer-Bild; alle 3 s abgeglichen."""
+        last: list[str] | None = None
+        try:
+            while True:
+                users = self.audience(room_id)
+                if users != last:
+                    last = users
+                    try:
+                        faces = await self.publikum.faces(room_id, users)
+                        me = self.cfg.matrix_user_id or self.cfg.user
+                        listeners = [name for (name, _img), u in zip(faces, users) if u != me]
+                        self.player.set_audience(faces, listeners)
+                    except Exception:  # noqa: BLE001
+                        log.debug("Publikum nicht aktualisiert", exc_info=True)
+                await asyncio.sleep(3)
+        finally:
+            self.player.set_audience([], [])
 
     def users_in_call(self, room_id: str) -> set[str]:
         """Nutzer-IDs (klein geschrieben) aller aktiven Teilnehmer ausser dem Bot."""
@@ -216,6 +258,9 @@ class ElementCall:
                 vtrack, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA))
             self._tasks.append(asyncio.create_task(
                 self._pump_video(video_src, w, h), name="ec-video"))
+            if getattr(self.player, "baer", None) is not None:
+                self._tasks.append(asyncio.create_task(
+                    self._audience_loop(room_id), name="ec-publikum"))
 
         self.room_id = room_id
         await self._send_membership(service_url)

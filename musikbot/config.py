@@ -80,6 +80,25 @@ class Config:
     crossfade_seconds: float = 6.0
     # Neuer Titel (ohne Crossfade) wird so lange eingeblendet (Sekunden, 0 = sofort voll).
     fade_in_seconds: float = 0.0
+    # Baer-DJ als Kamerabild, wenn ein Titel kein eigenes Video hat (statt Titelbild).
+    baer_enabled: bool = True
+    # Baer auch bei Titeln mit eigenem Video (YouTube); das Video wird dann nicht dekodiert.
+    baer_over_video: bool = True
+    # Ansage "Jetzt kommt: <Titel>" am Anfang jedes Titels (Piper-Stimme, Musik wird leiser).
+    ansage_enabled: bool = True
+    ansage_voice: str = "/opt/piper/de_DE-thorsten-medium.onnx"
+    # Zwischen zwei Titeln der Warteschlange: Musik aus, der Baer moderiert (statt Crossfade).
+    moderation_enabled: bool = True
+    moderation_tz: str = "Europe/Zurich"
+    # Name des DJs in Sprechblase und Moderation; `dj_name_spoken` = wie die Stimme ihn sagt
+    # (Piper liest z. B. "Qwen" als "Ku-wehn", "DJ Quenn" klingt wie "DJ Kwen").
+    dj_name: str = "DJ Bär"
+    dj_name_spoken: str = ""
+    # Zurufe mitten im Song ("Lndr, du bist geil!"), im Schnitt alle `zuruf_every` Sekunden.
+    zuruf_enabled: bool = True
+    zuruf_every: float = 75.0
+    # Eigenes Bildpaket fuer den Baeren (Ordner mit manifest.json); leer = eingebautes.
+    baer_assets: str = ""
 
     # --- Dashboard (Web) ---------------------------------------------------
     web_enabled: bool = True
@@ -201,6 +220,17 @@ class Config:
             default_volume=_int("DEFAULT_VOLUME", 60),
             crossfade_seconds=_float("CROSSFADE_SECONDS", 6.0),
             fade_in_seconds=_float("FADE_IN_SECONDS", 0.0),
+            baer_enabled=_bool("BAER_ENABLED", True),
+            baer_over_video=_bool("BAER_OVER_VIDEO", True),
+            ansage_enabled=_bool("ANSAGE_ENABLED", True),
+            ansage_voice=_str("ANSAGE_VOICE", "/opt/piper/de_DE-thorsten-medium.onnx"),
+            moderation_enabled=_bool("MODERATION_ENABLED", True),
+            moderation_tz=_str("MODERATION_TZ", "Europe/Zurich"),
+            dj_name=_str("DJ_NAME", "DJ Bär"),
+            dj_name_spoken=_str("DJ_NAME_SPOKEN"),
+            zuruf_enabled=_bool("ZURUF_ENABLED", True),
+            zuruf_every=_float("ZURUF_EVERY", 75.0),
+            baer_assets=_str("BAER_ASSETS"),
             web_enabled=_bool("WEB_ENABLED", True),
             web_host=_str("WEB_HOST", "0.0.0.0"),
             web_port=_int("WEB_PORT", 8095),
