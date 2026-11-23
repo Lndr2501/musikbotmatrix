@@ -18,13 +18,13 @@ services:
       # Dateien an, loescht/ueberschreibt nie). Host-Ordner muss fuer UID 10000 beschreibbar sein.
       - ./radio:/radio
 
-  # Eigene Spracherkennung fuers Ohr (OHR_ENABLED=true, STT_URL=http://127.0.0.1:8096/v1).
+  # Eigene Spracherkennung fuers Ohr (OHR_ENABLED=true, STT_URL=http://127.0.0.1:8097/v1).
   # Start mit: docker compose --profile ohr up -d
   stt:
     image: musikbotmatrix:latest
     profiles: ["ohr"]
     entrypoint: ["python", "-m", "musikbot.stt_server"]
-    network_mode: host                # lauscht nur auf 127.0.0.1:8096
+    network_mode: host                # lauscht nur auf 127.0.0.1:8097
     restart: unless-stopped
     environment:
       STT_LOCAL_MODEL: small          # small: ~2 s pro Satz, 0,8 GB; large-v3-turbo: ~8 s, 1,8 GB

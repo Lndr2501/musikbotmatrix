@@ -1,7 +1,7 @@
 """Eigene Spracherkennung neben dem Bot: Whisper (faster-whisper) auf der CPU, OpenAI-kompatibel.
 
 Start: ``python -m musikbot.stt_server`` (im selben Image, eigener Container, eigenes Speicherlimit).
-Der Bot spricht ihn wie jeden anderen Whisper-Server an (``STT_URL=http://127.0.0.1:8096/v1``):
+Der Bot spricht ihn wie jeden anderen Whisper-Server an (``STT_URL=http://127.0.0.1:8097/v1``):
 
 - ``POST /v1/audio/transcriptions`` (multipart: file, model, language, prompt) -> JSON
   ``{"text", "language", "segments": [{start, end, text, no_speech_prob, avg_logprob, compression_ratio}]}``
@@ -9,7 +9,7 @@ Der Bot spricht ihn wie jeden anderen Whisper-Server an (``STT_URL=http://127.0.
 
 Nichts wird gespeichert; Anfragen laufen nacheinander (eine CPU-Last, keine Warteschlangen-Explosion).
 
-Umgebung: STT_PORT (8096), STT_HOST (127.0.0.1), STT_LOCAL_MODEL (small), STT_THREADS (4),
+Umgebung: STT_PORT (8097), STT_HOST (127.0.0.1), STT_LOCAL_MODEL (small), STT_THREADS (4),
 STT_COMPUTE (int8), STT_MODELS_DIR (/data/stt-models), STT_SERVER_KEY (leer = ohne Schluessel).
 """
 from __future__ import annotations
@@ -125,7 +125,7 @@ async def _main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         datefmt="%H:%M:%S")
     host = os.environ.get("STT_HOST", "127.0.0.1")
-    port = int(os.environ.get("STT_PORT", "8096"))
+    port = int(os.environ.get("STT_PORT", "8097"))
     srv = SttServer(os.environ.get("STT_SERVER_KEY", "").strip())
     runner = web.AppRunner(srv.app(), access_log=None)
     await runner.setup()

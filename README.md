@@ -275,8 +275,8 @@ im Log, sobald er wieder erreichbar ist.
 **Eigene Spracherkennung (ohne fremden Server):** Das Image bringt faster-whisper mit
 (`WITH_STT=false` beim Bauen lässt es weg). Ein zweiter Container aus demselben Image
 (`python -m musikbot.stt_server`, Dienst `stt` in `compose.yaml`, Profil `ohr`) lauscht auf
-`127.0.0.1:8096` und spricht das OpenAI-Format; der Bot nutzt ihn mit
-`STT_URL=http://127.0.0.1:8096/v1`. Start: `docker compose --profile ohr up -d`. Das Modell
+`127.0.0.1:8097` und spricht das OpenAI-Format; der Bot nutzt ihn mit
+`STT_URL=http://127.0.0.1:8097/v1`. Start: `docker compose --profile ohr up -d`. Das Modell
 (`STT_LOCAL_MODEL`, Standard `small`) lädt beim ersten Start nach `/data/stt-models`.
 Gemessen auf einem Ryzen 5 3600X mit 4 Threads für einen 4-s-Satz: `small` 2,2 s / 0,8 GB,
 `large-v3-turbo` 8,5 s / 1,8 GB (genauer, „DJ Qwen“ statt „die DJ Qwen“).
