@@ -55,10 +55,15 @@ def read_audio(data: bytes) -> np.ndarray:
 
 
 def whisper_transcriber(model: str, threads: int, compute: str, models_dir: str) -> Transcriber:
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     from faster_whisper import WhisperModel
     t = time.monotonic()
-    wm = WhisperModel(model, device="cpu", compute_type=compute, cpu_threads=threads,
-                      download_root=models_dir or None)
+    opts = dict(device="cpu", compute_type=compute, cpu_threads=threads, download_root=models_dir or None)
+    try:                                   # schon geladen: ganz ohne Netz starten
+        wm = WhisperModel(model, local_files_only=True, **opts)
+    except Exception:  # noqa: BLE001
+        log.info("Whisper %s nicht im Cache – einmaliger Download", model)
+        wm = WhisperModel(model, **opts)
     log.info("Whisper %s geladen (%.0f s, %d Threads, %s)", model, time.monotonic() - t, threads, compute)
 
     def run(audio: np.ndarray, language: str, prompt: str):
