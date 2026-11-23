@@ -1315,6 +1315,7 @@ class Bot:
         if cfg.ohr_enabled and self.stt.available:
             self.ohr = Ohr(cfg, self.ki, self.stt, self.player, self._call_name)
             self.ecall.on_voice = self.ohr.feed
+            self.ohr.on_command = self._voice_command      # "DJ Qwen, skip" wie !skip
             # Mikrofone nur abonnieren, wenn die Spracherkennung erreichbar ist und die Person nicht widersprochen hat
             self.ecall.listen_ok = lambda u: (self.ohr is not None and self.ohr.ready
                                               and self._ki_allowed("ohr", u))
@@ -1330,6 +1331,27 @@ class Bot:
             log.warning("BLICK_ENABLED, aber KI_URL/KI_MODEL fehlen – Blick bleibt aus")
         self.ecall.on_joined = self._ki_joined
         self.ecall.on_left = self._ki_left
+
+    async def _voice_command(self, identity: str, name: str, arg: str) -> None:
+        """Sprachbefehl aus dem Ohr ("DJ Qwen, skip") wie einen Chat-Befehl ausfuehren.
+        Wer spricht, ist im Call; ALLOWED_USERS und `!ohr aus` gelten wie sonst."""
+        try:
+            user = user_of(identity)
+            room = self.ecall.room_id
+            if not room:
+                return
+            if not self._allowed(user) or not self._ki_allowed("ohr", user):
+                log.info("Sprachbefehl %s von %s abgelehnt", name, user)
+                return
+            log.info("Sprachbefehl %s von %s", name, user)
+            await self._dispatch(room, user, name, arg)
+            if name == "volume":
+                who = self._call_name(identity)
+                line = (f"{who}, {'lauter' if arg.startswith('+') else 'leiser'}, kommt sofort!"
+                        if arg[:1] in "+-" else f"{who}, Lautstärke {arg}.")
+                await self.player.shout(line, urgent=True)
+        except Exception:  # noqa: BLE001
+            log.warning("Sprachbefehl %s fehlgeschlagen", name, exc_info=True)
 
     def _ki_allowed(self, what: str, user: str) -> bool:
         return user.lower() not in self._optout.get(what, set())

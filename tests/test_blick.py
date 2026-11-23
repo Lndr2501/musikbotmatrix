@@ -65,17 +65,11 @@ def make(videos, answers, allowed=lambda u: True, img=None, context=None):
     return b, ki, call, player
 
 
-def test_screens_first_then_round_robin():
-    vids = [("@max:x:D1", "camera"), ("@anna:x:D2", "screen"), ("@tom:x:D3", "camera")]
+def test_all_sources_at_once_screens_first_capped():
+    vids = [("@max:x:D1", "camera"), ("@anna:x:D2", "screen")] + [(f"@p{i}:x:D", "camera") for i in range(8)]
     b, *_ = make(vids, [])
-    first = b.pick()
-    assert first == ("@anna:x:D2", "screen")
-    b._last_at[first] = 100.0
-    second = b.pick()
-    assert second[1] == "camera"
-    b._last_at[second] = 101.0
-    third = b.pick()
-    assert third not in (first, second)
+    c = b.candidates()
+    assert c[0] == ("@anna:x:D2", "screen") and len(c) == 6
 
 
 def test_opted_out_people_are_never_looked_at():
@@ -84,17 +78,40 @@ def test_opted_out_people_are_never_looked_at():
     assert b.candidates() == [("@max:x:D1", "camera")]
 
 
-async def test_look_comments_with_name_song_and_image():
-    b, ki, call, player = make([("@max:x:D1", "camera")], ["„Max, schickes Licht da hinten! 🎧“"],
+async def test_one_request_with_everyone_small_and_compressed():
+    import base64
+    import io
+    vids = [("@max:x:D1", "camera"), ("@anna:x:D2", "screen")]
+    b, ki, call, player = make(vids, ["„Max und Anna, ihr seid ja fleißig! 🎧“"],
+                               img=Image.new("RGB", (1920, 1080), (40, 120, 200)),
                                context=lambda: [("Anna", "ich hab Hunger")])
     assert await b.look()
-    assert call.shots == [("@max:x:D1", "camera")]
-    assert player.said == ["Max, schickes Licht da hinten!"]
+    assert sorted(call.shots) == sorted(vids)                    # beide Standbilder geholt
+    assert len(ki.seen) == 1                                     # aber nur EINE Anfrage
+    assert player.said == ["Max und Anna, ihr seid ja fleißig!"]
     sys_msg, user_msg = ki.seen[0]
     assert "DJ Qwen" in sys_msg["content"] and "Aussehen" in sys_msg["content"]
-    text = user_msg["content"][0]["text"]
-    assert "Kamerabild von Max" in text and "Voll von Künstler" in text and "Anna: ich hab Hunger" in text
-    assert user_msg["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    parts = user_msg["content"]
+    texts = " ".join(p["text"] for p in parts if p["type"] == "text")
+    assert "Bild 1: geteilter Bildschirm von Anna (neu)" in texts and "Bild 2: Kamerabild von Max (neu)" in texts
+    assert "Voll von Künstler" in texts and "Anna: ich hab Hunger" in texts
+    imgs = [p["image_url"]["url"] for p in parts if p["type"] == "image_url"]
+    assert len(imgs) == 2
+    sizes = [Image.open(io.BytesIO(base64.b64decode(u.split(",", 1)[1]))).size for u in imgs]
+    assert sizes == [(640, 360), (448, 252)]                     # Bildschirm groesser, Kamera klein
+
+
+async def test_missing_snapshots_are_skipped():
+    b, ki, call, player = make([("@max:x:D1", "camera"), ("@anna:x:D2", "camera")], ["Max, hallo!"])
+
+    async def snap(ident, kind, timeout=10.0):
+        if ident.startswith("@anna"):
+            raise RuntimeError("kaputt")
+        return call.img
+    call.snapshot = snap
+    assert await b.look()
+    texts = " ".join(p.get("text", "") for p in ki.seen[0][1]["content"])
+    assert "Max" in texts and "Anna" not in texts and player.said == ["Max, hallo!"]
 
 
 async def test_nothing_to_see_means_silence():
@@ -105,7 +122,7 @@ async def test_nothing_to_see_means_silence():
     assert player.said == []
 
 
-async def test_unchanged_picture_is_not_commented_twice():
+async def test_unchanged_pictures_are_not_commented_twice():
     b, ki, call, player = make([("@max:x:D1", "screen")], ["Max, wieder am Coden?", "Max, immer noch?"])
     await b.look()
     await b.look()
@@ -114,10 +131,11 @@ async def test_unchanged_picture_is_not_commented_twice():
     call.img = Image.new("RGB", (640, 360), (250, 240, 30))   # neues Bild: wieder Spruch, mit Hinweis
     await b.look()
     assert player.said[-1] == "Max, immer noch?"
-    assert "letzter Spruch zu Max war: Max, wieder am Coden?" in ki.seen[-1][1]["content"][0]["text"]
+    last = " ".join(p.get("text", "") for p in ki.seen[-1][1]["content"])
+    assert "letzten Sprüche (sag etwas anderes): Max, wieder am Coden?" in last
 
 
-async def test_waits_while_dj_is_busy_and_drops_line_when_camera_went_off():
+async def test_waits_while_dj_is_busy_and_drops_line_when_cameras_went_off():
     b, ki, call, player = make([("@max:x:D1", "camera")], ["Max, hallo!"])
     player.ok = False
     assert await b.look() is False and call.shots == []
@@ -209,7 +227,7 @@ async def test_loop_runs_and_stops_cleanly():
     finally:
         bl.FIRST_LOOK = old
         b.stop()
-    assert not b.running and not b._last_line
+    assert not b.running and not b._lines
 
 
 # ---------------------------------------------------------------- im Bot: Schalter, Widerspruch, Hinweis

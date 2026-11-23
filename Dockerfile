@@ -13,7 +13,9 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY musikbot ./musikbot
 
-RUN pip install --no-cache-dir .
+# WITH_STT=false spart ~250 MB, wenn keine eigene Spracherkennung (stt_server) gebraucht wird
+ARG WITH_STT=true
+RUN if [ "$WITH_STT" = "true" ]; then pip install --no-cache-dir ".[stt]"; else pip install --no-cache-dir .; fi
 
 # Non-root; /data ist das Volume fuer Cache/Bibliothek/Matrix-Store
 RUN useradd --create-home --uid 10000 musikbot \

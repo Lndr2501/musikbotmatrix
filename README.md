@@ -225,14 +225,30 @@ eingebauten Bären zurück.
 Der DJ kann im Element Call **hinschauen** und **zuhören**. Beides ist standardmäßig aus.
 
 - **Blick** (`BLICK_ENABLED=true`): Alle paar Minuten (`BLICK_EVERY`, Standard 180 s ± 40 %)
-  nimmt er ein Standbild einer eingeschalteten Kamera oder eines geteilten Bildschirms
-  (Bildschirme zuerst, reihum), schickt es an ein Bildmodell und ruft einen kurzen Spruch
-  über die Musik („Max, du zockst ja schon wieder!“). Unverändertes Bild = kein neuer Spruch.
+  holt er gleichzeitig ein Standbild von allen eingeschalteten Kameras und geteilten
+  Bildschirmen (höchstens 6, Bildschirme zuerst), stark verkleinert (Kamera 448 px,
+  Bildschirm 640 px, JPEG 55) und schickt alle in **einer** Anfrage ans Bildmodell. Er sucht
+  sich das Interessanteste aus und ruft einen Spruch über die Musik („Max, du zockst ja schon
+  wieder!“). Hat sich kein Bild verändert, sagt er nichts.
   Das Modell soll nie Aussehen/Körper bewerten und nichts Privates vom Bildschirm vorlesen.
-- **Ohr** (`OHR_ENABLED=true`): Er hört die Mikrofone mit, wandelt Sprache per Whisper in Text
-  und antwortet, wenn jemand ihn beim Namen anspricht („DJ Qwen, was läuft da?“). Ab und zu
-  (`OHR_EVERY`, 0 = nie) redet er von sich aus beim Gespräch mit. Die Texte der letzten drei
-  Minuten liegen nur im Arbeitsspeicher und fließen auch in die Blick-Sprüche ein.
+- **Ohr** (`OHR_ENABLED=true`): Er hört die Mikrofone mit und wandelt Sprache per Whisper in
+  Text. **Startwort ist sein Name am Satzanfang** („DJ Qwen, …“, „Hey DJ Qwen …“, auch so,
+  wie Whisper es schreibt: „DJ Gwen“, „Kwen“). Mitten im Satz („ich find DJ Qwen cool“) zählt
+  nicht. Nur das Startwort („DJ Qwen?“) → er sagt sofort „Ja, Max?“ und nimmt den nächsten Satz
+  (8 s) auch ohne Startwort. Fragen beantwortet das Sprachmodell ohne Nachdenk-Modus (ein Satz).
+  Ab und zu (`OHR_EVERY`, 0 = nie) redet er von sich aus beim Gespräch mit. Die Texte der
+  letzten drei Minuten liegen nur im Arbeitsspeicher und fließen auch in die Blick-Sprüche ein.
+- **Sprachbefehle** (ohne Sprachmodell, sofort): nach dem Startwort wie der Chat-Befehl, mit
+  denselben Rechten (`ALLOWED_USERS`, `!ohr aus`):
+
+  | Gesagt | wirkt wie |
+  |---|---|
+  | „DJ Qwen, skip“ / „nächster Song“ / „spiel was anderes“ | `!skip` |
+  | „… vorheriger Song“ / „letzter Song nochmal“ | `!previous` |
+  | „… Pause“ / „… mach weiter“ / „… stopp“ | `!pause` / `!resume` / `!stop` |
+  | „… lauter“ / „… viel leiser“ / „… Lautstärke auf 80“ | `!volume +15` / `-30` / `80` |
+  | „… spiel Sandstorm von Darude“ / „… mach mal Daft Punk an“ | `!play <Suche>` |
+  | „… misch die Liste“ | `!shuffle` |
 
 **Datenschutz:** Bilder und Ton werden nicht gespeichert; sie gehen nur an die
 konfigurierten Endpunkte (`KI_URL`, `STT_URL` – nimm eigene Server). Beim ersten Beitritt
@@ -255,6 +271,15 @@ ihn ab und gibt die Schlüssel an LiveKit weiter, sonst bekäme er nur verschlü
 
 Schläft der Whisper-Server (z. B. ein Laptop), pausiert das Ohr von selbst und meldet sich
 im Log, sobald er wieder erreichbar ist.
+
+**Eigene Spracherkennung (ohne fremden Server):** Das Image bringt faster-whisper mit
+(`WITH_STT=false` beim Bauen lässt es weg). Ein zweiter Container aus demselben Image
+(`python -m musikbot.stt_server`, Dienst `stt` in `compose.yaml`, Profil `ohr`) lauscht auf
+`127.0.0.1:8096` und spricht das OpenAI-Format; der Bot nutzt ihn mit
+`STT_URL=http://127.0.0.1:8096/v1`. Start: `docker compose --profile ohr up -d`. Das Modell
+(`STT_LOCAL_MODEL`, Standard `small`) lädt beim ersten Start nach `/data/stt-models`.
+Gemessen auf einem Ryzen 5 3600X mit 4 Threads für einen 4-s-Satz: `small` 2,2 s / 0,8 GB,
+`large-v3-turbo` 8,5 s / 1,8 GB (genauer, „DJ Qwen“ statt „die DJ Qwen“).
 
 ## Mediathek (Ordner `radio/`)
 

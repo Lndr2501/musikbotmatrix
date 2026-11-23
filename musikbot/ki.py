@@ -21,12 +21,12 @@ MAX_SIDE = 1024          # Bildkante fuers Modell: Bildschirmtext bleibt lesbar,
 JPEG_QUALITY = 82
 
 
-def image_part(img) -> dict:
-    """PIL-Bild -> OpenAI-`image_url`-Teil (JPEG, Kante hoechstens MAX_SIDE)."""
+def image_part(img, max_side: int = MAX_SIDE, quality: int = JPEG_QUALITY) -> dict:
+    """PIL-Bild -> OpenAI-`image_url`-Teil (JPEG, Kante hoechstens `max_side`)."""
     img = img.convert("RGB")
-    img.thumbnail((MAX_SIDE, MAX_SIDE))
+    img.thumbnail((max_side, max_side))
     buf = io.BytesIO()
-    img.save(buf, "JPEG", quality=JPEG_QUALITY)
+    img.save(buf, "JPEG", quality=quality, optimize=True)
     return {"type": "image_url",
             "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}}
 

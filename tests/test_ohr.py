@@ -89,16 +89,21 @@ def test_health_url():
 QWEN = name_tokens("DJ Qwen", "DJ Quenn")
 
 
-@pytest.mark.parametrize("text", ["DJ Qwen, spiel mal was Schnelleres", "Hey Kwen, was läuft da?",
+# Weckwort: nur am Satzanfang, hoechstens ein Rufwort davor; der blosse Name nur als erstes Wort
+@pytest.mark.parametrize("text", ["DJ Qwen, spiel mal was Schnelleres", "Hey DJ Kwen, was läuft da?",
                                   "Quenn, wie heißt der Song?", "dj quen ist cool",
                                   "Didschei Gwen mach lauter", "D.J. Kwenn bist du da?",
-                                  "Ich find den Beat gut. Qwen, was ist das?", "Na DJ Qwen?"])
+                                  "Ich find den Beat gut. Qwen, was ist das?", "Na DJ Qwen?",
+                                  "Ok DJ Qwen skip", "DJQwen, lauter", "Das war geil. DJ Qwen, nochmal!"])
 def test_addressed_positive(text):
     assert addressed(text, QWEN)
 
 
 @pytest.mark.parametrize("text", ["Gwendolyn kommt später", "ich hab Gwen gestern gesehen",
-                                  "der DJ ist gut", "Queen ist eine Band", "", "Kwenzel ist da"])
+                                  "der DJ ist gut", "Queen ist eine Band", "", "Kwenzel ist da",
+                                  "ich find DJ Qwen cool", "frag mal DJ Qwen", "Hey Kwen, was läuft da?",
+                                  "Hallo zusammen, hier ist DJ Qwen. Wir starten mit voll.",
+                                  "Das ist von D.J. Qwen gemacht", "hey hallo DJ Qwen skip"])
 def test_addressed_negative(text):
     assert not addressed(text, QWEN)
 
@@ -106,7 +111,9 @@ def test_addressed_negative(text):
 def test_addressed_generic_name():
     names = name_tokens("DJ Bär", "")
     assert addressed("DJ Bär, was geht?", names)
-    assert addressed("Hey Bär!", names)
+    assert addressed("Bär, was geht?", names)
+    assert addressed("Hey DJ Bär!", names)
+    assert not addressed("Hey Bär!", names)                # blosser Name nur als allererstes Wort
     assert not addressed("der Bär ist süß", names)
 
 
@@ -176,19 +183,19 @@ async def test_reply_when_addressed_is_cleaned_and_urgent():
     assert player.said == [("Hey Max! Klar, das ist Sandstorm!", True)]
     prompt = ki.calls[0][1]["content"]
     assert "Sandstorm" in prompt and "Eva: Ich hab Hunger" in prompt and "Max" in prompt
-    assert "!skip" in ki.calls[0][0]["content"]          # weiss, dass er nichts per Sprache steuert
+    assert "!skip" in ki.calls[0][0]["content"]          # kennt Chat- und Sprachbefehle als Hinweis
 
 
 async def test_reply_rate_limit():
     ki = FakeKI(delay=0.05)
     ohr = _ohr(ki=ki)
-    ohr._heard("@max:x:D1", "DJ Qwen, hallo")
+    ohr._heard("@max:x:D1", "DJ Qwen, wie geht's?")
     ohr._heard("@max:x:D1", "DJ Qwen, hörst du?")         # laeuft noch -> keine zweite Antwort
     await ohr._reply_task
     ohr._heard("@max:x:D1", "DJ Qwen, jetzt?")            # fertig, aber < 8 s -> auch nicht
     assert len(ki.calls) == 1
     ohr._last_reply -= REPLY_GAP_S + 1
-    ohr._heard("@max:x:D1", "DJ Qwen, und jetzt?")
+    ohr._heard("@max:x:D1", "DJ Qwen, und was jetzt?")
     await ohr._reply_task
     assert len(ki.calls) == 2
 
@@ -198,7 +205,9 @@ async def test_no_reply_when_not_addressed_or_empty_answer():
     ohr = _ohr(ki=FakeKI(answer="-"), player=player)
     ohr._heard("@max:x:D1", "Gwendolyn kommt später")
     assert ohr._reply_task is None
-    ohr._heard("@max:x:D1", "Hey Qwen!")
+    ohr._heard("@max:x:D1", "Hey Qwen, erzähl was!")     # blosser Name nach Rufwort: kein Weckwort
+    assert ohr._reply_task is None
+    ohr._heard("@max:x:D1", "DJ Qwen, erzähl was!")
     assert await ohr._reply_task is False
     assert player.said == []
 
@@ -238,7 +247,7 @@ async def test_worker_transcribes_with_name_prompt_and_queue_is_bounded():
 
 
 async def test_feed_end_to_end_and_pause_while_stt_down():
-    stt = FakeSTT(text="Hey Qwen, geiler Song")
+    stt = FakeSTT(text="Hey DJ Qwen, geiler Song")
     player = FakePlayer()
     ohr = _ohr(stt=stt, player=player)
     ohr.start()
@@ -409,3 +418,166 @@ def test_sentences_overlapping_the_bots_own_voice_are_dropped():
     assert len(o._queue) == 1 and o.dropped == 1
     say(talking=False)
     assert len(o._queue) == 2
+
+
+# ------------------------------------------------------------ Weckwort: schneller Weg danach
+class RecKI(FakeKI):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.max_tokens: list[int] = []
+
+    async def chat(self, messages, max_tokens=120, temperature=0.9):
+        self.max_tokens.append(max_tokens)
+        return await super().chat(messages, max_tokens, temperature)
+
+
+async def test_reply_is_short_with_little_context_and_only_the_part_after_the_wake_word():
+    from musikbot.ohr import REPLY_CONTEXT_LINES, REPLY_MAX_TOKENS
+    ki = RecKI()
+    ohr = _ohr(ki=ki)
+    for i in range(9):
+        ohr._heard("@eva:x:D2", f"Zeile {i}")
+    ohr._heard("@max:x:D1", "Das war geil. DJ Qwen, wie heißt der Song?")
+    await ohr._reply_task
+    assert ki.max_tokens == [REPLY_MAX_TOKENS] and REPLY_MAX_TOKENS <= 60
+    prompt = ki.calls[0][1]["content"]
+    ctx = prompt.split("Mitgehörtes Gespräch (zuletzt):\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    assert len(ctx) == REPLY_CONTEXT_LINES == 5
+    assert "angesprochen: wie heißt der Song?" in prompt
+
+
+async def test_just_the_wake_word_gets_an_instant_ack_and_opens_a_follow_up_window():
+    from musikbot.ohr import FOLLOWUP_S
+    player, ki = FakePlayer(), FakeKI()
+    ohr = _ohr(ki=ki, player=player)
+    ohr._heard("@max:x:D1", "DJ Qwen?")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert player.said == [("Ja, Max?", True)] and ki.calls == []     # ohne Sprachmodell, sofort
+    now = ohr._now()
+    ohr._heard("@eva:x:D2", "was geht")                  # andere Person: gilt nicht ihm
+    assert ohr._reply_task is None
+    ohr._heard("@max:x:D1", "wie heißt der Song?", at=now + 2)     # Folgesatz ohne Weckwort
+    await ohr._reply_task
+    assert len(ki.calls) == 1 and "angesprochen: wie heißt der Song?" in ki.calls[0][1]["content"]
+    ohr._heard("@max:x:D1", "und noch was")             # Fenster verbraucht
+    assert len(ki.calls) == 1
+    ohr._heard("@max:x:D1", "Hey DJ Qwen!")              # nur Rufwort: wieder Rueckfrage
+    ohr._last_reply -= REPLY_GAP_S + 1
+    ohr._heard("@max:x:D1", "erzähl was", at=ohr._now() + FOLLOWUP_S + 1)   # zu spaet
+    assert len(ki.calls) == 1
+
+
+async def test_follow_up_after_ack_can_be_a_command():
+    got = []
+
+    async def on_command(identity, cmd, arg):
+        got.append((identity, cmd, arg))
+    ki = FakeKI()
+    ohr = _ohr(ki=ki)
+    ohr.on_command = on_command
+    ohr._heard("@max:x:D1", "DJ Qwen")
+    ohr._heard("@max:x:D1", "nächster Song")
+    await asyncio.sleep(0.01)
+    assert got == [("@max:x:D1", "skip", "")] and ki.calls == []
+
+
+async def test_addressed_command_goes_to_on_command_not_to_the_language_model():
+    got = []
+
+    async def on_command(identity, cmd, arg):
+        got.append((identity, cmd, arg))
+    ki = FakeKI()
+    ohr = _ohr(ki=ki)
+    ohr.on_command = on_command
+    ohr._heard("@max:x:D1", "DJ Qwen, mach mal lauter!")
+    await asyncio.sleep(0.01)
+    assert got == [("@max:x:D1", "volume", "+15")] and ki.calls == [] and ohr._reply_task is None
+    ohr._heard("@max:x:D1", "DJ Qwen, mach mal lauter!")    # Satz doppelt erkannt: einmal reicht
+    ohr._heard("@eva:x:D2", "DJ Qwen, skip")                 # < 4 s nach dem letzten Befehl: gedrosselt
+    await asyncio.sleep(0.01)
+    assert len(got) == 1
+    ohr._last_cmd_at -= 5                                    # 5 s spaeter: anderer Befehl geht
+    ohr._heard("@eva:x:D2", "DJ Qwen, skip")
+    ohr._last_cmd_at -= 5                                    # gleicher Befehl erst nach 10 s wieder
+    ohr._heard("@eva:x:D2", "DJ Qwen, skip")
+    await asyncio.sleep(0.01)
+    assert got[1:] == [("@eva:x:D2", "skip", "")]
+    ohr._last_cmd_at -= 11
+    ohr._heard("@eva:x:D2", "DJ Qwen, skip")
+    await asyncio.sleep(0.01)
+    assert len(got) == 3
+
+
+async def test_without_command_handler_commands_fall_back_to_a_reply():
+    ki = FakeKI()
+    ohr = _ohr(ki=ki)                                        # on_command nicht gesetzt
+    ohr._heard("@max:x:D1", "DJ Qwen, skip")
+    await ohr._reply_task
+    assert len(ki.calls) == 1
+
+
+async def test_failing_command_handler_does_not_break_the_ear():
+    async def boom(identity, cmd, arg):
+        raise RuntimeError("kaputt")
+    ohr = _ohr()
+    ohr.on_command = boom
+    ohr._heard("@max:x:D1", "DJ Qwen, Pause")
+    await asyncio.sleep(0.01)
+    ohr._heard("@max:x:D1", "noch da")                       # weiterhin normal
+    assert ohr.recent()[-1] == ("Max", "noch da")
+
+
+# ------------------------------------------------------------ im Bot: Sprachbefehle ausfuehren
+def _voice_bot(tmp_path, **kw):
+    from musikbot.bot import Bot
+    from musikbot.config import Config
+    cfg = Config(homeserver="http://h", user="@bot:x", password="p", data_dir=str(tmp_path / "d"),
+                 matrix_user_id="@bot:x", dj_name="DJ Qwen", ki_url="http://ki/v1", ki_model="m",
+                 stt_url="http://stt/v1", ohr_enabled=True, **kw)
+    bot = Bot(cfg)
+    calls, said = [], []
+
+    async def dispatch(room, sender, name, arg):
+        calls.append((room, sender, name, arg))
+
+    async def shout(text, urgent=False):
+        said.append((text, urgent))
+        return True
+    bot._dispatch = dispatch
+    bot.player.shout = shout
+    bot._call_name = lambda ident: "Max"
+    bot.ecall.room_id = "!call:x"
+    return bot, calls, said
+
+
+async def test_bot_wires_voice_commands_and_runs_them_like_chat(tmp_path):
+    bot, calls, said = _voice_bot(tmp_path)
+    assert bot.ohr.on_command == bot._voice_command
+    await bot._voice_command("@max:x:DEV1", "skip", "")
+    await bot._voice_command("@max:x:DEV1", "volume", "+15")
+    assert calls == [("!call:x", "@max:x", "skip", ""), ("!call:x", "@max:x", "volume", "+15")]
+    assert said == [("Max, lauter, kommt sofort!", True)]
+
+
+async def test_bot_voice_commands_respect_allowed_users_opt_out_and_call(tmp_path):
+    bot, calls, said = _voice_bot(tmp_path, allowed_users=("@anna:x",))
+    await bot._voice_command("@max:x:DEV1", "skip", "")           # nicht in ALLOWED_USERS
+    assert calls == []
+    await bot._voice_command("@anna:x:DEV2", "skip", "")
+    assert calls == [("!call:x", "@anna:x", "skip", "")]
+    bot._optout["ohr"].add("@anna:x")                              # hat widersprochen
+    await bot._voice_command("@anna:x:DEV2", "pause", "")
+    bot.ecall.room_id = None                                       # nicht (mehr) im Call
+    bot._optout["ohr"].clear()
+    await bot._voice_command("@anna:x:DEV2", "pause", "")
+    assert len(calls) == 1
+
+
+async def test_bot_voice_command_errors_stay_inside(tmp_path):
+    bot, calls, said = _voice_bot(tmp_path)
+
+    async def boom(*a):
+        raise RuntimeError("kaputt")
+    bot._dispatch = boom
+    await bot._voice_command("@max:x:DEV1", "skip", "")            # wirft nicht

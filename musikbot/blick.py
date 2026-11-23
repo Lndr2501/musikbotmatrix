@@ -1,17 +1,18 @@
-"""Blick: der DJ schaut ab und zu auf eine Kamera oder einen geteilten Bildschirm im Call
+"""Blick: der DJ schaut ab und zu auf alle Kameras und geteilten Bildschirme im Call
 und ruft einen kurzen Spruch dazu rein.
 
-Ablauf pro Blick: Kandidat waehlen (geteilte Bildschirme zuerst, reihum, nur wer nicht
-widersprochen hat) -> ein Standbild per kurzem Abo (`ElementCall.snapshot`) -> Bildmodell
-(`KI.chat` mit Bild) -> `Player.shout`. Bilder werden nicht gespeichert; vom letzten Bild
-pro Quelle bleibt nur ein 16x9-Graustufen-Fingerabdruck, damit ein unveraendertes Bild
-nicht dauernd kommentiert wird.
+Ablauf pro Blick: von allen Quellen gleichzeitig ein Standbild (`ElementCall.snapshot`, kurzes
+Abo), stark verkleinert und komprimiert, alle zusammen in EINER Anfrage ans Bildmodell -> ein
+Satz -> `Player.shout`. Das ist schneller als reihum (ein Aufruf statt vieler) und er sieht
+trotzdem alle. Bilder werden nicht gespeichert; pro Quelle bleibt nur ein 16x9-Graustufen-
+Fingerabdruck, damit Unveraendertes nicht dauernd kommentiert wird.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import random
+from collections import deque
 from typing import Callable, Optional
 
 import numpy as np
@@ -24,7 +25,11 @@ log = logging.getLogger("musikbot.blick")
 FIRST_LOOK = (35.0, 70.0)      # erster Blick nach dem Beitritt (s)
 RETRY_S = 12.0                 # Moment passt gerade nicht (Ansage, Songanfang): bald wieder
 SAME_IMAGE = 7.0               # mittlere Grauwert-Differenz darunter = gleiches Bild
-SAME_IMAGE_QUIET = 15 * 60.0   # gleiches Bild erst nach so langer Zeit wieder kommentieren
+MAX_SOURCES = 6                # hoechstens so viele Bilder pro Anfrage (Bildschirme zuerst)
+SNAP_TIMEOUT = 8.0             # pro Standbild; alle laufen gleichzeitig
+# Klein und stark komprimiert: wenige Bild-Tokens = schnelle Antwort. Bildschirme etwas groesser (Text).
+SIDE = {"camera": 448, "screen": 640}
+QUALITY = 55
 SKIP = "-"                     # Antwort des Modells: nichts Sinnvolles zu sehen
 
 KIND_LABEL = {"camera": "Kamerabild", "screen": "geteilter Bildschirm"}
@@ -41,15 +46,17 @@ def same_image(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> bool:
 def system_prompt(dj: str) -> str:
     return (
         f"Du bist {dj}, ein frecher, herzlicher Plüschbär-DJ in einem Videocall unter Freunden. "
-        "Du legst Musik auf und wirfst ab und zu einen kurzen Spruch über das rein, was du bei den Leuten siehst.\n"
+        "Du legst Musik auf und wirfst ab und zu einen kurzen Spruch über das rein, was du bei den Leuten siehst. "
+        "Du bekommst die aktuellen Standbilder aller Kameras und geteilten Bildschirme, jeweils mit Namen.\n"
         "Regeln:\n"
-        "- Genau ein Satz auf Deutsch, höchstens 20 Wörter, sprich die Person direkt mit Namen an (du).\n"
-        "- Kamerabild: Stimmung, Umgebung, Gegenstände, Tiere, Licht, was die Person gerade tut. "
+        "- Such dir das Interessanteste aus (am liebsten etwas, das als neu markiert ist) und mach genau "
+        "einen Satz auf Deutsch, höchstens 20 Wörter. Sprich die Person (oder die Leute) direkt mit Namen an.\n"
+        "- Kamerabild: Stimmung, Umgebung, Gegenstände, Tiere, Licht, was jemand gerade tut. "
         "Niemals Aussehen, Körper, Gewicht, Haut, Alter, Herkunft oder Gesundheit bewerten.\n"
         "- Bildschirm: sag locker, was die Person gerade macht (Spiel, Code, Video, Webseite, Dokument). "
-        "Lies nichts Privates vor: keine Nachrichten, E-Mails, Namen anderer Leute, Passwörter, Adressen, Zahlen von Konten.\n"
+        "Lies nichts Privates vor: keine Nachrichten, E-Mails, Namen anderer Leute, Passwörter, Adressen, Kontodaten.\n"
         "- Freundlich frech, nie gemein, nichts Anzügliches.\n"
-        f"- Ist das Bild schwarz, leer, verschwommen oder gibt nichts her, antworte nur mit {SKIP}\n"
+        f"- Geben die Bilder nichts her (schwarz, leer, verschwommen), antworte nur mit {SKIP}\n"
         "- Keine Emojis, keine Anführungszeichen, kein Vorspann."
     )
 
@@ -68,9 +75,8 @@ class Blick:
         self.context = context            # -> [(Name, Gesagtes)] aus dem Ohr, falls an
         self.rng = rng or random.Random()
         self._task: Optional[asyncio.Task] = None
-        self._last_at: dict[tuple[str, str], float] = {}           # Quelle -> letzter Blick
         self._last_print: dict[tuple[str, str], np.ndarray] = {}   # Quelle -> Fingerabdruck
-        self._last_line: dict[str, str] = {}                       # Identity -> letzter Spruch
+        self._lines: deque[str] = deque(maxlen=4)                  # letzte Sprueche
 
     # ------------------------------------------------------------ Ablauf
     @property
@@ -85,17 +91,13 @@ class Blick:
         if self._task is not None:
             self._task.cancel()
         self._task = None
-        self._last_at.clear()
         self._last_print.clear()
-        self._last_line.clear()
+        self._lines.clear()
 
     def forget(self, user: str) -> None:
         """Alles zu einem Nutzer vergessen (nach !blick aus)."""
-        for d in (self._last_at, self._last_print):
-            for k in [k for k in d if user_of(k[0]).lower() == user.lower()]:
-                d.pop(k, None)
-        for k in [k for k in self._last_line if user_of(k).lower() == user.lower()]:
-            self._last_line.pop(k, None)
+        for k in [k for k in self._last_print if user_of(k[0]).lower() == user.lower()]:
+            self._last_print.pop(k, None)
 
     def _gap(self) -> float:
         return max(30.0, self.cfg.blick_every * self.rng.uniform(0.6, 1.4))
@@ -114,6 +116,7 @@ class Blick:
 
     # ------------------------------------------------------------ ein Blick
     def candidates(self) -> list[tuple[str, str]]:
+        """Alle erlaubten Quellen, geteilte Bildschirme zuerst, hoechstens MAX_SOURCES."""
         out = []
         for ident, kind in self.ecall.remote_videos():
             try:
@@ -121,44 +124,39 @@ class Blick:
                     out.append((ident, kind))
             except Exception:  # noqa: BLE001
                 continue
-        return out
-
-    def pick(self) -> Optional[tuple[str, str]]:
-        """Am laengsten nicht angeschaute Quelle; geteilte Bildschirme vor Kameras."""
-        cands = self.candidates()
-        if not cands:
-            return None
-        return min(cands, key=lambda c: (self._last_at.get(c, -1e9) + (0 if c[1] == "screen" else 60.0),
-                                         self.rng.random()))
+        out.sort(key=lambda c: c[1] != "screen")
+        return out[:MAX_SOURCES]
 
     async def look(self) -> bool:
-        """Ein Blick. False = Moment passt nicht (gleich nochmal versuchen), True = erledigt."""
-        loop = asyncio.get_running_loop()
+        """Ein Blick auf alle. False = Moment passt nicht (gleich nochmal versuchen), True = erledigt."""
         if not self.player._zuruf_ok() or self.player.speech_idle < 25:
             return False
-        cand = self.pick()
-        if cand is None:
+        cands = self.candidates()
+        if not cands:
             return True
-        ident, kind = cand
-        self._last_at[cand] = loop.time()
-        img = await self.ecall.snapshot(ident, kind)
-        if img is None:
+        shots = await asyncio.gather(*(self.ecall.snapshot(i, k, timeout=SNAP_TIMEOUT) for i, k in cands),
+                                     return_exceptions=True)
+        got = [(c, img) for c, img in zip(cands, shots) if img is not None and not isinstance(img, BaseException)]
+        if not got:
             return True
-        fp = fingerprint(img)
-        prev = self._last_print.get(cand)
-        self._last_print[cand] = fp
-        if same_image(prev, fp) and ident in self._last_line:
-            log.info("Blick: %s unverändert, kein Spruch", KIND_LABEL.get(kind, kind))
+        new = set()
+        for c, img in got:
+            fp = fingerprint(img)
+            if not same_image(self._last_print.get(c), fp):
+                new.add(c)
+            self._last_print[c] = fp
+        if not new and self._lines:
+            log.info("Blick: %d Bilder unverändert, kein Spruch", len(got))
             return True
-        name = self.name_of(ident)
-        text = await self.comment(img, name, kind, self._last_line.get(ident))
+        text = await self.comment(got, new)
         if not text:
             return True
-        if cand not in self.ecall.remote_videos():      # Kamera inzwischen aus / Person weg
+        live = set(self.ecall.remote_videos())
+        if not any(c in live for c, _ in got):          # inzwischen alle Kameras aus / Leute weg
             return True
         if await self.player.shout(text):
-            self._last_line[ident] = text
-            log.info("Blick: %s von %s kommentiert", KIND_LABEL.get(kind, kind), name)
+            self._lines.append(text)
+            log.info("Blick: %d Bilder angeschaut, Spruch gesagt", len(got))
         return True
 
     def _song(self) -> str:
@@ -171,11 +169,18 @@ class Blick:
             return ""
         return f"{title} von {artist}" if artist else title
 
-    def messages(self, img, name: str, kind: str, last: Optional[str]) -> list[dict]:
-        lines = [f"Das ist gerade der {KIND_LABEL.get(kind, 'Kamerabild')} von {name}."]
+    def messages(self, got: list, new: set) -> list[dict]:
+        intro = ["Die aktuellen Bilder aus dem Call:"]
         song = self._song()
         if song:
-            lines.append(f"Gerade läuft: {song}.")
+            intro.insert(0, f"Gerade läuft: {song}.")
+        content: list[dict] = [{"type": "text", "text": "\n".join(intro)}]
+        for n, ((ident, kind), img) in enumerate(got, 1):
+            mark = " (neu)" if (ident, kind) in new else ""
+            content.append({"type": "text",
+                            "text": f"Bild {n}: {KIND_LABEL.get(kind, 'Kamerabild')} von {self.name_of(ident)}{mark}"})
+            content.append(image_part(img, max_side=SIDE.get(kind, 448), quality=QUALITY))
+        tail = []
         said = []
         if self.context is not None:
             try:
@@ -183,16 +188,17 @@ class Blick:
             except Exception:  # noqa: BLE001
                 said = []
         if said:
-            lines.append("Zuletzt im Call gesagt (nur als Hintergrund, nicht wörtlich zitieren): "
-                         + " | ".join(f"{n}: {t}" for n, t in said))
-        if last:
-            lines.append(f"Dein letzter Spruch zu {name} war: {last} Sag diesmal etwas anderes.")
-        lines.append(f"Dein Spruch an {name}:")
+            tail.append("Zuletzt im Call gesagt (nur als Hintergrund, nicht wörtlich zitieren): "
+                        + " | ".join(f"{n}: {t}" for n, t in said))
+        if self._lines:
+            tail.append("Deine letzten Sprüche (sag etwas anderes): " + " | ".join(self._lines))
+        tail.append("Dein Spruch:")
+        content.append({"type": "text", "text": "\n".join(tail)})
         return [{"role": "system", "content": system_prompt(self.cfg.dj_name)},
-                {"role": "user", "content": [{"type": "text", "text": "\n".join(lines)}, image_part(img)]}]
+                {"role": "user", "content": content}]
 
-    async def comment(self, img, name: str, kind: str, last: Optional[str] = None) -> Optional[str]:
-        raw = await self.ki.chat(self.messages(img, name, kind, last), max_tokens=90)
+    async def comment(self, got: list, new: set) -> Optional[str]:
+        raw = await self.ki.chat(self.messages(got, new), max_tokens=90)
         if not raw:
             return None
         text = clean_line(raw, max_words=26)
