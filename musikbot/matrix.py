@@ -33,6 +33,48 @@ MEDIA_EVENTS = PLAIN_MEDIA + ENCRYPTED_MEDIA
 VOICE_FLAG = "org.matrix.msc3245.voice"   # so markieren Element und Diddy Sprachnachrichten
 
 
+RTC_KEYS_EVENT = "io.element.call.encryption_keys"
+_rtc_key_listeners: list[Callable[[str, Optional[str], dict], None]] = []
+
+
+def install_rtc_key_hook() -> None:
+    """Element Call schickt jedem Teilnehmer seinen Medien-Schluessel als Olm-verschluesseltes
+    To-Device. matrix-nio entschluesselt das, kennt den Typ aber nicht und verwirft ihn
+    ("unsupported Olm event"). Hier abfangen: nio hat Absender und Payload schon geprueft
+    (`_verify_olm_payload`), das Geraet kommt aus dem Curve25519-Schluessel der Olm-Sitzung."""
+    from nio.crypto import Olm
+    if getattr(Olm, "_musikbot_rtc_hook", False):
+        return
+    original = Olm._handle_olm_event
+
+    def handle(self, sender, sender_key, payload):
+        if isinstance(payload, dict) and payload.get("type") == RTC_KEYS_EVENT:
+            device = None
+            try:
+                for dev in self.device_store.active_user_devices(sender):
+                    if dev.curve25519 == sender_key:
+                        device = dev.id
+                        break
+            except Exception:  # noqa: BLE001
+                log.debug("Geraet zum Medien-Schluessel nicht gefunden", exc_info=True)
+            for cb in list(_rtc_key_listeners):
+                try:
+                    cb(sender, device, dict(payload.get("content") or {}))
+                except Exception:  # noqa: BLE001
+                    log.exception("Medien-Schluessel verarbeiten fehlgeschlagen")
+            return None
+        return original(self, sender, sender_key, payload)
+
+    Olm._handle_olm_event = handle
+    Olm._musikbot_rtc_hook = True
+
+
+def on_rtc_key(cb: Callable[[str, Optional[str], dict], None]) -> None:
+    """`cb(sender, device_id|None, content)` fuer jeden empfangenen Element-Call-Schluessel."""
+    install_rtc_key_hook()
+    _rtc_key_listeners.append(cb)
+
+
 def is_voice_message(content: dict) -> bool:
     """True fuer Sprachnachrichten (MSC3245) – die sind kein Musikwunsch."""
     return isinstance(content, dict) and VOICE_FLAG in content

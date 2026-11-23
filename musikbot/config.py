@@ -100,6 +100,16 @@ class Config:
     # Eigenes Bildpaket fuer den Baeren (Ordner mit manifest.json); leer = eingebautes.
     baer_assets: str = ""
 
+    # --- KI im Call: Kamera/Bildschirm kommentieren ------------------------
+    # OpenAI-kompatibler Endpunkt (eigener Server empfohlen: die Bilder gehen dorthin).
+    ki_url: str = ""                     # z. B. https://ki.example.org/v1
+    ki_key: str = ""
+    ki_model: str = ""                   # Modell mit Bild-Eingang
+    ki_timeout: float = 120.0
+    # Blick: ab und zu ein Bild einer Kamera / eines geteilten Bildschirms kommentieren.
+    blick_enabled: bool = False
+    blick_every: float = 180.0           # Sekunden zwischen zwei Blicken (± 40 %)
+
     # --- Dashboard (Web) ---------------------------------------------------
     web_enabled: bool = True
     web_host: str = "0.0.0.0"
@@ -231,6 +241,12 @@ class Config:
             zuruf_enabled=_bool("ZURUF_ENABLED", True),
             zuruf_every=_float("ZURUF_EVERY", 75.0),
             baer_assets=_str("BAER_ASSETS"),
+            ki_url=_str("KI_URL").rstrip("/"),
+            ki_key=_str("KI_KEY"),
+            ki_model=_str("KI_MODEL"),
+            ki_timeout=_float("KI_TIMEOUT", 120.0),
+            blick_enabled=_bool("BLICK_ENABLED", False),
+            blick_every=_float("BLICK_EVERY", 180.0),
             web_enabled=_bool("WEB_ENABLED", True),
             web_host=_str("WEB_HOST", "0.0.0.0"),
             web_port=_int("WEB_PORT", 8095),

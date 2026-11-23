@@ -78,6 +78,8 @@ unabhängig vom Ordnernamen.)
 | `!playlist add <name> [Link]` · `remove <name> <nr>` | Titel hinzufügen (ohne Link: laufender Titel) / entfernen |
 | `!playlist show <name>` · `list` | Inhalt / alle Playlists |
 | `!playlist play <name> [shuffle]` · `enqueue <name>` | abspielen (ersetzt Queue) / hinten anhängen |
+| `!blick [mich\|Name]` | DJ schaut **jetzt** auf alle Kameras/Bildschirme (oder nur deine / die einer Person) und sagt was dazu |
+| `!blick an\|aus\|status` | Kamera-Sprüche nur für dich ab-/anschalten |
 | `!help` | Kommandoliste |
 
 **Wer darf steuern?** Nur Leute, die selbst im Call sind (Element Call oder
@@ -217,6 +219,37 @@ LED-Front, Kanten, Pegel und Jogwheels live im Takt zwischen beiden Bildern.
 Den Ordner nach `data/` legen (lesbar für UID 10000) und
 `BAER_ASSETS=/data/baer-paket` setzen. Ein kaputtes Paket fällt auf den
 eingebauten Bären zurück.
+
+## KI im Call: Blick (optional)
+
+Der DJ kann im Element Call **hinschauen**. Das ist standardmäßig aus.
+
+- **Blick** (`BLICK_ENABLED=true`): Alle paar Minuten (`BLICK_EVERY`, Standard 180 s ± 40 %)
+  holt er gleichzeitig ein Standbild von allen eingeschalteten Kameras und geteilten
+  Bildschirmen (höchstens 6, Bildschirme zuerst), stark verkleinert (Kamera 448 px,
+  Bildschirm 640 px, JPEG 55) und schickt alle in **einer** Anfrage ans Bildmodell. Er sucht
+  sich das Interessanteste aus und ruft einen Spruch über die Musik („Max, du zockst ja schon
+  wieder!“). Hat sich kein Bild verändert, sagt er nichts.
+- **Von Hand:** `!blick` schaut sofort hin (auch auf unveränderte Bilder), `!blick mich` nur auf
+  deine Kamera/deinen Bildschirm, `!blick max` nur auf Max. Darf jeder, der im Call ist. Läuft
+  gerade Musik, ruft er den Spruch darüber (wartet bis zu 20 s auf eine Lücke), sonst schreibt
+  er ihn in den Chat.
+  Das Modell soll nie Aussehen/Körper bewerten und nichts Privates vom Bildschirm vorlesen.
+
+**Datenschutz:** Bilder werden nicht gespeichert; sie gehen nur an den konfigurierten
+Endpunkt (`KI_URL` – nimm einen eigenen Server). Mikrofone abonniert der Bot nie. Beim ersten
+Beitritt sagt er im Raum, dass er schaut. Jede Person schaltet es für sich ab: `!blick aus`
+(bleibt gespeichert).
+
+**Verschlüsselte Calls:** Element Call schickt jedem Teilnehmer seinen Medien-Schlüssel als
+Olm-To-Device (`io.element.call.encryption_keys`). matrix-nio verwirft diesen Typ; der Bot fängt
+ihn ab und gibt die Schlüssel an LiveKit weiter, sonst bekäme er nur verschlüsselte Pakete.
+
+| Variable | Standard | Bedeutung |
+|---|---|---|
+| `KI_URL` · `KI_KEY` · `KI_MODEL` | – | OpenAI-kompatibler Endpunkt mit Bild-Eingang (Antwort gestreamt) |
+| `KI_TIMEOUT` | `120` | Sekunden bis eine Antwort verworfen wird |
+| `BLICK_ENABLED` · `BLICK_EVERY` | `false` · `180` | Blick an, Abstand in Sekunden |
 
 ## Mediathek (Ordner `radio/`)
 
