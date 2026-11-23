@@ -187,6 +187,7 @@ class Player:
         self._zuruf_task: asyncio.Task | None = None
         self._listeners: list[str] = []          # Namen der Leute im Call (ohne Bot)
         self._last_speech = 0.0
+        self._voice_done = float("-inf")         # wann die letzte Bot-Stimme endete (monotonic)
 
     # ------------------------------------------------------------ Peers (WebRTC)
     def add_peer_audio(self, peer) -> PeerAudioTrack:
@@ -428,6 +429,13 @@ class Player:
             return False
         dur = self._source.duration
         return dur is None or dur - self._pos > (4.0 if urgent else 15.0)
+
+    def voice_audible(self, tail: float = 2.5) -> bool:
+        """Spricht der Bot gerade (oder eben noch)? Dann kann ein Mikrofon ohne Kopfhoerer
+        seine eigene Stimme zurueckliefern – das Ohr soll darauf nicht antworten."""
+        if self._voice is not None or self._speaking:
+            return True
+        return time.monotonic() - self._voice_done < tail
 
     @property
     def speech_idle(self) -> float:
@@ -840,6 +848,7 @@ class Player:
             await self._moderate_inner(prev)
         finally:
             self._speaking = False
+            self._voice_done = time.monotonic()
         return gen == self._gen
 
     async def _moderate_inner(self, prev: Track) -> None:
@@ -942,6 +951,7 @@ class Player:
         self._voice_i = i + n
         if self._voice_i >= total:
             self._voice = None
+            self._voice_done = time.monotonic()
         return np.clip(out, -32768, 32767).astype(np.int16)
 
     def _emit_bg(self, *events: tuple[str, dict]) -> None:

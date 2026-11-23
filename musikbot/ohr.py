@@ -194,6 +194,7 @@ class Ohr:
         self.name_of = name_of
         self.names = name_tokens(getattr(cfg, "dj_name", ""), getattr(cfg, "dj_name_spoken", ""))
         self._vads: dict[str, Vad] = {}
+        self._echo_ids: set[str] = set()      # laufende Saetze, die die Bot-Stimme ueberlappen
         self._queue: deque[tuple[str, np.ndarray]] = deque()
         self._wake = asyncio.Event()
         self._lines: deque[tuple[float, str, str, str]] = deque(maxlen=KEEP_LINES)  # (t, identity, name, text)
@@ -247,6 +248,7 @@ class Ohr:
             self._reply_task.cancel()
             self._reply_task = None
         self._vads.clear()
+        self._echo_ids.clear()
         self._queue.clear()
         self._lines.clear()
         self._last_reply = float("-inf")
@@ -259,8 +261,29 @@ class Ohr:
         vad = self._vads.get(identity)
         if vad is None:
             vad = self._vads[identity] = Vad()
+        # Ein Satz, der laeuft, waehrend der Bot redet, kann sein eigenes Echo sein (Lautsprecher
+        # statt Kopfhoerer): ganz verwerfen, sonst antwortet er sich selbst.
+        echo = self._bot_audible()
+        if echo and vad.active:
+            self._echo_ids.add(identity)
         for seg in vad.push(pcm):
+            if identity in self._echo_ids:
+                self._echo_ids.discard(identity)
+                self.dropped += 1
+                continue
             self._enqueue(identity, seg)
+        if vad.active:
+            if echo:
+                self._echo_ids.add(identity)
+        else:
+            self._echo_ids.discard(identity)
+
+    def _bot_audible(self) -> bool:
+        check = getattr(self.player, "voice_audible", None)
+        try:
+            return bool(check()) if callable(check) else False
+        except Exception:  # noqa: BLE001
+            return False
 
     def _enqueue(self, identity: str, seg: np.ndarray) -> None:
         self._queue.append((identity, seg))

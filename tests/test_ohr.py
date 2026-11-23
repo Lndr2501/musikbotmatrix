@@ -368,3 +368,44 @@ def test_prompt_echo_on_silence_is_dropped():
     assert prompt_echo("DJ Qwen.", "DJ Qwen")
     assert not prompt_echo("DJ Qwen, spiel was Schnelles", "DJ Qwen")
     assert not prompt_echo("Hallo", "")
+
+
+def test_sentences_overlapping_the_bots_own_voice_are_dropped():
+    """Lautsprecher statt Kopfhoerer: was waehrend der Bot-Stimme reinkommt, kann sein Echo sein."""
+    import numpy as np
+
+    from musikbot.ohr import Ohr
+
+    class P:
+        talking = False
+        current = None
+
+        def voice_audible(self):
+            return self.talking
+
+    player = P()
+    o = Ohr(SimpleNamespace(dj_name="DJ Qwen", dj_name_spoken="", ohr_every=0), None, None, player,
+            lambda i: "Max")
+    o._running, o._ready = True, True
+    o._wake = SimpleNamespace(set=lambda: None)
+    rate = 16000
+    loud = (np.sin(np.arange(rate * 2) * 0.3) * 8000).astype(np.int16)
+    quiet = np.zeros(rate, dtype=np.int16)
+
+    def say(talking):
+        player.talking = talking
+        for chunk in np.array_split(loud, 200):
+            o.feed("@max:x:D", chunk)
+        player.talking = False
+        for chunk in np.array_split(quiet, 100):
+            o.feed("@max:x:D", chunk)
+
+    player.talking = True                     # Bot redet, Mikro still: markiert nichts
+    for chunk in np.array_split(quiet, 100):
+        o.feed("@max:x:D", chunk)
+    say(talking=False)
+    assert len(o._queue) == 1                 # danach normal gesprochen: kommt an
+    say(talking=True)
+    assert len(o._queue) == 1 and o.dropped == 1
+    say(talking=False)
+    assert len(o._queue) == 2
