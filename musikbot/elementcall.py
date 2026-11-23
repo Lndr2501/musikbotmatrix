@@ -46,8 +46,6 @@ BLOCK_SAMPLES = 960                      # 20 ms bei 48 kHz
 # (niedrige Opus-Bitrate, DTX schneidet leise Stellen weg) -> klingt dumpf/komisch.
 AUDIO_BITRATE = 128_000
 STATS_S = 30                             # Aussetzer-Statistik so oft loggen
-EAR_RATE = 16_000                        # Mikrofone der anderen: 16 kHz mono reicht fuer Sprache
-EAR_CHECK_S = 2.0                        # so oft abgleichen, wessen Mikrofon wir hoeren
 
 
 def _b64(text: str) -> bytes:
@@ -130,13 +128,10 @@ class ElementCall:
         # Vom Bot gesetzt: wird aufgerufen, wenn in einem Raum, in dem wir (noch) nicht
         # im Call sind, jemand dem Call beitritt (Play kam vor dem Call).
         self.on_call_started = None
-        # Medien der anderen (Blick/Ohr): ihre E2EE-Schluessel und unsere Abos
+        # Bilder der anderen (Blick): ihre E2EE-Schluessel
         self._remote_keys: dict[str, dict[int, bytes]] = {}
-        self.on_voice: Optional[Callable[[str, np.ndarray], None]] = None   # (Identity, int16 16 kHz)
-        self.listen_ok: Callable[[str], bool] = lambda user: False         # Nutzer-ID -> mithoeren?
-        self._ears: dict[str, asyncio.Task] = {}                            # Track-SID -> Pumpe
-        self.on_joined: Optional[Callable[[str], None]] = None              # Raum (Blick/Ohr starten)
-        self.on_left: Optional[Callable[[str], None]] = None                # Raum (Blick/Ohr stoppen)
+        self.on_joined: Optional[Callable[[str], None]] = None              # Raum (Blick starten)
+        self.on_left: Optional[Callable[[str], None]] = None                # Raum (Blick stoppen)
         on_rtc_key(self._on_rtc_key)
 
     # ------------------------------------------------------------ Zustand
@@ -307,7 +302,6 @@ class ElementCall:
         self.room_id = room_id
         await self._send_membership(service_url)
         self._tasks.append(asyncio.create_task(self._refresh(service_url), name="ec-refresh"))
-        self._tasks.append(asyncio.create_task(self._ear_loop(), name="ec-ohr"))
         self._keyed.clear()
         if encrypted:
             await self._send_key(list(self.others_in_call(room_id)))
@@ -587,58 +581,6 @@ class ElementCall:
                 except Exception:  # noqa: BLE001
                     pass
 
-    def refresh_listening(self) -> None:
-        """Mikrofone abonnieren/abbestellen: nur wenn das Ohr an ist und der Nutzer nicht widersprochen hat."""
-        from livekit import rtc
-        live: set[str] = set()
-        for ident, pub in self._publications():
-            if pub.kind != rtc.TrackKind.KIND_AUDIO or pub.source != rtc.TrackSource.SOURCE_MICROPHONE:
-                continue
-            want = self.on_voice is not None and bool(self.listen_ok(user_of(ident)))
-            if not want:
-                if pub.subscribed:
-                    t = self._ears.pop(pub.sid, None)
-                    if t:
-                        t.cancel()
-                    pub.set_subscribed(False)
-                continue
-            live.add(pub.sid)
-            if not pub.subscribed:
-                pub.set_subscribed(True)
-            elif pub.track is not None and pub.sid not in self._ears:
-                self._ears[pub.sid] = asyncio.create_task(
-                    self._pump_ear(ident, pub.sid, pub.track), name=f"ohr-{pub.sid}")
-        for sid in [s for s in self._ears if s not in live]:
-            self._ears.pop(sid).cancel()
-
-    async def _ear_loop(self) -> None:
-        while True:
-            try:
-                self.refresh_listening()
-            except Exception:  # noqa: BLE001
-                log.debug("Mikrofone abgleichen", exc_info=True)
-            await asyncio.sleep(EAR_CHECK_S)
-
-    async def _pump_ear(self, identity: str, sid: str, track) -> None:
-        from livekit import rtc
-        stream = rtc.AudioStream(track, sample_rate=EAR_RATE, num_channels=1)
-        try:
-            async for ev in stream:
-                cb = self.on_voice
-                if cb is not None:
-                    cb(identity, np.frombuffer(bytes(ev.frame.data), dtype=np.int16))
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001
-            log.warning("Mikrofon von %s abgebrochen", identity, exc_info=True)
-        finally:
-            try:
-                await stream.aclose()
-            except Exception:  # noqa: BLE001
-                pass
-            if self._ears.get(sid) is asyncio.current_task():
-                self._ears.pop(sid, None)
-
     # ------------------------------------------------------------ Verlassen
     async def leave(self) -> None:
         async with self._lock:
@@ -649,9 +591,6 @@ class ElementCall:
         for t in self._tasks:
             t.cancel()
         self._tasks = []
-        for t in self._ears.values():
-            t.cancel()
-        self._ears.clear()
         self._remote_keys.clear()
         if self._sink is not None:
             self.player.hub.drop_sink(self._sink)

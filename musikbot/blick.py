@@ -64,7 +64,6 @@ def system_prompt(dj: str) -> str:
 class Blick:
     def __init__(self, cfg, ki: KI, ecall, player, name_of: Callable[[str], str],
                  allowed: Callable[[str], bool],
-                 context: Optional[Callable[[], list[tuple[str, str]]]] = None,
                  rng: Optional[random.Random] = None) -> None:
         self.cfg = cfg
         self.ki = ki
@@ -72,7 +71,6 @@ class Blick:
         self.player = player
         self.name_of = name_of            # Identity -> Anzeigename
         self.allowed = allowed            # Nutzer-ID -> darf angeschaut werden?
-        self.context = context            # -> [(Name, Gesagtes)] aus dem Ohr, falls an
         self.rng = rng or random.Random()
         self._task: Optional[asyncio.Task] = None
         self._last_print: dict[tuple[str, str], np.ndarray] = {}   # Quelle -> Fingerabdruck
@@ -181,15 +179,6 @@ class Blick:
                             "text": f"Bild {n}: {KIND_LABEL.get(kind, 'Kamerabild')} von {self.name_of(ident)}{mark}"})
             content.append(image_part(img, max_side=SIDE.get(kind, 448), quality=QUALITY))
         tail = []
-        said = []
-        if self.context is not None:
-            try:
-                said = self.context()[-6:]
-            except Exception:  # noqa: BLE001
-                said = []
-        if said:
-            tail.append("Zuletzt im Call gesagt (nur als Hintergrund, nicht wörtlich zitieren): "
-                        + " | ".join(f"{n}: {t}" for n, t in said))
         if self._lines:
             tail.append("Deine letzten Sprüche (sag etwas anderes): " + " | ".join(self._lines))
         tail.append("Dein Spruch:")

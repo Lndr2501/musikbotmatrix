@@ -32,7 +32,6 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "autoplay": ("autoplay", "auto", "ähnlich", "aehnlich"),
     "dashboard": ("dashboard", "web", "login", "passwort", "password"),
     "blick": ("blick", "kamera", "schauen"),
-    "ohr": ("ohr", "mithoeren", "mithören", "lauschen"),
     "help": ("help", "hilfe", "commands", "befehle"),
 }
 
@@ -66,7 +65,6 @@ Audio-/Videodatei an die Nachricht anhängen – der Bot spielt sie direkt ab
 !fav – laufenden Titel merken · !fav list · !fav remove <nr> · !fav play [shuffle] (deine Favoriten)
 !stats – meistgespielte Titel und wer am meisten Musik hört
 !blick an|aus – DJ kommentiert ab und zu deine Kamera / deinen Bildschirm (für dich ab-/anschalten)
-!ohr an|aus – DJ hört dein Mikrofon und antwortet, wenn du ihn ansprichst (für dich ab-/anschalten)
 !dashboard – Link + persönliches Passwort fürs Web-Dashboard per Direktnachricht
 !hilfe – diese Liste
 Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue,
@@ -99,7 +97,7 @@ def parse(text: str, prefixes: tuple[str, ...] = ("/",)) -> Optional[Parsed]:
     return Parsed(name, tail.strip())
 
 
-_READ_ONLY = {"help", "status", "queue", "stats", "dashboard", "blick", "ohr"}   # blick/ohr: nur fuer sich selbst
+_READ_ONLY = {"help", "status", "queue", "stats", "dashboard", "blick"}   # blick: nur fuer sich selbst
 
 
 def is_read_only(name: str, arg: str = "") -> bool:

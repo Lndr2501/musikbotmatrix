@@ -44,24 +44,24 @@ class FakePlayer:
         self.current = SimpleNamespace(key="k")
         self.speech_idle = 999.0
 
-    def _zuruf_ok(self, urgent=False):
+    def _zuruf_ok(self):
         return self.ok
 
     def _info(self, cur):
         return ("Voll", "Künstler")
 
-    async def shout(self, text, urgent=False):
+    async def shout(self, text):
         self.said.append(text)
         return True
 
 
-def make(videos, answers, allowed=lambda u: True, img=None, context=None):
+def make(videos, answers, allowed=lambda u: True, img=None):
     cfg = SimpleNamespace(dj_name="DJ Qwen", blick_every=180.0)
     ki = FakeKI(answers)
     call = FakeCall(videos, img)
     player = FakePlayer()
     b = Blick(cfg, ki, call, player, name_of=lambda i: i.split(":")[0].lstrip("@").title(),
-              allowed=allowed, context=context, rng=random.Random(1))
+              allowed=allowed, rng=random.Random(1))
     return b, ki, call, player
 
 
@@ -83,8 +83,7 @@ async def test_one_request_with_everyone_small_and_compressed():
     import io
     vids = [("@max:x:D1", "camera"), ("@anna:x:D2", "screen")]
     b, ki, call, player = make(vids, ["„Max und Anna, ihr seid ja fleißig! 🎧“"],
-                               img=Image.new("RGB", (1920, 1080), (40, 120, 200)),
-                               context=lambda: [("Anna", "ich hab Hunger")])
+                               img=Image.new("RGB", (1920, 1080), (40, 120, 200)))
     assert await b.look()
     assert sorted(call.shots) == sorted(vids)                    # beide Standbilder geholt
     assert len(ki.seen) == 1                                     # aber nur EINE Anfrage
@@ -94,7 +93,7 @@ async def test_one_request_with_everyone_small_and_compressed():
     parts = user_msg["content"]
     texts = " ".join(p["text"] for p in parts if p["type"] == "text")
     assert "Bild 1: geteilter Bildschirm von Anna (neu)" in texts and "Bild 2: Kamerabild von Max (neu)" in texts
-    assert "Voll von Künstler" in texts and "Anna: ich hab Hunger" in texts
+    assert "Voll von Künstler" in texts
     imgs = [p["image_url"]["url"] for p in parts if p["type"] == "image_url"]
     assert len(imgs) == 2
     sizes = [Image.open(io.BytesIO(base64.b64decode(u.split(",", 1)[1]))).size for u in imgs]
@@ -236,7 +235,7 @@ def _ki_bot(tmp_path, **kw):
     from musikbot.config import Config
     cfg = Config(homeserver="http://h", user="@bot:x", password="p", data_dir=str(tmp_path / "d"),
                  matrix_user_id="@bot:x", dj_name="DJ Qwen", ki_url="http://ki/v1", ki_model="m",
-                 stt_url="http://stt/v1", **kw)
+                 **kw)
     bot = Bot(cfg)
     notes = []
 
@@ -248,35 +247,30 @@ def _ki_bot(tmp_path, **kw):
 
 async def test_everyone_can_opt_out_for_themselves_and_it_sticks(tmp_path):
     from musikbot.commands import is_read_only
-    bot, notes = _ki_bot(tmp_path, blick_enabled=True, ohr_enabled=True)
-    assert bot.blick is not None and bot.ohr is not None
-    assert is_read_only("blick", "aus") and is_read_only("ohr", "aus")     # auch wer nicht im Call ist
-    bot.ohr._ready = True
-    assert bot.ecall.listen_ok("@max:x")
-    await bot._dispatch("!r:x", "@Max:x", "ohr", "aus")
-    await bot._dispatch("!r:x", "@max:x", "blick", "aus")
-    assert not bot.ecall.listen_ok("@max:x") and not bot._ki_allowed("blick", "@max:x")
-    assert bot.ecall.listen_ok("@anna:x")
+    bot, notes = _ki_bot(tmp_path, blick_enabled=True)
+    assert bot.blick is not None
+    assert is_read_only("blick", "aus")                                   # auch wer nicht im Call ist
+    await bot._dispatch("!r:x", "@Max:x", "blick", "aus")
+    assert not bot._ki_allowed("@max:x") and bot._ki_allowed("@anna:x")
     assert "für dich aus" in notes[-1]
-    again, _ = _ki_bot(tmp_path, blick_enabled=True, ohr_enabled=True)   # nach Neustart noch da
-    assert not again._ki_allowed("ohr", "@max:x")
-    await again._dispatch("!r:x", "@max:x", "ohr", "an")
-    assert again._ki_allowed("ohr", "@max:x")
+    again, notes2 = _ki_bot(tmp_path, blick_enabled=True)                 # nach Neustart noch da
+    assert not again._ki_allowed("@max:x")
     await again._dispatch("!r:x", "@max:x", "blick", "")
-    assert "allgemein an, für dich aus" in notes[-1] or "allgemein an, für dich aus" in _[-1]
+    assert "allgemein an, für dich aus" in notes2[-1]
+    await again._dispatch("!r:x", "@max:x", "blick", "an")
+    assert again._ki_allowed("@max:x")
 
 
 async def test_off_by_default_and_join_tells_the_room_once(tmp_path):
     bot, notes = _ki_bot(tmp_path)
-    assert bot.blick is None and bot.ohr is None
+    assert bot.blick is None
     bot._ki_joined("!r:x")
     await asyncio.sleep(0)
     assert notes == []
-    bot, notes = _ki_bot(tmp_path / "2", blick_enabled=True, ohr_enabled=True)
-    bot.blick.start = bot.ohr.start = lambda: None
+    bot, notes = _ki_bot(tmp_path / "2", blick_enabled=True)
+    bot.blick.start = lambda: None
     bot._ki_joined("!r:x")
     bot._ki_joined("!r:x")
     await asyncio.sleep(0.01)
     assert len(notes) == 1
-    assert "Kameras" in notes[0] and "hört mit" in notes[0] and "!blick aus" in notes[0] and "!ohr aus" in notes[0]
-    assert "nicht gespeichert" in notes[0] or "Nichts davon wird gespeichert" in notes[0]
+    assert "Kameras" in notes[0] and "!blick aus" in notes[0] and "Nichts davon wird gespeichert" in notes[0]

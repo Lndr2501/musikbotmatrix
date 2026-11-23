@@ -100,22 +100,15 @@ class Config:
     # Eigenes Bildpaket fuer den Baeren (Ordner mit manifest.json); leer = eingebautes.
     baer_assets: str = ""
 
-    # --- KI im Call: Bild (Kamera/Bildschirm) und Ton (Mikrofone) -----------
-    # OpenAI-kompatibler Endpunkt (eigener Server empfohlen: die Bilder/Stimmen gehen dorthin).
+    # --- KI im Call: Kamera/Bildschirm kommentieren ------------------------
+    # OpenAI-kompatibler Endpunkt (eigener Server empfohlen: die Bilder gehen dorthin).
     ki_url: str = ""                     # z. B. https://ki.example.org/v1
     ki_key: str = ""
-    ki_model: str = ""                   # Modell mit Bild-Eingang (fuer Blick und Antworten)
+    ki_model: str = ""                   # Modell mit Bild-Eingang
     ki_timeout: float = 120.0
     # Blick: ab und zu ein Bild einer Kamera / eines geteilten Bildschirms kommentieren.
     blick_enabled: bool = False
     blick_every: float = 180.0           # Sekunden zwischen zwei Blicken (± 40 %)
-    # Ohr: Mikrofone mithoeren, Sprache -> Text; Name des DJs = er antwortet.
-    ohr_enabled: bool = False
-    stt_url: str = ""                    # leer = ki_url; erwartet /audio/transcriptions
-    stt_key: str = ""                    # leer = ki_key
-    stt_model: str = "whisper-1"
-    stt_language: str = "de"
-    ohr_every: float = 240.0             # so oft redet er von sich aus beim Gespraech mit (0 = nie)
 
     # --- Dashboard (Web) ---------------------------------------------------
     web_enabled: bool = True
@@ -254,12 +247,6 @@ class Config:
             ki_timeout=_float("KI_TIMEOUT", 120.0),
             blick_enabled=_bool("BLICK_ENABLED", False),
             blick_every=_float("BLICK_EVERY", 180.0),
-            ohr_enabled=_bool("OHR_ENABLED", False),
-            stt_url=_str("STT_URL").rstrip("/"),
-            stt_key=_str("STT_KEY"),
-            stt_model=_str("STT_MODEL", "whisper-1"),
-            stt_language=_str("STT_LANGUAGE", "de"),
-            ohr_every=_float("OHR_EVERY", 240.0),
             web_enabled=_bool("WEB_ENABLED", True),
             web_host=_str("WEB_HOST", "0.0.0.0"),
             web_port=_int("WEB_PORT", 8095),

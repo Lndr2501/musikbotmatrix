@@ -187,7 +187,6 @@ class Player:
         self._zuruf_task: asyncio.Task | None = None
         self._listeners: list[str] = []          # Namen der Leute im Call (ohne Bot)
         self._last_speech = 0.0
-        self._voice_done = float("-inf")         # wann die letzte Bot-Stimme endete (monotonic)
 
     # ------------------------------------------------------------ Peers (WebRTC)
     def add_peer_audio(self, peer) -> PeerAudioTrack:
@@ -418,24 +417,16 @@ class Player:
             self.baer.set_audience(faces)
 
     # ------------------------------------------------------------ Zurufe
-    def _zuruf_ok(self, urgent: bool = False) -> bool:
-        """Darf der Baer jetzt reinrufen? Nur mitten in einem laufenden Song, ohne andere Ansage.
-        `urgent` (jemand hat ihn angesprochen): auch kurz nach Songstart und kurz vor Schluss."""
+    def _zuruf_ok(self) -> bool:
+        """Darf der Baer jetzt reinrufen? Nur mitten in einem laufenden Song, ohne andere Ansage."""
         if self.ansager is None or not self.ansager.available or self.state != "playing":
             return False
         if self._voice is not None or self._speaking or self.hub.count == 0:
             return False
-        if self._source is None or self._pos < (3.0 if urgent else 20.0):
+        if self._source is None or self._pos < 20.0:
             return False
         dur = self._source.duration
-        return dur is None or dur - self._pos > (4.0 if urgent else 15.0)
-
-    def voice_audible(self, tail: float = 2.5) -> bool:
-        """Spricht der Bot gerade (oder eben noch)? Dann kann ein Mikrofon ohne Kopfhoerer
-        seine eigene Stimme zurueckliefern – das Ohr soll darauf nicht antworten."""
-        if self._voice is not None or self._speaking:
-            return True
-        return time.monotonic() - self._voice_done < tail
+        return dur is None or dur - self._pos > 15.0
 
     @property
     def speech_idle(self) -> float:
@@ -471,13 +462,13 @@ class Player:
                 next_at = loop.time() + self._zuruf_gap()
                 build_since = None
 
-    async def shout(self, text: str, urgent: bool = False) -> bool:
+    async def shout(self, text: str) -> bool:
         """Zuruf ueber die laufende Musik legen (Musik kurz leiser, Baer redet)."""
-        if not self._zuruf_ok(urgent):
+        if not self._zuruf_ok():
             return False
         key = self.current.key if self.current else None
         voice = await asyncio.to_thread(self.ansager.synth, text) if self.ansager else None
-        if voice is None or not self._zuruf_ok(urgent) or self.current is None or self.current.key != key:
+        if voice is None or not self._zuruf_ok() or self.current is None or self.current.key != key:
             return False
         self._voice, self._voice_i = voice, 0
         self._last_speech = asyncio.get_running_loop().time()
@@ -848,7 +839,6 @@ class Player:
             await self._moderate_inner(prev)
         finally:
             self._speaking = False
-            self._voice_done = time.monotonic()
         return gen == self._gen
 
     async def _moderate_inner(self, prev: Track) -> None:
@@ -951,7 +941,6 @@ class Player:
         self._voice_i = i + n
         if self._voice_i >= total:
             self._voice = None
-            self._voice_done = time.monotonic()
         return np.clip(out, -32768, 32767).astype(np.int16)
 
     def _emit_bg(self, *events: tuple[str, dict]) -> None:
