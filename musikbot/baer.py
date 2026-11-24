@@ -768,6 +768,7 @@ class BaerDJ:
         self._sprite_due = 0.0
         self._fallback_cover = None
         self._react_done: float | None = None
+        self._manifest: dict | None = None        # nur fuer info(), solange das Paket nicht geladen ist
         self._fade_cache: dict[tuple[str, int], Image.Image] = {}
 
     # ------------------------------------------------------------ Steuerung
@@ -831,11 +832,8 @@ class BaerDJ:
         """Hat das Paket ein Kostuem fuer diese Saison?"""
         if self._ready:
             return name in self.pack.seasons
-        try:                                     # noch nicht geladen: nur ins Manifest schauen
-            with open(self.assets / "manifest.json") as fh:
-                return name in (json.load(fh).get("seasons") or {})
-        except (OSError, ValueError):
-            return False
+        self.info()                              # noch nicht geladen: nur ins Manifest schauen
+        return name in (self._manifest.get("seasons") or {})
 
     def set_season(self, name: str | None, until: float | None = None) -> None:
         """Saison von Hand (z. B. ``"geburtstag"``) bis `until` (Unix-Zeit); None = wieder nach Datum."""
@@ -1076,13 +1074,33 @@ class BaerDJ:
         self._cal_at = now
         t = datetime.now(self.tz) if self.tz is not None else datetime.now()
         self.night = NIGHT_HOURS[0] <= t.hour < NIGHT_HOURS[1]
+        self.season = self._pick_season(self.pack.seasons, t)
+
+    def _pick_season(self, seasons: dict, t: datetime) -> str | None:
+        """Von Hand > nach Datum > Nacht-Outfit (0–6 Uhr) – nur Saisons, fuer die es ein Kostuem gibt."""
         man = self._season_manual
         if man is not None and time.time() >= man[1]:
             self._season_manual = man = None
         name = man[0] if man is not None else season_for(t.date())
-        if name not in self.pack.seasons and self.night:    # Nacht-Outfit, wenn sonst nichts ansteht
+        if name not in seasons and NIGHT_HOURS[0] <= t.hour < NIGHT_HOURS[1]:
             name = "nacht"
-        self.season = name if name in self.pack.seasons else None
+        return name if name in seasons else None
+
+    def info(self) -> dict:
+        """Fuers Dashboard: Saison, Nacht und ausloesbare Reaktionen – auch bevor das Paket geladen ist
+        (dann nur aus dem Manifest)."""
+        if self._ready:
+            return {"season": self.season, "night": self.night, "events": sorted(self.pack.events)}
+        if self._manifest is None:
+            try:
+                with open(self.assets / "manifest.json") as fh:
+                    self._manifest = json.load(fh)
+            except (OSError, ValueError):
+                self._manifest = {}
+        m = self._manifest
+        t = datetime.now(self.tz) if self.tz is not None else datetime.now()
+        return {"season": self._pick_season(m.get("seasons") or {}, t),
+                "night": NIGHT_HOURS[0] <= t.hour < NIGHT_HOURS[1], "events": sorted(m.get("events") or {})}
 
     def _apply_requests(self, now: float) -> None:
         """Wuensche aus dem Bot (anderer Thread) an die Regie geben."""

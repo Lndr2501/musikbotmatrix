@@ -1574,6 +1574,7 @@ class Bot:
             "room": self._notice_room() or self.webauth.room_of(user),
             "favs": self.store.fav_keys(user),
             "me_name": self._names.get(user) or self._who(user),
+            "dj": self.web_dj(user),
         }
 
     async def _display_name(self, user: str) -> str:
@@ -1650,7 +1651,29 @@ class Bot:
     # Erlaubte Befehle aus dem Dashboard (wie im Chat, gleiche Karten im Raum)
     _WEB_COMMANDS = {"play", "pause", "resume", "stop", "skip", "previous", "clear", "seek", "autoplay",
                      "forward", "rewind", "volume", "video", "shuffle", "loop", "joincall",
-                     "leavecall", "rejoin", "playlist", "fav"}
+                     "leavecall", "rejoin", "playlist", "fav", "geburtstag", "sticker", "blick"}
+    # Reaktionen, die man im Dashboard selbst ausloesen darf (falls das Bildpaket sie hat)
+    _WEB_REACTIONS = ("hallo", "favorit", "blick_lachen", "ratlos", "tschuess")
+
+    def _birthday_now(self) -> dict | None:
+        try:
+            info = json.loads(self.store.setting("geburtstag") or "{}")
+        except ValueError:
+            return None
+        return info if info.get("until", 0) > time.time() else None
+
+    def web_dj(self, user: str) -> dict:
+        """DJ-Tab im Dashboard: Bär, Saison, Geburtstag, Sticker, Blick."""
+        baer = self.player.baer
+        info = baer.info() if baer is not None else {"season": None, "night": False, "events": []}
+        bday = self._birthday_now()
+        blick = getattr(self, "blick", None)
+        return {"name": self.cfg.dj_name, "bear": baer is not None, "season": info["season"],
+                "night": info["night"],
+                "reactions": [e for e in self._WEB_REACTIONS if e in info["events"]],
+                "birthday": {"name": bday.get("name") or "", "until": self._clock(bday["until"])} if bday else None,
+                "stickers": list(self._sticker_files()),
+                "blick": {"on": blick is not None, "me": self._ki_allowed(user) if blick is not None else False}}
 
     async def web_command(self, user: str, name: str, arg: str) -> None:
         if name == "softskip":
@@ -1665,6 +1688,11 @@ class Bot:
                 self.store.fav_remove(user, keys.index(arg) + 1)
             elif self.store.get(arg):
                 self.store.fav_add(user, arg)
+            return
+        if name == "baer":                            # Baer reagiert (sichtbar im Call-Video)
+            if arg not in self.web_dj(user)["reactions"]:
+                raise MediaError("Diese Reaktion gibt es nicht.")
+            self.player.react(arg, 3.0)
             return
         if name not in self._WEB_COMMANDS:
             raise MediaError("Unbekannter Befehl.")

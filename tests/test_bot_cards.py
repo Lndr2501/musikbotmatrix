@@ -3,6 +3,8 @@ Fehler, Ende. Mit Attrappen fuer Matrix und Player (kein Netz, kein Audio)."""
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from musikbot import cards
 from musikbot.bot import Bot
 
@@ -481,6 +483,10 @@ class FakeBaer:
     def set_season(self, name, until=None):
         self.season = (name, until) if name else None
 
+    def info(self):
+        return {"season": self.season[0] if self.season else None, "night": False,
+                "events": ["hallo", "skip", "favorit"]}
+
 
 def _party_bot(tmp_path):
     bot = make_bot()
@@ -545,3 +551,39 @@ def test_failure_and_favourite_make_the_bear_react():
     bot = make_bot()
     asyncio.run(bot._fail_pending("!r:x", "Titel", "Nicht gefunden"))
     assert bot.player.reactions == ["ratlos"]
+
+
+def test_dashboard_dj_tab_lists_reactions_party_stickers_and_blick(tmp_path):
+    from PIL import Image
+
+    from musikbot.ytdl import MediaError
+    bot = _party_bot(tmp_path)
+    bot.blick = None
+    bot._optout = set()
+    Image.new("RGBA", (64, 64), (255, 0, 0, 255)).save(tmp_path / "herz.png")
+    dj = bot.web_dj("@u:x")
+    assert dj["name"] == "DJ Bär" and dj["bear"] and dj["season"] is None
+    assert dj["reactions"] == ["hallo", "favorit"]          # nur freigegebene, die das Paket hat
+    assert dj["birthday"] is None and dj["stickers"] == ["herz"]
+    assert dj["blick"] == {"on": False, "me": False}
+    asyncio.run(bot.web_command("@u:x", "baer", "hallo"))
+    assert bot.player.reactions == ["hallo"]
+    for bad in ("skip", "gibtsnicht"):                      # skip ist kein Dashboard-Knopf
+        with pytest.raises(MediaError):
+            asyncio.run(bot.web_command("@u:x", "baer", bad))
+    run_cmd(bot, "geburtstag", "Anna")
+    dj = bot.web_dj("@u:x")
+    assert dj["season"] == "geburtstag" and dj["birthday"]["name"] == "Anna"
+    assert len(dj["birthday"]["until"]) == 5                # Uhrzeit hh:mm
+    bot.blick = object()
+    assert bot.web_dj("@u:x")["blick"] == {"on": True, "me": True}
+    bot._optout.add("@u:x")
+    assert bot.web_dj("@u:x")["blick"]["me"] is False
+
+
+def test_dashboard_dj_tab_without_bear():
+    bot = make_bot()
+    bot.cfg = SimpleNamespace(dj_name="DJ Bär", sticker_dir="")
+    bot.store = FakeStore()
+    dj = bot.web_dj("@u:x")
+    assert not dj["bear"] and dj["reactions"] == [] and dj["stickers"] == []

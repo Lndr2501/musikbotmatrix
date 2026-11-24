@@ -103,12 +103,18 @@ persönlichen Link. Einmal öffnen, danach bleibst du eingeloggt (90 Tage,
 verlängert sich bei jeder Nutzung). Ein neues `!dashboard` macht den alten Link
 ungültig, angemeldete Geräte bleiben drin.
 
-Im Dashboard: Wiedergabe steuern (Play/Pause, Spulen, ±10 s, Lautstärke, Loop,
-Video, Autoplay), Call beitreten/verlassen/neu verbinden, Warteschlange sortieren
-(ziehen), Suche mit Trefferliste („jetzt“, „als Nächstes“, „hinten anstellen“),
-Mediathek (eigene Dateien), Datei vom Gerät abspielen, Playlists, Favoriten,
-Statistik und die Fade-Regler (Crossfade-Länge, Einblenden, sanft stoppen,
-sofort überblenden).
+Im Dashboard:
+
+- **Player:** Play/Pause, vor/zurück, ±10 s, Lautstärke und vier Schalter
+  (Schleife, Autoplay, Video, Stopp mit Wahl „sanft ausblenden“ oder „sofort“),
+  dazu Call beitreten/verlassen/neu verbinden.
+- **Warteschlange:** sortieren (ziehen), mischen, leeren.
+- **Suche, Mediathek, Meins:** Trefferliste („jetzt“, „als Nächstes“, „hinten
+  anstellen“), eigene Dateien, Datei vom Gerät, Playlists, Favoriten, Statistik.
+- **DJ:** Bär reagieren lassen (Winken, Daumen hoch, Lachen …), Geburtstags-Party
+  starten/beenden, Sticker schicken, Blick auslösen und für sich an-/ausschalten.
+  Karten ohne Inhalt (kein Bildpaket, keine Sticker, Blick aus) bleiben ausgeblendet.
+- **Übergänge:** Crossfade-Länge, Einblenden, sanft stoppen, sofort überblenden.
 
 Das Dashboard läuft im Bot auf `WEB_PORT` (Standard 8095). Für den Zugriff von
 außen einen Reverse-Proxy oder Cloudflare-Tunnel davor setzen und `PUBLIC_URL`
