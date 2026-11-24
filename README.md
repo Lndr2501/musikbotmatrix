@@ -220,6 +220,17 @@ Den Ordner nach `data/` legen (lesbar für UID 10000) und
 `BAER_ASSETS=/data/baer-paket` setzen. Ein kaputtes Paket fällt auf den
 eingebauten Bären zurück.
 
+**Posen-Paket aus Standbildern:** Statt Blender-Loops gehen auch freigestellte Einzelbilder
+(RGBA, alle gleich groß, z. B. aus einem Bildmodell). Sie landen auf Bühne und Pult eines
+3D-Pakets, stehen hinter dem Pult und wippen per Code im Takt (`"bob": true` im Manifest).
+Die erste Pose legt fest, wo Kopf und Füße sitzen; `--groesse` skaliert den Bären.
+
+```sh
+python tools/posen_paket.py --vorlage data/baer-paket --out data/baer-posen \
+    groove:mix=mixen.png groove:neutral=neutral.png hype:cheer=jubeln.png \
+    shout:shout=jubeln.png talk:talk=sprechen.png special:coffee=kaffee.png
+```
+
 ## KI im Call: Blick (optional)
 
 Der DJ kann im Element Call **hinschauen**. Das ist standardmäßig aus.

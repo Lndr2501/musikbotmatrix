@@ -726,3 +726,65 @@ def test_tempo_between_block_steps():
     from musikbot.baer import _tempo
     assert abs(_tempo([0.40, 0.41] * 6) - 148.1) < 0.2
     assert _tempo([0.3, 0.3, 0.3, 0.6, 0.6, 0.6]) > 0
+
+
+def _posen_tool():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "posen_paket", Path(__file__).resolve().parents[1] / "tools" / "posen_paket.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_pose_pack_bobs_behind_the_desk(tmp_path):
+    import json
+    from PIL import Image
+    vorlage = tmp_path / "vorlage"
+    (vorlage / "desk").mkdir(parents=True)
+    json.dump({"fpb": 16, "beats": 4, "size": [112, 140], "anchors": {"floor": 130.0, "head": 10.0},
+               "desk": {"size": [224, 140], "regions": {"front": [60, 100, 160, 130]}},
+               "clips": {"mix": {"kind": "groove"}}}, open(vorlage / "manifest.json", "w"))
+    for key, val in (("base", 20), ("glow", 250)):
+        img = Image.new("RGBA", (224, 140), (0, 0, 0, 0))
+        img.paste(Image.new("RGBA", (200, 50), (val, val, val, 255)), (12, 88))
+        img.save(vorlage / "desk" / f"{key}.png")
+    poses = []
+    for name, col in (("mix", (250, 140, 20, 255)), ("cheer", (240, 30, 30, 255))):
+        img = Image.new("RGBA", (400, 500), (0, 0, 0, 0))
+        img.paste(Image.new("RGBA", (200, 440), col), (100, 40))       # Baer: Kopf y=40, Fuesse y=480
+        img.save(tmp_path / f"{name}.png")
+        poses.append(("groove" if name == "mix" else "hype", name, tmp_path / f"{name}.png"))
+    tool = _posen_tool()
+    out = tmp_path / "posen"
+    m = tool.build(vorlage, out, poses)
+    assert m["bob"] and set(m["clips"]) == {"mix", "cheer"} and (out / "desk" / "base.png").exists()
+    placed = Image.open(out / "mix" / "000.webp")
+    assert placed.size == (112, 140)
+    top, bottom = placed.getchannel("A").getbbox()[1::2]
+    assert abs(top - 10) <= 1 and abs(bottom - 130) <= 1               # Kopf/Fuesse auf den Ankern
+
+    baer = BaerDJ(256, 144, str(out))
+    baer.render(0.0)
+    assert baer.pack.bob and baer.pack.desk is not None and baer.pack.stage is None
+    for at, block in _kick_track(128, 4):
+        baer.beat.feed(block, at)
+    frames = [baer.render(1.0 + i * 0.06).to_ndarray() for i in range(8)]
+    desk = baer.pack.desk["regions"]["front"]
+    fx, fy = (desk[0] + desk[2]) // 2, (desk[1] + desk[3]) // 2
+    assert all(f[fy, fx, 0] == f[fy, fx, 1] == f[fy, fx, 2] for f in frames)   # Pult (grau) liegt vor dem Baeren
+
+    def head(f):                                   # oberste Zeile mit Baeren-Orange in der Bildmitte
+        col = f[:, 128].astype(int)
+        rows = np.where((col[:, 0] > 200) & (col[:, 2] < 80))[0]
+        return int(rows[0]) if rows.size else -1
+    assert len({head(f) for f in frames}) > 1                          # wippt im Takt
+
+
+def test_pose_tool_rejects_bad_specs():
+    tool = _posen_tool()
+    assert tool.parse_pose("hype:cheer=a.png")[:2] == ("hype", "cheer")
+    for bad in ("cheer=a.png", "dance:cheer=a.png", "hype:che-er=a.png"):
+        with pytest.raises(SystemExit):
+            tool.parse_pose(bad)

@@ -15,6 +15,11 @@ Optional ``desk/``: das DJ-Pult aus derselben Kamera, einmal gedimmt (``base``) 
 voll leuchtend (``glow``). Der Bot legt es unter den Baeren (die Clips sind dort, wo das Pult
 vor ihm steht, schon ausgeschnitten) und blendet LED-Front, Kanten, Pegel und Jogwheels live
 zwischen beiden Bildern.
+
+Posen-Pakete (``"bob": true``): je Clip ein einzelnes Standbild (z. B. aus einem Bildmodell) auf
+derselben Leinwand wie ein 3D-Paket (gleiche ``anchors``, Buehne und Pult). Sie wippen per Code im
+Takt und stehen hinter dem Pult (das wird ueber sie gelegt, nichts muss ausgeschnitten sein).
+Bauen: ``tools/posen_paket.py``.
 """
 
 from __future__ import annotations
@@ -279,6 +284,7 @@ class Pack:
         self.fpb = int(m.get("fpb", 16))
         self.beats = int(m.get("beats", 4))
         self.static = bool(m.get("static", False))
+        self.bob = bool(m.get("bob", False))       # Einzelposen mit Buehne/Pult: wippen, hinter dem Pult
         self.clips: dict[str, list[bytes]] = {}
         self.kind: dict[str, str] = {}
         self.talking: set[str] = set()
@@ -393,7 +399,7 @@ class Pack:
             img = img.resize((max(1, int(img.width * self.scale)), max(1, int(img.height * self.scale))),
                              Image.LANCZOS)
         elif img.size != self.size:
-            img = img.resize(self.size, Image.BILINEAR)
+            img = img.resize(self.size, Image.LANCZOS if self.bob else Image.BILINEAR)
         with self._lock:
             self._cache[key] = img
             while len(self._cache) > CACHE_FRAMES:
@@ -765,19 +771,24 @@ class BaerDJ:
             self._draw_audience(img, pos, loud, now)
 
         desk = getattr(self.pack, "desk", None)
-        if desk is not None:                                 # 3D-Pult unter dem Baeren
+        bob = getattr(self.pack, "bob", False)
+        if desk is not None and not bob:                     # 3D-Pult unter dem Baeren
             self._draw_desk(img, desk, pos, bass, loud, pulse)
         self._draw_particles(img, now, hue)                  # hinter dem Baeren, nie im Gesicht
         spr = self._bear(now, pos, talking)
-        if self.pack.static:                                 # einzelne Posen: Wippen per Code
+        if self.pack.static or bob:                          # einzelne Posen: Wippen per Code
             amp = 0.25 + 0.75 * loud
             sy = 1 - 0.05 * pulse * amp + 0.02 * amp
+            h0 = spr.height
             spr = spr.resize((max(1, int(spr.width * (2 - sy))), max(1, int(spr.height * sy))),
                              Image.BILINEAR)
             dy = -H * 0.03 * amp * math.sin(math.pi * ph) ** 2
-            img.paste(spr, ((W - spr.width) // 2, int(H * 0.80 - spr.height + dy)), spr)
+            bottom = H * 0.80 if self.pack.static else self.pack.top_y + h0
+            img.paste(spr, ((W - spr.width) // 2, int(bottom - spr.height + dy)), spr)
         else:
             img.paste(spr, ((W - spr.width) // 2, self.pack.top_y), spr)
+        if desk is not None and bob:                         # Posen stehen hinter dem Pult
+            self._draw_desk(img, desk, pos, bass, loud, pulse)
 
         dr = ImageDraw.Draw(img, "RGBA")
         if desk is None:
