@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from pathlib import Path
 
 av = pytest.importorskip("av")
 pytest.importorskip("PIL")
@@ -788,3 +789,210 @@ def test_pose_tool_rejects_bad_specs():
     for bad in ("cheer=a.png", "dance:cheer=a.png", "hype:che-er=a.png"):
         with pytest.raises(SystemExit):
             tool.parse_pose(bad)
+
+
+def test_pose_tool_loops_and_mouth_twins(tmp_path):
+    import json
+    from PIL import Image
+    tool = _posen_tool()
+    assert tool.parse_pose("talk:talk=zu.png+offen.png")[2:] == ([Path("zu.png")], Path("offen.png"))
+    assert tool.parse_pose("groove:sway=l.png,r.png")[2] == [Path("l.png"), Path("r.png")]
+    assert tool.parse_pose("react:winken=w.png")[0] == "react"
+    with pytest.raises(SystemExit):
+        tool.parse_pose("groove:sway=l.png,r.png+offen.png")
+    vorlage = _vorlage(tmp_path)
+    files = {}
+    for name, col in (("l", (250, 140, 20)), ("r", (240, 30, 30)), ("zu", (20, 20, 250)), ("offen", (20, 250, 250))):
+        files[name] = _pose_png(tmp_path, name, col)
+    out = tmp_path / "posen"
+    m = tool.build(vorlage, out, [("groove", "sway", [files["l"], files["r"]], None),
+                                  ("talk", "talk", [files["zu"]], files["offen"])])
+    assert m["clips"]["talk"] == {"kind": "talk", "talk": True} and m["clips"]["sway"] == {"kind": "groove"}
+    assert sorted(p.name for p in (out / "sway").iterdir()) == ["000.webp", "001.webp"]
+    assert (out / "talk_open" / "000.webp").exists()
+    json.loads((out / "manifest.json").read_text())
+
+
+def _vorlage(tmp_path):
+    import json
+    from PIL import Image
+    vorlage = tmp_path / "vorlage"
+    (vorlage / "desk").mkdir(parents=True)
+    (vorlage / "stage").mkdir()
+    json.dump({"fpb": 16, "beats": 4, "size": [112, 140], "anchors": {"floor": 130.0, "head": 10.0},
+               "desk": {"size": [224, 140], "regions": {"front": [60, 120, 160, 138]}},
+               "stage": {"size": [224, 140], "oy": 0},
+               "clips": {"mix": {"kind": "groove"}}}, open(vorlage / "manifest.json", "w"))
+    for key, val in (("base", 20), ("glow", 250)):
+        img = Image.new("RGBA", (224, 140), (0, 0, 0, 0))
+        img.paste(Image.new("RGBA", (200, 22), (val, val, val, 255)), (12, 116))
+        img.save(vorlage / "desk" / f"{key}.png")
+    Image.new("RGB", (224, 140), (40, 40, 60)).save(vorlage / "stage" / "bg.png")
+    return vorlage
+
+
+def _pose_png(tmp_path, name, col):
+    from PIL import Image
+    img = Image.new("RGBA", (400, 500), (0, 0, 0, 0))
+    img.paste(Image.new("RGBA", (200, 440), col + (255,)), (100, 40))
+    f = tmp_path / f"{name}.png"
+    img.save(f)
+    return f
+
+
+def _event_pack(tmp_path):
+    """Posen-Paket mit Reaktionen, Pause, Weihnachts-Kostuem samt Buehne, Partikel und Ersatz-Titelbild."""
+    import json
+    from PIL import Image
+    tool = _posen_tool()
+    cols = {"mix": (250, 140, 20), "cheer": (240, 30, 30), "zu": (20, 20, 250), "offen": (20, 250, 250),
+            "winken": (30, 220, 30), "schlaf": (150, 40, 200), "xmas": (250, 250, 250),
+            "xmas_zu": (250, 200, 200), "xmas_offen": (250, 250, 120), "kaffee": (120, 80, 40)}
+    f = {n: _pose_png(tmp_path, n, c) for n, c in cols.items()}
+    out = tmp_path / "paket"
+    m = tool.build(_vorlage(tmp_path), out, [
+        ("groove", "mix", [f["mix"]], None), ("hype", "cheer", [f["cheer"]], None),
+        ("talk", "talk", [f["zu"]], f["offen"]), ("special", "coffee", [f["kaffee"]], None),
+        ("react", "winken", [f["winken"]], None), ("react", "schlaf", [f["schlaf"]], None),
+        ("react", "xmas_mix", [f["xmas"]], None), ("react", "xmas_talk", [f["xmas_zu"]], f["xmas_offen"])])
+    Image.new("RGB", (224, 140), (220, 40, 160)).save(out / "stage" / "drop.png")
+    Image.new("RGB", (224, 140), (20, 120, 40)).save(out / "stage" / "xmas.png")
+    m["stage"]["variants"] = {"drop": "drop.png", "weihnachten": "xmas.png", "kaputt": "fehlt.png"}
+    Image.new("RGBA", (32, 32), (255, 0, 0, 255)).save(out / "herz.png")
+    Image.new("RGB", (64, 64), (0, 200, 200)).save(out / "cover.png")
+    m.update({"events": {"hallo": "winken", "pause": "schlaf", "nix": "fehlt"},
+              "moods": {"idle": ["coffee", "winken"]},
+              "seasons": {"weihnachten": {"clips": {"mix": "xmas_mix", "cheer": "xmas_mix", "talk": "xmas_talk"},
+                                          "stage": "weihnachten"}},
+              "sprites": {"herz": "herz.png"}, "cover": "cover.png"})
+    (out / "manifest.json").write_text(json.dumps(m))
+    return out
+
+
+def _bear_color(frame):
+    """Farbe des Baeren-Rechtecks oberhalb des Pults (Bildmitte)."""
+    return tuple(int(v) for v in frame[45, 128])
+
+
+def test_reactions_and_pause_hold_then_return_to_the_groove(tmp_path):
+    baer = BaerDJ(256, 144, str(_event_pack(tmp_path)))
+    baer.render(0.0)
+    p = baer.pack
+    assert p.events == {"hallo": "winken", "pause": "schlaf"}             # unbekannter Clip faellt raus
+    assert p.kind["winken"] == "react" and "winken" not in p.names("groove")
+    for at, block in _kick_track(128, 12):
+        baer.beat.feed(block, at)
+    baer.render(1.0)
+    baer.react("hallo", 1.0)
+    baer.render(1.05)
+    assert baer.director.clip == "winken"
+    baer.render(2.2)
+    assert p.kind[baer.director.clip] == "groove"                           # vorbei: zurueck in den Groove
+    baer.hold_state("pause")
+    baer.render(2.3)
+    assert baer.director.clip == "schlaf"
+    baer.render(6.0)
+    assert baer.director.clip == "schlaf"                                   # haelt, bis geloest
+    baer.react("hallo", 0.5)
+    baer.render(6.1)
+    assert baer.director.clip == "winken"                                   # Reaktion geht vor
+    baer.render(6.8)
+    assert baer.director.clip == "schlaf"
+    baer.hold_state(None)
+    baer.render(7.0)
+    assert p.kind[baer.director.clip] == "groove"
+    import time as _time
+    baer._react_req = ("hallo", 1.0, False, _time.monotonic() - 10)       # Baer war nicht zu sehen: verfallen
+    baer.render(7.5)
+    assert baer.director.clip != "winken"
+
+
+def test_seasons_follow_the_calendar():
+    from datetime import date
+    from musikbot.baer import season_for
+    assert season_for(date(2026, 12, 24)) == "weihnachten"
+    assert season_for(date(2026, 12, 31)) == season_for(date(2027, 1, 1)) == "silvester"
+    assert season_for(date(2026, 10, 31)) == "halloween"
+    assert season_for(date(2026, 7, 1)) == "sommer"
+    assert season_for(date(2026, 3, 3)) is None and season_for(date(2026, 12, 28)) is None
+
+
+def test_manual_season_swaps_costume_stage_and_mouth(tmp_path, monkeypatch):
+    import musikbot.baer as B
+    monkeypatch.setattr(B, "SEASONS", ())                                  # Datum spielt keine Rolle
+    monkeypatch.setattr(B, "NIGHT_HOURS", (0, 0))
+    baer = BaerDJ(256, 144, str(_event_pack(tmp_path)))
+    for at, block in _kick_track(128, 6):
+        baer.beat.feed(block, at)
+    assert _bear_color(baer.render(1.0).to_ndarray())[1] < 200             # orange/rot, kein Kostuem
+    assert baer.has_season("weihnachten") and not baer.has_season("ostern")
+    baer.set_season("weihnachten")
+    f = baer.render(1.1).to_ndarray()
+    assert baer.season == "weihnachten" and baer._mood == "weihnachten"
+    assert min(_bear_color(f)) > 200                                        # weisses Kostuem
+    voice = np.full((1, 2 * 48000), 12000, np.int16)
+    baer.announce(1.2, voice, title="Hallo")
+    baer.render(1.5)                                                        # Wechsel ins Reden (Ueberblendung)
+    f = baer.render(1.8).to_ndarray()
+    assert baer.director.clip == "talk" and _bear_color(f)[2] < 180        # Kostuem mit offenem Mund
+    baer.set_season("weihnachten", until=1.0)                               # laengst vorbei
+    baer.render(4.0)
+    assert baer.season is None
+    baer.render(4.1)
+    assert baer._mood != "weihnachten"                                      # Saison-Buehne sofort weg
+
+
+def test_stage_mood_waits_and_variants_stay_bounded(tmp_path, monkeypatch):
+    import musikbot.baer as B
+    monkeypatch.setattr(B, "SEASONS", ())
+    baer = BaerDJ(256, 144, str(_event_pack(tmp_path)))
+    baer.render(0.0)
+    assert set(baer.pack.stage["variants"]) == {"drop", "weihnachten"}     # fehlende Datei faellt raus
+    assert baer._stage_mood(10.0, "build") == ""                           # keine Build-Buehne im Paket
+    assert baer._stage_mood(10.1, "drop") == "drop"                        # Drop: sofort
+    assert baer._stage_mood(10.5, "groove") == "drop"
+    assert baer._stage_mood(12.2, "groove") == "drop"                      # noch nicht lange genug
+    assert baer._stage_mood(14.2, "groove") == ""
+    monkeypatch.setattr(B, "BG_VARIANTS", 1)
+    for v in ("drop", "weihnachten", "drop"):
+        baer._bg_level(v, 3)
+    assert list(baer._bg_cache) == ["drop"]
+
+
+def test_idle_sprites_and_fallback_cover(tmp_path):
+    baer = BaerDJ(256, 144, str(_event_pack(tmp_path)))
+    baer.render(0.0)
+    d = baer.director
+    d.clip = "coffee"
+    st = {"audible": False, "loud": 0.0, "section": "calm"}
+    picks = [d._decide(st, st, False, "hype") for _ in range(200)]
+    assert 0 < sum(p is not None for p in picks) < 60                      # Stille: selten wechseln
+    assert {p for p in picks if p} <= {"winken"}
+    assert baer._fallback_cover is not None and max(baer._fallback_cover.size) <= int(144 * 0.24)
+    f = baer.render(0.5).to_ndarray()
+    x, y = 256 - baer._fallback_cover.width - int(256 * .03) + 3, int(144 * .04) + 3
+    assert tuple(f[y, x]) == (0, 200, 200)                                  # Ersatz-Titelbild oben rechts
+    baer.react("favorit", 1.0)                                              # kein Clip dafuer: nur nichts tun
+    baer.render(0.6)
+    baer._burst("favorit", 0.6)
+    assert any(p[8] is not None for p in baer._particles)                   # Herz als Bild
+
+
+def test_player_tells_the_bear_about_pause_volume_and_guests():
+    p = _player()
+    seen = []
+    p.baer.react = lambda e, s=2.5, **kw: seen.append(e)
+    p.state = "playing"
+
+    async def go():
+        assert p.pause() and p.baer._state_ev == "pause"
+        assert p.resume() and p.baer._state_ev is None
+    asyncio.run(go())
+    p.set_volume(p.volume + 10)
+    p.set_volume(p.volume - 20)
+    p.set_volume(p.volume)                               # gleich geblieben: nichts
+    p.set_audience([], ["Anna"])
+    p.set_audience([], ["Anna"])                         # nichts Neues
+    p.set_audience([], ["Anna", "Max"])
+    p.set_audience([], ["Max"])
+    assert seen == ["lauter", "leiser", "hallo", "hallo", "tschuess"]

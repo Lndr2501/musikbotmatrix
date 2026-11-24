@@ -15,6 +15,8 @@ import random
 import re
 import tempfile
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import nio
@@ -151,21 +153,24 @@ class Bot:
         if turn:
             self.calls.set_turn(turn)
         await self._ensure_avatar()
+        self._restore_birthday()
         return rooms
 
     async def _ensure_avatar(self) -> None:
-        """Logo als Profilbild des Bots setzen – nur wenn es sich geaendert hat."""
-        path = os.path.join(os.path.dirname(__file__), "static", "avatar.png")
+        """Logo (oder AVATAR_FILE) als Profilbild des Bots setzen – nur wenn es sich geaendert hat."""
+        path = self.cfg.avatar_file or os.path.join(os.path.dirname(__file__), "static", "avatar.png")
         try:
             with open(path, "rb") as fh:
                 data = fh.read()
         except OSError:
+            log.warning("Profilbild %s nicht lesbar", path)
             return
+        ctype = "image/jpeg" if data[:3] == b"\xff\xd8\xff" else "image/png"
         digest = hashlib.sha256(data).hexdigest()
         if self.store.setting("avatar_sha256") == digest:
             return
         try:
-            mxc = await self.matrix.upload_image(data, "image/png", "musikbot.png")
+            mxc = await self.matrix.upload_image(data, ctype, "musikbot." + ctype.split("/")[1])
             if not mxc:
                 return
             resp = await self.matrix.client.set_avatar(mxc)
@@ -403,6 +408,7 @@ class Bot:
 
     async def _fail_pending(self, room: str, title: str, text: str) -> None:
         """Die Such-/Download-Karte wird zur Fehlerkarte (sonst bliebe sie auf "laeuft")."""
+        self.player.react("ratlos", 3.0)
         eid = self._card_pending.pop(room, None)
         card = cards.track_card("error", title, note=text)
         await self._put_track_card(room, card, eid)
@@ -624,6 +630,8 @@ class Bot:
                                  "warning", "⭐")
                 return
             added = st.fav_add(sender, cur.key)
+            if added:
+                self.player.react("favorit", 2.5)
             await self._note(room_id, (f"„{cur.title or cur.key}“ ist jetzt in deinen Favoriten."
                                        if added else f"„{cur.title or cur.key}“ ist schon in deinen Favoriten."),
                              "success" if added else "info", "⭐")
@@ -667,6 +675,101 @@ class Bot:
                   {"title": "Wer hört am meisten Musik", "unit": "min", "items": people}]
         await self.matrix.send_card(room_id, cards.card_content(
             cards.stats_body("Musik-Statistik", charts), cards.stats_card("Musik-Statistik", charts)))
+
+    # ------------------------------------------------------------ Geburtstag
+    def _restore_birthday(self) -> None:
+        """Laufende Geburtstags-Party nach einem Neustart weiterfuehren."""
+        try:
+            info = json.loads(self.store.setting("geburtstag") or "{}")
+        except ValueError:
+            info = {}
+        if self.player.baer is not None and info.get("until", 0) > time.time():
+            self.player.baer.set_season("geburtstag", info["until"])
+
+    async def _birthday(self, room_id: str, sender: str, arg: str) -> None:
+        dj = self.cfg.dj_name
+        word = arg.strip()
+        try:
+            info = json.loads(self.store.setting("geburtstag") or "{}")
+        except ValueError:
+            info = {}
+        active = info.get("until", 0) > time.time()
+        baer = self.player.baer
+        if word.lower() in ("", "status", "?"):
+            if active:
+                until = self._clock(info["until"])
+                await self._note(room_id, f"Geburtstag von {info.get('name') or 'jemandem'} – "
+                                          f"{dj} feiert bis {until} mit. Beenden: !geburtstag aus", "info", "🎂")
+            else:
+                await self._note(room_id, f"Gerade kein Geburtstag. Mit !geburtstag <Name> feiert {dj} mit.",
+                                 "info", "🎂")
+            return
+        if word.lower() in BLICK_OFF:
+            self.store.set_setting("geburtstag", "")
+            if baer is not None:
+                baer.set_season(None)
+            await self._note(room_id, "Party vorbei – zurück zum normalen Outfit." if active
+                             else "Es lief gar keine Geburtstags-Party.", "info", "🎂")
+            return
+        name = re.sub(r"\s+", " ", word)[:40]
+        until = time.time() + max(0.5, self.cfg.birthday_hours) * 3600
+        self.store.set_setting("geburtstag", json.dumps({"name": name, "until": until, "by": sender}))
+        costume = baer is not None and baer.has_season("geburtstag")
+        if baer is not None:
+            baer.set_season("geburtstag", until)
+        await self._note(room_id, f"Happy Birthday, {name}! {dj} feiert bis {self._clock(until)} mit"
+                                  + (" – im Party-Outfit." if costume else "."), "success", "🎂")
+        self._spawn(self.player.shout_soon(f"Happy Birthday, {name}! Alles Gute von {dj}!"), "geburtstag")
+
+    def _clock(self, ts: float) -> str:
+        """Uhrzeit in der Zeitzone der Moderation (der Container laeuft in UTC)."""
+        try:
+            tz = ZoneInfo(getattr(self.cfg, "moderation_tz", "") or "Europe/Zurich")
+        except Exception:  # noqa: BLE001
+            tz = None
+        return datetime.fromtimestamp(ts, tz).strftime("%H:%M")
+
+    def _spawn(self, coro, name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    # ------------------------------------------------------------ Sticker
+    def _sticker_files(self) -> dict[str, str]:
+        d = self.cfg.sticker_dir
+        if not d or not os.path.isdir(d):
+            return {}
+        return {os.path.splitext(f)[0].lower(): os.path.join(d, f) for f in sorted(os.listdir(d))
+                if f.lower().endswith(".png")}
+
+    async def _sticker(self, room_id: str, arg: str) -> None:
+        files = self._sticker_files()
+        if not files:
+            await self._note(room_id, "Hier gibt es keine Sticker.", "warning", "🏷")
+            return
+        want = arg.strip().lower().replace(" ", "-")
+        name = want if want in files else next((n for n in files if want and n.startswith(want)), None)
+        if name is None:
+            await self._note(room_id, ("Den Sticker gibt es nicht. " if want else "")
+                             + "Sticker: " + ", ".join(files) + " · !sticker <Name>", "info", "🏷")
+            return
+        with open(files[name], "rb") as fh:
+            data = fh.read()
+        digest = hashlib.sha256(data).hexdigest()
+        try:
+            known = json.loads(self.store.setting(f"sticker:{name}") or "{}")
+        except ValueError:
+            known = {}
+        mxc = known.get("mxc") if known.get("sha256") == digest else None
+        if not mxc:                                    # einmal hochladen, dann die Adresse merken
+            mxc = await self.matrix.upload_image(data, "image/png", f"{name}.png")
+            if not mxc:
+                await self._note(room_id, "Sticker konnte nicht hochgeladen werden.", "error", "❌")
+                return
+            self.store.set_setting(f"sticker:{name}", json.dumps({"sha256": digest, "mxc": mxc}))
+        content = {"body": name, "url": mxc,
+                   "info": {"w": 256, "h": 256, "mimetype": "image/png", "size": len(data)}}
+        await self.matrix.send_room_event(room_id, "m.sticker", content)
 
     # ------------------------------------------------------------------ Text
     def _register_commands(self) -> None:
@@ -912,6 +1015,10 @@ class Bot:
                 await self._now_card_state(room_id, p.state)
         elif name == "blick":
             await self._ki_command(room_id, sender, arg)
+        elif name == "geburtstag":
+            await self._birthday(room_id, sender, arg)
+        elif name == "sticker":
+            await self._sticker(room_id, arg)
         elif name == "dashboard":
             await self._send_dashboard_login(room_id, sender)
         elif name == "help":
@@ -923,6 +1030,7 @@ class Bot:
     # ------------------------------------------------------------------ Play
     async def _play(self, room_id: str, sender: str, query: str) -> None:
         m = self.matrix
+        self.player.react("plattenkiste", 3.0)          # Baer kramt in der Plattenkiste
         title = query[:80]
         card = cards.track_card("searching", title)
         eid = await m.send_card(room_id, cards.card_content(cards.track_body(card), card))

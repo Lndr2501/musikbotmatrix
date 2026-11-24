@@ -30,6 +30,11 @@ class FakeMatrix:
     async def send_notice(self, room, text):
         self.events.append(("notice", None, {"body": text}))
 
+    async def send_room_event(self, room, evtype, content):
+        self._n += 1
+        self.events.append((evtype, f"$e{self._n}", content))
+        return f"$e{self._n}"
+
 
 class FakePlayer:
     """Nur das, was die Befehle brauchen."""
@@ -42,8 +47,18 @@ class FakePlayer:
         self.seeks = []
         self.covers = []
 
+    baer = None
+    reactions = None
+
     def set_cover(self, key, frame):
         self.covers.append((key, frame))
+
+    def react(self, event, seconds=2.5, **kw):
+        self.reactions = (self.reactions or []) + [event]
+
+    async def shout_soon(self, text, wait=20.0):
+        self.shouted = text
+        return False
 
     def status(self):
         return {"duration": 197.0, "state": self.state, "position": self.position, "track": None,
@@ -443,3 +458,90 @@ def test_player_more_shows_toggle_states():
     labels = [a["label"] for a in more]
     assert "🔁 Loop: an" in labels and "✨ Autoplay: an" in labels and "🎬 Video" in labels
     assert all(len(a["label"]) <= 24 for a in more)
+
+
+class FakeStore:
+    def __init__(self):
+        self.s = {}
+
+    def setting(self, name, default=""):
+        return self.s.get(name, default)
+
+    def set_setting(self, name, value):
+        self.s[name] = value
+
+
+class FakeBaer:
+    def __init__(self):
+        self.season = None
+
+    def has_season(self, name):
+        return name == "geburtstag"
+
+    def set_season(self, name, until=None):
+        self.season = (name, until) if name else None
+
+
+def _party_bot(tmp_path):
+    bot = make_bot()
+    bot.store = FakeStore()
+    bot.cfg = SimpleNamespace(dj_name="DJ Bär", birthday_hours=12.0, sticker_dir=str(tmp_path))
+    bot._bg_tasks = set()
+    bot.player.baer = FakeBaer()
+    return bot
+
+
+def _texts(bot):
+    return " ".join(str(e[2]) for e in bot.matrix.events)
+
+
+def test_birthday_puts_on_the_costume_until_it_is_switched_off(tmp_path):
+    import json
+    import time
+    bot = _party_bot(tmp_path)
+    run_cmd(bot, "geburtstag", "")
+    assert "Gerade kein Geburtstag" in _texts(bot)
+    run_cmd(bot, "geburtstag", "Anna  Maria")
+    info = json.loads(bot.store.s["geburtstag"])
+    assert info["name"] == "Anna Maria" and info["until"] > time.time() + 11 * 3600
+    assert bot.player.baer.season[0] == "geburtstag"
+    assert "Happy Birthday, Anna Maria!" in _texts(bot) and "Party-Outfit" in _texts(bot)
+    run_cmd(bot, "geburtstag", "status")
+    assert "Geburtstag von Anna Maria" in _texts(bot)
+    bot.player.baer = FakeBaer()                     # Neustart: Party laeuft weiter
+    bot._restore_birthday()
+    assert bot.player.baer.season[0] == "geburtstag"
+    run_cmd(bot, "geburtstag", "aus")
+    assert bot.store.s["geburtstag"] == "" and bot.player.baer.season is None
+    assert "Party vorbei" in _texts(bot)
+
+
+def test_sticker_lists_uploads_once_and_sends_a_sticker_event(tmp_path):
+    from PIL import Image
+    bot = _party_bot(tmp_path)
+    for name in ("herz", "daumen-hoch"):
+        Image.new("RGBA", (64, 64), (255, 0, 0, 255)).save(tmp_path / f"{name}.png")
+    run_cmd(bot, "sticker", "")
+    assert "daumen-hoch, herz" in _texts(bot)
+    run_cmd(bot, "sticker", "Herz")
+    run_cmd(bot, "sticker", "daumen")                # Anfang des Namens reicht
+    run_cmd(bot, "sticker", "herz")
+    stickers = [e[2] for e in bot.matrix.events if e[0] == "m.sticker"]
+    assert [s["body"] for s in stickers] == ["herz", "daumen-hoch", "herz"]
+    assert stickers[0]["url"] == stickers[2]["url"] and stickers[0]["info"]["mimetype"] == "image/png"
+    assert len(bot.matrix.uploads) == 2              # jeder Sticker nur einmal hochgeladen
+    run_cmd(bot, "sticker", "gibtsnicht")
+    assert "Den Sticker gibt es nicht" in _texts(bot)
+
+
+def test_sticker_and_birthday_status_are_open_to_everyone():
+    from musikbot.commands import is_read_only, parse
+    assert parse("!party Anna", ("!",)).name == "geburtstag"
+    assert is_read_only("sticker", "herz") and is_read_only("geburtstag", "")
+    assert not is_read_only("geburtstag", "Anna") and not is_read_only("geburtstag", "aus")
+
+
+def test_failure_and_favourite_make_the_bear_react():
+    bot = make_bot()
+    asyncio.run(bot._fail_pending("!r:x", "Titel", "Nicht gefunden"))
+    assert bot.player.reactions == ["ratlos"]

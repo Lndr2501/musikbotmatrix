@@ -1,10 +1,14 @@
 """Posen-Paket fuer den Baer-DJ bauen: freigestellte Standbilder auf Buehne und Pult eines 3D-Pakets.
 
     python tools/posen_paket.py --vorlage /data/baer-3d --out /data/baer-posen \\
-        groove:mix=mixen.png groove:neutral=neutral.png hype:cheer=jubeln.png \\
-        shout:shout=jubeln.png talk:talk=sprechen.png special:coffee=kaffee.png
+        groove:neutral=neutral.png groove:mix=mixen.png groove:sway=links.png,rechts.png \\
+        hype:cheer=jubeln.png talk:talk=sprechen-zu.png+sprechen-offen.png \\
+        shout:shout=rufen-zu.png+rufen-offen.png special:coffee=kaffee.png react:winken=winken.png
 
-Jede Pose ist ``Sorte:Name=Datei`` (Sorten: groove, hype, special, talk, shout). Alle Bilder
+Jede Pose ist ``Sorte:Name=Datei`` (Sorten: groove, hype, special, talk, shout, react). Mehrere
+Dateien mit Komma ergeben einen Loop (gleichmaessig ueber 4 Beats verteilt, ``links,rechts`` wechselt
+alle 2 Beats), ``+Datei`` haengt das Bild mit offenem Mund an (Lippen-Sync beim Reden). Clips der
+Sorte ``react`` waehlt der Baer nie selbst, nur ueber ``events``/``moods``/``seasons``. Alle Bilder
 muessen gleich gross und freigestellt sein (RGBA) und den Baeren im selben Massstab zeigen –
 die erste Pose legt fest, wo Kopf und Fuesse landen (Kopf auf ``anchors.head``, Fuesse auf
 ``anchors.floor`` der Vorlage). ``--groesse 1.1`` macht den Baeren 10 % groesser (Fuesse bleiben).
@@ -19,12 +23,13 @@ from pathlib import Path
 
 from PIL import Image
 
-KINDS = ("groove", "hype", "special", "talk", "shout")
+KINDS = ("groove", "hype", "special", "talk", "shout", "react")
 
 
-def parse_pose(spec: str) -> tuple[str, str, Path]:
+def parse_pose(spec: str) -> tuple[str, str, list[Path], Path | None]:
+    """``Sorte:Name=Datei[,Datei…][+Mund-offen]`` -> (Sorte, Name, Loop-Bilder, Bild mit offenem Mund)."""
     try:
-        kind_name, file = spec.split("=", 1)
+        kind_name, files = spec.split("=", 1)
         kind, name = kind_name.split(":", 1)
     except ValueError:
         raise SystemExit(f"Pose '{spec}': erwartet Sorte:Name=Datei") from None
@@ -32,7 +37,13 @@ def parse_pose(spec: str) -> tuple[str, str, Path]:
         raise SystemExit(f"Pose '{spec}': Sorte muss eine von {', '.join(KINDS)} sein")
     if not name.isidentifier():
         raise SystemExit(f"Pose '{spec}': Name nur aus Buchstaben/Ziffern/_")
-    return kind, name, Path(file)
+    files, _, mouth = files.partition("+")
+    frames = [Path(f) for f in files.split(",") if f]
+    if not frames:
+        raise SystemExit(f"Pose '{spec}': keine Datei")
+    if mouth and len(frames) > 1:
+        raise SystemExit(f"Pose '{spec}': offener Mund nur fuer Einzelbilder")
+    return kind, name, frames, Path(mouth) if mouth else None
 
 
 def placement(ref: Image.Image, canvas: tuple[int, int], head: float, floor: float,
@@ -56,26 +67,36 @@ def place(img: Image.Image, canvas: tuple[int, int], scale: float, dx: float, dy
     return out
 
 
-def build(vorlage: Path, out: Path, poses: list[tuple[str, str, Path]], size: float = 1.0,
-          quality: int = 92) -> dict:
+def build(vorlage: Path, out: Path, poses: list[tuple], size: float = 1.0, quality: int = 92) -> dict:
+    """poses: (Sorte, Name, Datei) oder (Sorte, Name, [Loop-Dateien], Mund-offen|None)."""
     m = json.loads((vorlage / "manifest.json").read_text())
     if "anchors" not in m or "size" not in m:
         raise SystemExit("Vorlage braucht 'anchors' und 'size' (3D-Paket)")
     canvas = tuple(int(v) for v in m["size"])
-    images = [(k, n, Image.open(f).convert("RGBA")) for k, n, f in poses]
-    sizes = {img.size for _, _, img in images}
+    images = []
+    for pose in poses:
+        kind, name, frames = pose[:3]
+        mouth = pose[3] if len(pose) > 3 else None
+        frames = [frames] if isinstance(frames, (str, Path)) else frames
+        images.append((kind, name, [Image.open(f).convert("RGBA") for f in frames],
+                       Image.open(mouth).convert("RGBA") if mouth else None))
+    sizes = {img.size for _, _, fr, mo in images for img in fr + ([mo] if mo else [])}
     if len(sizes) != 1:
         raise SystemExit(f"Posen haben verschiedene Groessen: {sorted(sizes)}")
-    scale, dx, dy = placement(images[0][2], canvas, m["anchors"]["head"], m["anchors"]["floor"], size)
+    scale, dx, dy = placement(images[0][2][0], canvas, m["anchors"]["head"], m["anchors"]["floor"], size)
     out.mkdir(parents=True, exist_ok=True)
     clips = {}
-    for kind, name, img in images:
-        d = out / name
-        if d.exists():
-            shutil.rmtree(d)
-        d.mkdir()
-        place(img, canvas, scale, dx, dy).save(d / "000.webp", quality=quality, method=6)
-        clips[name] = {"kind": kind}
+    for kind, name, frames, mouth in images:
+        for variant, imgs in ((name, frames), (name + "_open", [mouth] if mouth else [])):
+            d = out / variant
+            if d.exists():
+                shutil.rmtree(d)
+            if not imgs:
+                continue
+            d.mkdir()
+            for i, img in enumerate(imgs):
+                place(img, canvas, scale, dx, dy).save(d / f"{i:03d}.webp", quality=quality, method=6)
+        clips[name] = {"kind": kind, "talk": True} if mouth else {"kind": kind}
     for sub in ("stage", "desk"):
         if (vorlage / sub).is_dir():
             shutil.copytree(vorlage / sub, out / sub, dirs_exist_ok=True)

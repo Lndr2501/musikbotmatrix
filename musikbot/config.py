@@ -99,6 +99,12 @@ class Config:
     zuruf_every: float = 75.0
     # Eigenes Bildpaket fuer den Baeren (Ordner mit manifest.json); leer = eingebautes.
     baer_assets: str = ""
+    # Eigenes Profilbild des Bots (PNG/JPEG); leer = das eingebaute Logo.
+    avatar_file: str = ""
+    # Ordner mit Stickern (PNG, Dateiname = Name) fuer !sticker; leer = Befehl aus.
+    sticker_dir: str = ""
+    # !geburtstag: so viele Stunden traegt der DJ Partyhut.
+    birthday_hours: float = 12.0
 
     # --- KI im Call: Kamera/Bildschirm kommentieren ------------------------
     # OpenAI-kompatibler Endpunkt (eigener Server empfohlen: die Bilder gehen dorthin).
@@ -241,6 +247,9 @@ class Config:
             zuruf_enabled=_bool("ZURUF_ENABLED", True),
             zuruf_every=_float("ZURUF_EVERY", 75.0),
             baer_assets=_str("BAER_ASSETS"),
+            avatar_file=_str("AVATAR_FILE"),
+            sticker_dir=_str("STICKER_DIR"),
+            birthday_hours=_float("BIRTHDAY_HOURS", 12.0),
             ki_url=_str("KI_URL").rstrip("/"),
             ki_key=_str("KI_KEY"),
             ki_model=_str("KI_MODEL"),

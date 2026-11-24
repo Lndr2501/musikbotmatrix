@@ -32,6 +32,8 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "autoplay": ("autoplay", "auto", "ähnlich", "aehnlich"),
     "dashboard": ("dashboard", "web", "login", "passwort", "password"),
     "blick": ("blick", "kamera", "schauen"),
+    "geburtstag": ("geburtstag", "birthday", "bday", "party"),
+    "sticker": ("sticker", "stickers"),
     "help": ("help", "hilfe", "commands", "befehle"),
 }
 
@@ -66,6 +68,8 @@ Audio-/Videodatei an die Nachricht anhängen – der Bot spielt sie direkt ab
 !stats – meistgespielte Titel und wer am meisten Musik hört
 !blick [mich | Name] – DJ schaut jetzt auf Kameras/Bildschirme (alle, nur deine, nur die einer Person) und sagt was dazu
 !blick an|aus|status – Kamera-Sprüche für dich ab-/anschalten
+!geburtstag <Name> – DJ feiert mit (Kostüm, Ständchen) · !geburtstag aus · !geburtstag (Stand)
+!sticker [Name] – Sticker schicken (ohne Name: alle anzeigen), geht in jedem Raum
 !dashboard – Link + persönliches Passwort fürs Web-Dashboard per Direktnachricht
 !hilfe – diese Liste
 Steuern dürfen nur Leute, die selbst im Call sind (Lesen: help, status, queue,
@@ -102,7 +106,7 @@ BLICK_OFF = ("aus", "off", "nein", "stop")
 BLICK_ON = ("an", "on", "ja")
 BLICK_SETTINGS = BLICK_OFF + BLICK_ON + ("status", "?")
 
-_READ_ONLY = {"help", "status", "queue", "stats", "dashboard"}
+_READ_ONLY = {"help", "status", "queue", "stats", "dashboard", "sticker"}
 
 
 def is_read_only(name: str, arg: str = "") -> bool:
@@ -116,4 +120,6 @@ def is_read_only(name: str, arg: str = "") -> bool:
         return sub != "play"
     if name == "blick":                    # fuer sich ab-/anschalten darf jeder, hinschauen nur wer im Call ist
         return sub in BLICK_SETTINGS
+    if name == "geburtstag":               # nachsehen darf jeder, feiern/beenden nur wer im Call ist
+        return sub in ("", "status", "?")
     return False
