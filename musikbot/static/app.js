@@ -173,9 +173,9 @@ function render() {
   $("#me-avatar").textContent = initials;
   $("#me-name").textContent = S.me_name || "";
   $("#me").title = S.me;
-  $("#loop").classList.toggle("on", S.loop);
-  $("#video").classList.toggle("on", S.video);
-  $("#autoplay").classList.toggle("on", S.autoplay);
+  setMode("#loop", S.loop);
+  setMode("#video", S.video);
+  setMode("#autoplay", S.autoplay);
   $("#autoplay-hint").hidden = !S.autoplay || S.queue.some((t) => t.requester === "autoplay");
   $("#fav").classList.toggle("on", !!(t && S.favs.includes(t.key)));
   const call = S.call || {};
@@ -193,7 +193,14 @@ function render() {
   if (changed("chips", [S.busy, S.in_call, S.peers])) renderChips();
   if (changed("queue", [S.queue, S.history, S.me])) renderQueue();
   if (changed("fades", [S.crossfade, S.fade_in])) renderFades();
+  if (S.dj && changed("dj", [S.dj, !!(S.call && S.call.element)])) renderDj();
   tick();
+}
+
+function setMode(sel, on) {
+  const b = $(sel);
+  b.classList.toggle("on", !!on);
+  b.setAttribute("aria-pressed", String(!!on));
 }
 
 function setPlayIcon(playing) {
@@ -299,12 +306,18 @@ $("#playpause").addEventListener("click", () => {
   else if (S.queue.length) cmd("skip");
   else { toast("Die Warteschlange ist leer – such dir etwas aus."); selectTab("search"); }
 });
-$("#loop").addEventListener("click", (ev) => { ev.currentTarget.classList.toggle("on"); cmd("loop", S && S.loop ? "off" : "on"); });
-$("#autoplay").addEventListener("click", (ev) => {
-  ev.currentTarget.classList.toggle("on");
+$("#loop").addEventListener("click", () => {
+  setMode("#loop", !(S && S.loop));
+  cmd("loop", S && S.loop ? "off" : "on", S && S.loop ? "Wiederholen aus" : "Der Titel wird wiederholt");
+});
+$("#autoplay").addEventListener("click", () => {
+  setMode("#autoplay", !(S && S.autoplay));
   cmd("autoplay", S && S.autoplay ? "off" : "on", S && S.autoplay ? "Autoplay aus" : "Autoplay an – danach kommt ähnliche Musik");
 });
-$("#video").addEventListener("click", (ev) => { ev.currentTarget.classList.toggle("on"); cmd("video", S && S.video ? "off" : "on"); });
+$("#video").addEventListener("click", () => {
+  setMode("#video", !(S && S.video));
+  cmd("video", S && S.video ? "off" : "on", S && S.video ? "Video im Call aus" : "Video im Call an");
+});
 $("#to-playlist").addEventListener("click", (ev) => { if (S && S.track) playlistMenu(ev, { key: S.track.key }); });
 $("#fav").addEventListener("click", (ev) => {
   if (S && S.track) ev.currentTarget.classList.toggle("on");
@@ -318,8 +331,11 @@ $("#call-toggle").addEventListener("click", () => {
 });
 $("#rejoin").addEventListener("click", () => cmd("rejoin", "", "Verbinde neu …"));
 const softStop = () => cmd("softstop", $("#softstop-len").value, "Wird ausgeblendet …");
-$("#softstop").addEventListener("click", softStop);
 $("#softstop2").addEventListener("click", softStop);
+$("#stop-menu").addEventListener("click", (ev) => menu(ev, "Stoppen", [
+  [`Sanft ausblenden (${$("#softstop-len").value} s)`, softStop],
+  ["Sofort stoppen", () => cmd("stop", "", "Gestoppt")],
+]));
 
 const vol = $("#volume");
 vol.addEventListener("pointerdown", () => sliding.add("volume"));
@@ -633,16 +649,97 @@ async function playlistMenu(ev, item) {
     if (await playlistOp({ op: "create", name })) playlistOp({ op: "add", name, ...item }, `„${name}“ angelegt und Titel hinzugefügt`);
   });
   pop.replaceChildren(title, ...entries, form);
+  placePopover(anchor);
+  if (!entries.length) input.focus();
+}
+function closePopover() { $("#popover").hidden = true; }
+function placePopover(anchor) {
+  const pop = $("#popover");
   pop.hidden = false;
   const r = anchor.getBoundingClientRect();
   const w = pop.offsetWidth, h = pop.offsetHeight;
   pop.style.left = Math.max(16, Math.min(window.innerWidth - w - 16, r.right - w)) + "px";
   pop.style.top = (r.bottom + h + 8 > window.innerHeight ? Math.max(16, r.top - h - 6) : r.bottom + 6) + "px";
-  if (!entries.length) input.focus();
 }
-function closePopover() { $("#popover").hidden = true; }
+// Kleines Menue am Knopf: items = [[Text, Aktion], …]
+function menu(ev, title, items) {
+  ev.stopPropagation();
+  const head = Object.assign(document.createElement("div"), { className: "pop-title", textContent: title });
+  $("#popover").replaceChildren(head, ...items.map(([text, fn]) => {
+    const b = Object.assign(document.createElement("button"), { textContent: text });
+    b.addEventListener("click", () => { closePopover(); fn(); });
+    return b;
+  }));
+  placePopover(ev.currentTarget);
+}
 document.addEventListener("click", (ev) => { if (!ev.target.closest("#popover")) closePopover(); });
 document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closePopover(); });
+
+// ---------------------------------------------------------------- DJ
+const LOOKS = {
+  weihnachten: "🎄 im Weihnachts-Outfit", silvester: "🎆 im Silvester-Outfit", halloween: "🎃 im Halloween-Outfit",
+  sommer: "😎 im Sommer-Outfit", geburtstag: "🎂 im Party-Outfit", nacht: "🌙 im Nacht-Outfit",
+};
+const REACTIONS = {
+  hallo: ["👋", "Winken"], favorit: ["👍", "Daumen hoch"], blick_lachen: ["😂", "Lachen"],
+  ratlos: ["🤷", "Ratlos"], tschuess: ["🙋", "Tschüss"],
+};
+function renderDj() {
+  const d = S.dj;
+  const live = !!(S.call && S.call.element);          // Bot ist mit Bild im Call
+  $("#dj-name").textContent = d.name;
+  const avatar = $("#dj-avatar");
+  if (!avatar.getAttribute("src")) avatar.src = "/api/dj/avatar";
+  $("#dj-look").textContent = !d.bear ? "Ohne Bär-Bild im Call"
+    : [LOOKS[d.season] || "im normalen Outfit", d.night && d.season !== "nacht" ? "🌙 Nacht" : ""].filter(Boolean).join(" · ");
+
+  $("#dj-react-card").hidden = !d.reactions.length;
+  $("#dj-react").replaceChildren(...d.reactions.map((e) => {
+    const [emoji, label] = REACTIONS[e] || ["✨", e];
+    const b = document.createElement("button");
+    b.className = "react-btn";
+    b.innerHTML = `<span class="emoji"></span><span></span>`;
+    b.firstChild.textContent = emoji;
+    b.lastChild.textContent = label;
+    b.addEventListener("click", () => cmd("baer", e, live ? `${d.name}: ${label}` : "Sieht man nur im Call-Video"));
+    return b;
+  }));
+
+  const bd = d.birthday;
+  $("#bday-on").hidden = !bd;
+  $("#bday-form").hidden = !!bd;
+  $("#bday-text").textContent = bd ? `Party für ${bd.name || "jemanden"} – läuft bis ${bd.until}.` : "";
+  $("#bday-hint").textContent = bd ? "" : "Partyhut, Party-Bühne und ein Ständchen";
+
+  $("#dj-sticker-card").hidden = !d.stickers.length;
+  $("#stickers").replaceChildren(...d.stickers.map((name) => {
+    const b = document.createElement("button");
+    b.className = "sticker";
+    b.title = name;
+    const img = Object.assign(document.createElement("img"), { alt: name, loading: "lazy", src: "/api/sticker/" + encodeURIComponent(name) });
+    b.append(img);
+    b.addEventListener("click", () => cmd("sticker", name, "Sticker geschickt"));
+    return b;
+  }));
+
+  $("#dj-blick-card").hidden = !d.blick.on;
+  $("#blick-me-on").checked = d.blick.me;
+  $("#blick-all").disabled = !live;
+  $("#blick-me").disabled = !live || !d.blick.me;
+  $("#blick-hint").textContent = live ? "" : "Geht nur, wenn der Bot im Call ist.";
+}
+$("#bday-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const name = $("#bday-name").value.trim();
+  if (!name) { $("#bday-name").focus(); return; }
+  $("#bday-name").value = "";
+  cmd("geburtstag", name, `Happy Birthday, ${name}! 🎂`);
+});
+$("#bday-stop").addEventListener("click", () => cmd("geburtstag", "aus", "Party vorbei"));
+$("#blick-all").addEventListener("click", () => cmd("blick", "", "Der DJ schaut hin …"));
+$("#blick-me").addEventListener("click", () => cmd("blick", "mich", "Der DJ schaut auf dich …"));
+$("#blick-me-on").addEventListener("change", (ev) => cmd("blick", ev.target.checked ? "an" : "aus",
+  ev.target.checked ? "Sprüche über dich sind an" : "Keine Sprüche mehr über dich"));
 
 // ---------------------------------------------------------------- Fades
 function drawCurve(seconds) {

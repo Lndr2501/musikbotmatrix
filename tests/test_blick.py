@@ -55,6 +55,9 @@ class FakePlayer:
         self.said.append(text)
         return True
 
+    def react(self, event, seconds=2.5, **kw):
+        self.reactions = getattr(self, "reactions", []) + [(event, kw.get("after_talk", False))]
+
 
 def make(videos, answers, allowed=lambda u: True, img=None):
     cfg = SimpleNamespace(dj_name="DJ Qwen", blick_every=180.0)
@@ -154,6 +157,7 @@ async def test_manual_look_comments_even_unchanged_pictures_and_says_it():
     assert await b.look()
     assert await b.look_now() == ("said", "Max, schon wieder du!")     # gleiches Bild, trotzdem
     assert player.said == ["Max, hi!", "Max, schon wieder du!"] and len(ki.seen) == 2
+    assert player.reactions == [("blick", False), ("blick_lachen", True)] * 2   # neugierig, nach dem Spruch lachen
     texts = " ".join(p["text"] for p in ki.seen[1][1]["content"] if p["type"] == "text")
     assert "Deine letzten Sprüche (sag etwas anderes): Max, hi!" in texts
 

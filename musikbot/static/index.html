@@ -60,8 +60,8 @@
         <div class="times"><span id="pos">0:00</span><span id="dur">0:00</span></div>
       </div>
       <div class="controls">
-        <button class="icon-btn" data-cmd="shuffle" title="Mischen" aria-label="Mischen">
-          <svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+        <button class="icon-btn" data-cmd="rewind" data-arg="10" title="10 Sekunden zurück" aria-label="10 Sekunden zurück">
+          <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/><text x="12" y="15.5" class="ic-num">10</text></svg>
         </button>
         <button class="icon-btn big" data-cmd="previous" title="Vorheriger Titel" aria-label="Vorheriger Titel">
           <svg viewBox="0 0 24 24" class="solid"><path d="M19 20 9 12l10-8v16ZM5 19V5"/></svg>
@@ -73,8 +73,8 @@
         <button class="icon-btn big" data-cmd="softskip" title="Nächster Titel (sanft überblenden)" aria-label="Nächster Titel">
           <svg viewBox="0 0 24 24" class="solid"><path d="m5 4 10 8-10 8V4ZM19 5v14"/></svg>
         </button>
-        <button class="icon-btn" id="loop" title="Wiederholen" aria-label="Wiederholen">
-          <svg viewBox="0 0 24 24"><path d="m17 2 4 4-4 4M3 11v-1a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+        <button class="icon-btn" data-cmd="forward" data-arg="10" title="10 Sekunden vor" aria-label="10 Sekunden vor">
+          <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/><text x="12" y="15.5" class="ic-num">10</text></svg>
         </button>
       </div>
       <div class="sub-controls">
@@ -83,22 +83,18 @@
           <input type="range" id="volume" min="0" max="300" step="5" aria-label="Lautstärke">
           <span id="volume-val" class="muted">60</span>
         </div>
-        <div class="chip-row">
-          <button class="chip" data-cmd="rewind" data-arg="10" title="10 Sekunden zurückspulen">
-            <svg viewBox="0 0 24 24"><path d="M11 19 2 12l9-7v14ZM22 19l-9-7 9-7v14Z"/></svg> 10 s
+        <div class="modes">
+          <button class="mode" id="loop" title="Aktuellen Titel wiederholen" aria-pressed="false">
+            <svg viewBox="0 0 24 24"><path d="m17 2 4 4-4 4M3 11v-1a4 4 0 0 1 4-4h14M7 22l-4-4 4-4M21 13v1a4 4 0 0 1-4 4H3"/></svg><span>Schleife</span>
           </button>
-          <button class="chip" data-cmd="forward" data-arg="10" title="10 Sekunden vorspulen">
-            <svg viewBox="0 0 24 24"><path d="m13 19 9-7-9-7v14ZM2 19l9-7-9-7v14Z"/></svg> 10 s
+          <button class="mode" id="autoplay" title="Ist die Warteschlange leer, kommt ähnliche Musik" aria-pressed="false">
+            <svg viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z"/></svg><span>Autoplay</span>
           </button>
-          <button class="chip" id="video" title="Video im Call">Video</button>
-          <button class="chip" id="autoplay" title="Ist die Warteschlange leer, kommt ähnliche Musik">
-            <svg viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z"/></svg> Autoplay
+          <button class="mode" id="video" title="Bild im Call (Bär oder Musikvideo)" aria-pressed="false">
+            <svg viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3"/></svg><span>Video</span>
           </button>
-          <button class="chip" id="softstop" title="Langsam ausblenden und stoppen">
-            <svg viewBox="0 0 24 24"><path d="M3 6c6 0 12 12 18 12"/></svg> Sanft stoppen
-          </button>
-          <button class="chip" data-cmd="stop" title="Sofort stoppen">
-            <svg viewBox="0 0 24 24" class="solid"><rect x="6" y="6" width="12" height="12" rx="2"/></svg> Stopp
+          <button class="mode" id="stop-menu" title="Stoppen: sanft ausblenden oder sofort">
+            <svg viewBox="0 0 24 24" class="solid"><rect x="6" y="6" width="12" height="12" rx="2"/></svg><span>Stopp</span>
           </button>
         </div>
         <div class="call-bar" id="call-bar">
@@ -121,13 +117,19 @@
       <button role="tab" data-tab="search">Suche</button>
       <button role="tab" data-tab="local">Mediathek</button>
       <button role="tab" data-tab="library">Meins</button>
-      <button role="tab" data-tab="fades">Fades</button>
+      <button role="tab" data-tab="dj">DJ</button>
+      <button role="tab" data-tab="fades">Übergänge</button>
     </nav>
 
     <div class="tab" id="tab-queue">
       <div class="tab-head">
         <span class="muted" id="queue-sum"></span>
-        <button class="chip" data-cmd="clear">Leeren</button>
+        <div class="chip-row">
+          <button class="chip" data-cmd="shuffle" title="Warteschlange mischen">
+            <svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg> Mischen
+          </button>
+          <button class="chip" data-cmd="clear">Leeren</button>
+        </div>
       </div>
       <ol class="list" id="queue"></ol>
       <p class="empty" id="queue-empty">Die Warteschlange ist leer. Such dir unter „Suche“ etwas aus.</p>
@@ -199,6 +201,45 @@
       <ol class="list" id="top"></ol>
       <h3 class="section" id="listeners-head">Wer hört am meisten</h3>
       <ol class="list" id="listeners"></ol>
+    </div>
+
+    <div class="tab" id="tab-dj" hidden>
+      <div class="hello dj-hello">
+        <img class="dj-avatar" id="dj-avatar" alt="">
+        <div><h3 id="dj-name">DJ</h3><p class="muted" id="dj-look"></p></div>
+      </div>
+
+      <div class="dj-card" id="dj-react-card">
+        <div class="dj-card-head"><h4>Bär reagieren lassen</h4><span class="muted">sieht man im Video im Call</span></div>
+        <div class="react-grid" id="dj-react"></div>
+      </div>
+
+      <div class="dj-card" id="dj-bday-card">
+        <div class="dj-card-head"><h4>🎂 Geburtstag</h4><span class="muted" id="bday-hint"></span></div>
+        <div class="bday-on" id="bday-on" hidden>
+          <p id="bday-text"></p>
+          <button class="btn" id="bday-stop">Party beenden</button>
+        </div>
+        <form class="inline-form" id="bday-form">
+          <input id="bday-name" placeholder="Name" maxlength="40" autocomplete="off">
+          <button class="btn primary" type="submit">Party starten</button>
+        </form>
+      </div>
+
+      <div class="dj-card" id="dj-sticker-card">
+        <div class="dj-card-head"><h4>Sticker</h4><span class="muted">antippen schickt ihn in den Musik-Raum</span></div>
+        <div class="sticker-grid" id="stickers"></div>
+      </div>
+
+      <div class="dj-card" id="dj-blick-card">
+        <div class="dj-card-head"><h4>👀 Blick</h4><span class="muted">schaut auf Kameras und Bildschirme im Call</span></div>
+        <div class="row-btns">
+          <button class="btn" id="blick-all">Jetzt hinschauen</button>
+          <button class="btn" id="blick-me">Nur auf mich</button>
+        </div>
+        <p class="muted small-hint" id="blick-hint"></p>
+        <label class="toggle"><input type="checkbox" id="blick-me-on"><span></span> Sprüche über mich erlaubt</label>
+      </div>
     </div>
 
     <div class="tab" id="tab-fades" hidden>

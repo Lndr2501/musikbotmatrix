@@ -173,7 +173,7 @@ class Player:
         self.baer: BaerDJ | None = None
         if cfg.baer_enabled:
             h = int(cfg.video_height) // 2 * 2
-            self.baer = BaerDJ((h * 16 // 9) // 2 * 2, h, cfg.baer_assets or None)
+            self.baer = BaerDJ((h * 16 // 9) // 2 * 2, h, cfg.baer_assets or None, tz=cfg.moderation_tz)
         self.ansager = Ansager(cfg.ansage_voice, {cfg.dj_name: cfg.dj_name_spoken}) \
             if cfg.ansage_enabled else None
         self.moderator = Moderator(cfg.moderation_tz, dj=cfg.dj_name)
@@ -359,6 +359,8 @@ class Player:
         if self.state != "playing":
             return False
         self.state = "paused"
+        if self.baer is not None:
+            self.baer.hold_state("pause")
         return True
 
     def resume(self) -> bool:
@@ -366,7 +368,14 @@ class Player:
             return False
         self.state = "playing"
         self._wall_base = asyncio.get_running_loop().time() - self._pos
+        if self.baer is not None:
+            self.baer.hold_state(None)
         return True
+
+    def react(self, event: str, seconds: float = 2.5, *, after_talk: bool = False) -> None:
+        """Der Baer reagiert kurz (z. B. "skip", "favorit"), falls das Paket dafuer ein Bild hat."""
+        if self.baer is not None:
+            self.baer.react(event, seconds, after_talk=after_talk)
 
     def toggle(self) -> str:
         if self.state == "playing":
@@ -384,9 +393,12 @@ class Player:
             await self._teardown()
             self.reset_master()
             self.state = "stopped"
+            if self.baer is not None:
+                self.baer.hold_state(None)
 
     async def skip(self) -> bool:
         """Aktuellen Titel beenden und nächsten starten."""
+        self.react("skip", 2.0)
         self._gen += 1
         async with self._lock:
             await self._teardown()
@@ -406,15 +418,23 @@ class Player:
         return True
 
     def set_volume(self, value: int) -> int:
-        self.volume = max(0, min(MAX_VOLUME, value))
+        old, self.volume = self.volume, max(0, min(MAX_VOLUME, value))
+        if self.volume != old:
+            self.react("lauter" if self.volume > old else "leiser", 2.0)
         return self.volume
 
     def set_audience(self, faces: list, listeners: list[str] | None = None) -> None:
         """Call-Teilnehmer [(Name, Avatar|None)] fuer den Hintergrund des Baer-Bilds;
         `listeners`: Namen, die der Baer zurufen darf (ohne ihn selbst)."""
+        before = set(self._listeners)
         self._listeners = list(listeners or [])
         if self.baer is not None:
             self.baer.set_audience(faces)
+            now = set(self._listeners)
+            if now - before:                     # jemand kam dazu: winken
+                self.react("hallo", 2.5)
+            elif before - now:
+                self.react("tschuess", 2.5)
 
     # ------------------------------------------------------------ Zurufe
     def _zuruf_ok(self) -> bool:
@@ -461,6 +481,18 @@ class Player:
                 await self.shout(self.moderator.zuruf(self._listeners, drop=drop, vibe=vibe, song=song))
                 next_at = loop.time() + self._zuruf_gap()
                 build_since = None
+
+    async def shout_soon(self, text: str, wait: float = 20.0) -> bool:
+        """Reinrufen, sobald es passt (hoechstens `wait` s warten). Ohne laufende Musik gar nicht."""
+        loop = asyncio.get_running_loop()
+        end = loop.time() + wait
+        while self.state == "playing":
+            if self._zuruf_ok():
+                return await self.shout(text)
+            if loop.time() >= end:
+                break
+            await asyncio.sleep(0.5)
+        return False
 
     async def shout(self, text: str) -> bool:
         """Zuruf ueber die laufende Musik legen (Musik kurz leiser, Baer redet)."""
@@ -805,6 +837,8 @@ class Player:
                     await asyncio.sleep(0.2)
                     anchor = loop.time()
                     continue
+                # Pause-Pose folgt dem Zustand (auch wenn z. B. !skip aus der Pause neu startet)
+                baer.hold_state("pause" if self.state == "paused" else None)
                 try:
                     frame = await asyncio.to_thread(baer.render, loop.time())
                 except Exception:  # noqa: BLE001

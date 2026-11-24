@@ -153,6 +153,7 @@ class Blick:
         got = await self._snap(cands)
         if not got:
             return True
+        self._react("blick", 4.0)
         new = set()
         for c, img in got:
             fp = fingerprint(img)
@@ -169,6 +170,7 @@ class Blick:
         if not any(c in live for c, _ in got):          # inzwischen alle Kameras aus / Leute weg
             return True
         if await self.player.shout(text):
+            self._react("blick_lachen", 3.0, after_talk=True)
             self._lines.append(text)
             log.info("Blick: %d Bilder angeschaut, Spruch gesagt", len(got))
         return True
@@ -186,6 +188,7 @@ class Blick:
             got = await self._snap(cands)
             if not got:
                 return "noimage", None
+            self._react("blick", 4.0)
             for c, img in got:
                 self._last_print[c] = fingerprint(img)
             text = await self.comment(got, {c for c, _ in got})
@@ -193,8 +196,15 @@ class Blick:
                 return "nothing", None
             self._lines.append(text)
             said = await self._say_soon(text)
+            if said:
+                self._react("blick_lachen", 3.0, after_talk=True)
             log.info("Blick (manuell): %d Bilder angeschaut, %s", len(got), "gesagt" if said else "in den Chat")
             return ("said" if said else "text"), text
+
+    def _react(self, event: str, seconds: float, **kw) -> None:
+        react = getattr(self.player, "react", None)
+        if react is not None:
+            react(event, seconds, **kw)
 
     async def _say_soon(self, text: str) -> bool:
         """Reinrufen, sobald es passt (hoechstens SAY_WAIT s warten). Ohne laufende Musik gar nicht."""

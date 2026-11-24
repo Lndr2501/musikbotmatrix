@@ -15,6 +15,25 @@ Optional ``desk/``: das DJ-Pult aus derselben Kamera, einmal gedimmt (``base``) 
 voll leuchtend (``glow``). Der Bot legt es unter den Baeren (die Clips sind dort, wo das Pult
 vor ihm steht, schon ausgeschnitten) und blendet LED-Front, Kanten, Pegel und Jogwheels live
 zwischen beiden Bildern.
+
+Posen-Pakete (``"bob": true``): je Clip ein einzelnes Standbild (z. B. aus einem Bildmodell) auf
+derselben Leinwand wie ein 3D-Paket (gleiche ``anchors``, Buehne und Pult). Sie wippen per Code im
+Takt und stehen hinter dem Pult (das wird ueber sie gelegt, nichts muss ausgeschnitten sein).
+Bauen: ``tools/posen_paket.py``.
+
+Optionale Extras im Manifest (alle Pfade relativ zum Paket):
+
+* ``events``: Ereignis -> Clip, z. B. ``{"skip": "ueberrascht", "pause": "schlafen"}``. Der Bot
+  loest sie aus (`BaerDJ.react`, `BaerDJ.hold_state`); Clips der Sorte ``react`` kommen sonst nie.
+* ``moods``: zusaetzliche Clips fuer ``idle`` (keine Musik), ``calm`` (ruhige Stellen) und
+  ``night`` (0–6 Uhr).
+* ``seasons``: ``{"weihnachten": {"clips": {"mix": "xmas_mix"}, "stage": "weihnachten"}}`` – Kostuem
+  (Clip-Ersatz) und Buehne; aktiv nach Datum oder von Hand (`BaerDJ.set_season`). Die Saison
+  ``nacht`` gilt 0–6 Uhr, wenn keine andere ansteht.
+* ``stage.variants``: weitere Buehnenbilder auf derselben Leinwand (``calm``, ``build``, ``drop`` fuer
+  die Songteile, dazu die Saisons), ``stage.front``: Publikum im Vordergrund (``down``/``up``).
+* ``sprites``: Bilder fuer die Partikel (``note``, ``herz``, ``stern``, ``konfetti_*`` …),
+  ``cover``: Ersatz-Titelbild fuer Titel ohne eigenes.
 """
 
 from __future__ import annotations
@@ -25,8 +44,11 @@ import logging
 import math
 import random
 import threading
+import time
 from collections import OrderedDict, deque
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import av
 import numpy as np
@@ -55,6 +77,30 @@ CACHE_FRAMES = 96
 BAND_EDGES = (2, 3, 4, 6, 9, 13, 19, 27, 39, 56, 80, 115, 165)
 BRIGHT_BIN = 56             # ab ~2,6 kHz zaehlt als "hell" (Hi-Hats, Becken)
 CALM_ENERGY = 0.35          # darunter (geglaettete Lautheit) gilt ein Song als ruhig
+# Saisons nach Datum (Monat, Tag) von–bis einschliesslich; ueber den Jahreswechsel erlaubt
+SEASONS = (("weihnachten", (12, 1), (12, 26)), ("silvester", (12, 31), (1, 1)),
+           ("halloween", (10, 25), (10, 31)), ("sommer", (6, 21), (8, 31)))
+NIGHT_HOURS = (0, 6)        # Nachtmodus (Ortszeit) von–bis
+MOOD_OF = {"calm": "calm", "break": "calm", "build": "build", "drop": "drop"}   # Songteil -> Buehne
+MOOD_HOLD = 1.5             # so lange muss ein Songteil anliegen, bevor die Buehne wechselt (s)
+MOOD_MIN = 4.0              # so lange bleibt eine Buehnen-Stimmung mindestens (s)
+MOOD_FADE = 1.2             # Ueberblendung zwischen Buehnen (s), beim Drop kuerzer
+BG_VARIANTS = 3             # so viele Buehnen-Varianten bleiben gleichzeitig vorberechnet im RAM
+REACT_STALE = 2.0           # aeltere Reaktions-Wuensche verfallen (Baer war nicht zu sehen)
+# Partikel zu Ereignissen (Sprite, Anzahl)
+REACT_SPRITES = {"favorit": ("herz", 5), "ratlos": ("fragezeichen", 2), "skip": ("ausrufezeichen", 2),
+                 "lauter": ("note", 3), "hallo": ("stern", 3), "blick_lachen": ("stern", 3)}
+HYPE_SPRITES = ("note", "herz", "stern", "funke")
+CONFETTI = ("konfetti_gold", "konfetti_rosa", "konfetti_rot", "konfetti_tuerkis", "konfetti_violett")
+
+
+def season_for(day: date) -> str | None:
+    """Saison zum Datum (oder None)."""
+    md = (day.month, day.day)
+    for name, a, b in SEASONS:
+        if (a <= md <= b) if a <= b else (md >= a or md <= b):
+            return name
+    return None
 
 
 def _font(size: int, bold: bool = True):
@@ -279,6 +325,7 @@ class Pack:
         self.fpb = int(m.get("fpb", 16))
         self.beats = int(m.get("beats", 4))
         self.static = bool(m.get("static", False))
+        self.bob = bool(m.get("bob", False))       # Einzelposen mit Buehne/Pult: wippen, hinter dem Pult
         self.clips: dict[str, list[bytes]] = {}
         self.kind: dict[str, str] = {}
         self.talking: set[str] = set()
@@ -326,11 +373,35 @@ class Pack:
                 self.desk = self._load_desk(path / "desk", m["desk"], width, height)
             except Exception:  # noqa: BLE001
                 log.exception("Pult-Bilder unbrauchbar – zeichne das einfache Pult")
+        # Extras (alle optional): Ereignisse, Stimmungs-Clips, Saisons, Partikel-Bilder, Ersatz-Titelbild
+        self.events = {e: c for e, c in (m.get("events") or {}).items() if c in self.kind}
+        self.moods = {k: [c for c in v if c in self.kind] for k, v in (m.get("moods") or {}).items()}
+        variants = self.stage["variants"] if self.stage is not None else {}
+        self.seasons: dict[str, dict] = {}
+        for name, info in (m.get("seasons") or {}).items():
+            self.seasons[name] = {"clips": {a: b for a, b in (info.get("clips") or {}).items() if b in self.kind},
+                                  "stage": info.get("stage") if info.get("stage") in variants else None}
+        self.sprites: dict[str, Image.Image] = {}
+        side = max(12, height // 14)
+        for name, rel in (m.get("sprites") or {}).items():
+            try:
+                img = Image.open(path / rel).convert("RGBA")
+                img.thumbnail((side, side), Image.LANCZOS)
+                self.sprites[name] = img
+            except Exception:  # noqa: BLE001
+                log.warning("Partikel-Bild %s unbrauchbar", rel)
+        self.cover = None
+        if m.get("cover"):
+            try:
+                self.cover = Image.open(path / m["cover"]).convert("RGB")
+            except Exception:  # noqa: BLE001
+                log.warning("Ersatz-Titelbild unbrauchbar")
         self._cache: OrderedDict[tuple[str, int], Image.Image] = OrderedDict()
         self._lock = threading.Lock()
 
     def _load_stage(self, d: Path, info: dict, width: int, height: int) -> dict | None:
-        """Buehnenbild aufs Ausgabebild legen; EQ-Wand und Scheinwerfer in Ausgabe-Pixeln."""
+        """Buehnenbild aufs Ausgabebild legen; EQ-Wand und Scheinwerfer in Ausgabe-Pixeln.
+        Weitere Buehnen (``variants``) bleiben komprimiert, bis sie gebraucht werden (`stage_canvas`)."""
         f = next((d / f"bg.{ext}" for ext in ("webp", "jpg", "png") if (d / f"bg.{ext}").exists()), None)
         if f is None:
             return None
@@ -338,14 +409,35 @@ class Pack:
         sw, sh = max(1, round(pw * self.scale)), max(1, round(ph * self.scale))
         x0 = (width - sw) // 2
         y0 = int(self.top_y - float(info.get("oy", 0)) * self.scale)
-        canvas = Image.new("RGB", (width, height), (8, 6, 14))
-        canvas.paste(Image.open(f).convert("RGB").resize((sw, sh), Image.LANCZOS), (x0, y0))
+        self._stage_geo = (width, height, sw, sh, x0, y0)
+        canvas = self._place_stage(Image.open(f))
         eq = info.get("regions", {}).get("eq")
         if eq:
             eq = (int(x0 + eq[0] * self.scale), int(y0 + eq[1] * self.scale),
                   int(x0 + eq[2] * self.scale), int(y0 + eq[3] * self.scale))
         spots = [(x0 + a * self.scale, y0 + b * self.scale) for a, b in info.get("spots", [])]
-        return {"bg": canvas, "eq": eq, "spots": [p for p in spots if -20 <= p[1] < height * 0.5]}
+        variants = {name: (d / rel).read_bytes() for name, rel in (info.get("variants") or {}).items()
+                    if (d / rel).is_file()}
+        front = {}
+        for name, rel in (info.get("front") or {}).items():         # Publikum vorne: nur der sichtbare Teil
+            if (d / rel).is_file():
+                img = self._place_stage(Image.open(d / rel), "RGBA")
+                box = img.getbbox()
+                if box is not None:
+                    front[name] = (box[:2], img.crop(box))
+        return {"bg": canvas, "eq": eq, "spots": [p for p in spots if -20 <= p[1] < height * 0.5],
+                "variants": variants, "front": front}
+
+    def _place_stage(self, img: Image.Image, mode: str = "RGB") -> Image.Image:
+        width, height, sw, sh, x0, y0 = self._stage_geo
+        canvas = Image.new(mode, (width, height), (8, 6, 14) if mode == "RGB" else (0, 0, 0, 0))
+        small = img.convert(mode).resize((sw, sh), Image.LANCZOS)
+        canvas.paste(small, (x0, y0), small if mode == "RGBA" else None)
+        return canvas
+
+    def stage_canvas(self, variant: str) -> Image.Image:
+        """Buehnen-Variante auf Ausgabegroesse (dekodiert bei jedem Aufruf – der Aufrufer merkt es sich)."""
+        return self._place_stage(Image.open(io.BytesIO(self.stage["variants"][variant])))
 
     def _load_desk(self, d: Path, info: dict, width: int, height: int) -> dict | None:
         """Pult-Bilder auf Ausgabegroesse bringen (gleiche Skala/Lage wie die Clips)."""
@@ -393,7 +485,7 @@ class Pack:
             img = img.resize((max(1, int(img.width * self.scale)), max(1, int(img.height * self.scale))),
                              Image.LANCZOS)
         elif img.size != self.size:
-            img = img.resize(self.size, Image.BILINEAR)
+            img = img.resize(self.size, Image.LANCZOS if self.bob else Image.BILINEAR)
         with self._lock:
             self._cache[key] = img
             while len(self._cache) > CACHE_FRAMES:
@@ -419,6 +511,8 @@ class Pack:
 # (eigene Pakete) bekommen einen Wert nach ihrer Sorte.
 MOVES: dict[str, tuple[float, int, str, tuple[str, ...]]] = {
     "coffee": (0.05, -1, "", ("calm",)),
+    "neutral": (0.2, -1, "", ("calm",)),
+    "nod": (0.35, 0, "", ("calm", "break")),
     "sway": (0.15, -1, "", ("calm", "break")),
     "heart": (0.2, -1, "", ("calm", "break")),
     "stretch": (0.25, -1, "", ("break",)),
@@ -429,6 +523,7 @@ MOVES: dict[str, tuple[float, int, str, tuple[str, ...]]] = {
     "knobs": (0.4, 0, "", ("build",)),
     "cue": (0.45, 0, "", ("build",)),
     "mix": (0.45, 0, "", ()),
+    "mix_b": (0.5, 0, "", ("build",)),
     "groove": (0.5, 0, "", ()),
     "lowpump": (0.5, -1, "bass", ("break",)),
     "scratch": (0.55, 1, "bright", ("build",)),
@@ -446,8 +541,11 @@ MOVES: dict[str, tuple[float, int, str, tuple[str, ...]]] = {
     "spin": (0.85, 0, "", ()),
     "headbang": (0.9, 1, "bass", ("drop",)),
     "jump": (0.95, 1, "bass", ("drop",)),
+    # Stimmungs-Clips der Posen-Pakete (nur ueber "moods" im Angebot)
+    "ruhiger_song": (0.1, -1, "", ("calm", "break")),
+    "nacht_gaehnen": (0.1, -1, "", ("calm",)),
 }
-KIND_ENERGY = {"groove": 0.5, "hype": 0.8, "special": 0.3, "talk": 0.4, "shout": 0.6}
+KIND_ENERGY = {"groove": 0.5, "hype": 0.8, "special": 0.3, "talk": 0.4, "shout": 0.6, "react": 0.3}
 FAST_BPM, SLOW_BPM = 124.0, 96.0
 BASSY, BRIGHT = 0.32, 0.22           # Schwellen fuer "low" und "bright" aus Beat.state
 
@@ -473,7 +571,9 @@ class Director:
     """Waehlt, welcher Loop laeuft – passend zum Song: ruhige Stellen ruhige Moves, Build-ups
     am Pult schrauben, Drops Hype, Breaks schunkeln; schnelle Songs schnelle Moves. Reden bei
     Ansagen, Rufen bei Zurufen, Kaffee in Stille. Wechsel an Taktgrenzen; die letzten Moves
-    werden gemieden, damit es abwechslungsreich bleibt."""
+    werden gemieden, damit es abwechslungsreich bleibt.
+
+    Vorrang: Reden > Reaktion (`react_hold`, kurz) > Zustand (`state_clip`, z. B. Pause) > Musik."""
 
     GROOVE_SWITCH = 0.6     # je Takt: anderer Groove-Move (ruhige Songs seltener, wilde oefter)
     HYPE_ON_LOUD = 0.4      # je Takt bei lauter Musik: Hype-Move
@@ -496,11 +596,28 @@ class Director:
         self.planned = False                             # laufender Clip kam ueber seinen Einstieg
         self._decided: tuple[float, int] | None = None
         self._recent.append(self.clip)
+        self.react_hold: tuple[str, float, float] | None = None   # (Clip, ab, bis) – Wanduhr
+        self.state_clip: str | None = None                        # haelt, bis er geloescht wird
+        self.night = False
+        self._held = False
+
+    def _hold(self, now: float) -> str | None:
+        r = self.react_hold
+        if r is not None:
+            if now >= r[2]:
+                self.react_hold = None
+            elif now >= r[1]:
+                return r[0]
+        return self.state_clip
+
+    def _mood(self, *names: str) -> list[str]:
+        return [c for n in names for c in self.pack.moods.get(n, ())]
 
     def _pick(self, kinds: str | tuple[str, ...], avoid: str | None = None,
-              st: dict | None = None) -> str | None:
+              st: dict | None = None, extra: list[str] | tuple[str, ...] = ()) -> str | None:
         kinds = (kinds,) if isinstance(kinds, str) else kinds
         names = [n for k in kinds for n in self.pack.names(k)]
+        names += [n for n in extra if n in self.pack.kind and n not in names]
         if not names:
             return None
         fresh = [n for n in names if n != avoid and n not in self._recent]
@@ -539,6 +656,16 @@ class Director:
             self._bar = bar
             return
         self._bar = bar
+        hold = self._hold(now)
+        if hold is not None:                       # Reaktion/Zustand: sofort, solange er gilt
+            self._held = True
+            if self.clip != hold:
+                self._switch(hold, pos, now, at_beat=True)
+            return
+        if self._held:                             # vorbei: zurueck in den Groove
+            self._held = False
+            self._switch(self._pick("groove", self.clip, st), pos, now, at_beat=True)
+            return
         drop = st["drop_at"] is not None and now - st["drop_at"] < 8 * 60 / max(60.0, st["bpm"] or 120)
         song = dict(st, section="drop") if drop else st
         if drop and st["drop_at"] != self._last_drop:          # Drop: sofort (naechster Beat) jubeln
@@ -565,15 +692,21 @@ class Director:
         section = song.get("section", "groove")
         energy = song.get("energy", song["loud"])
         changed, self._section = section != self._section, section
-        if not st["audible"]:
-            return "coffee" if "coffee" in self.pack.kind else self._pick("groove")
+        if not st["audible"]:                     # Stille: Kaffee & Co., nicht staendig wechseln
+            idle = self._mood("idle") or (["coffee"] if "coffee" in self.pack.kind else [])
+            if not idle:
+                return self._pick("groove")
+            if self.clip in idle and (len(idle) == 1 or self.rng.random() < 0.85):
+                return None
+            return self.rng.choice([n for n in idle if n != self.clip] or idle)
         if drop:
             return self._pick(hype_kind, self.clip, song)
         if section == "build":                    # Spannung: am Pult schrauben, jeden Takt was anderes
             return self._pick(("groove", "special", "hype"), self.clip, song)
         if section in ("break", "calm"):         # ruhig: weniger wechseln, nichts Wildes
             if changed or kind == "hype" or self.rng.random() < 0.4:
-                return self._pick(("groove", "special"), self.clip, song)
+                extra = self._mood("calm", *(("night",) if self.night else ()))
+                return self._pick(("groove", "special"), self.clip, song, extra)
             return None
         if energy > 0.55 and self.rng.random() < self.HYPE_ON_LOUD * (0.5 + energy):
             return self._pick(hype_kind, self.clip, song)
@@ -581,15 +714,21 @@ class Director:
         if (self._specials_due >= self.SPECIAL_EVERY and self.pack.names("special")
                 and self.rng.random() < 0.5):
             self._specials_due = 0
-            return self._pick("special", self.clip, song)
+            return self._pick("special", self.clip, song, self._mood("night") if self.night else ())
         if kind != "groove" or self.rng.random() < self.GROOVE_SWITCH * (0.6 + 0.6 * energy):
             return self._pick("groove", self.clip, song)
         return None
 
 # ---------------------------------------------------------------- Baer
 class BaerDJ:
-    def __init__(self, width: int, height: int, assets: str | Path | None = None) -> None:
+    def __init__(self, width: int, height: int, assets: str | Path | None = None,
+                 tz: str | None = None) -> None:
         self.w, self.h = width, height
+        try:
+            self.tz = ZoneInfo(tz) if tz else None
+        except Exception:  # noqa: BLE001
+            log.warning("Zeitzone %r unbekannt – nehme die des Rechners", tz)
+            self.tz = None
         self.assets = Path(assets) if assets else ASSETS
         self.beat = Beat()
         self.clock = BeatClock()
@@ -613,6 +752,24 @@ class BaerDJ:
         self._meters = [0.0] * 8
         self._audience: list[tuple[str, Image.Image]] = []
         self._t = None
+        self._react_req: tuple[str, float, bool, float] | None = None   # (Ereignis, s, nach dem Reden, gewuenscht)
+        self._state_ev: str | None = None
+        self._season_manual: tuple[str, float] | None = None        # (Saison, bis – Unix-Zeit)
+        self.season: str | None = None
+        self.night = False
+        self._cal_at = -1e9
+        self._mood = ""                     # Buehnen-Variante ("" = Grundbuehne)
+        self._mood_prev = ""
+        self._mood_at = -1e9
+        self._mood_fade = MOOD_FADE
+        self._mood_cand: tuple[str, float] = ("", 0.0)
+        self._bg_cache: OrderedDict[str, list] = OrderedDict()   # Variante -> 8 Helligkeiten (lazy)
+        self._last_drop = None
+        self._sprite_due = 0.0
+        self._fallback_cover = None
+        self._react_done: float | None = None
+        self._manifest: dict | None = None        # nur fuer info(), solange das Paket nicht geladen ist
+        self._fade_cache: dict[tuple[str, int], Image.Image] = {}
 
     # ------------------------------------------------------------ Steuerung
     def set_track(self, title: str, artist: str, cover: "av.VideoFrame | None" = None) -> None:
@@ -662,6 +819,27 @@ class BaerDJ:
                         self.artist if artist is None else artist)
         self._talk_from, self._talk_until = start, start + seconds
 
+    def react(self, event: str, seconds: float = 2.5, *, after_talk: bool = False) -> None:
+        """Kurze Reaktion auf ein Ereignis (Clip aus ``events`` im Manifest), sofort oder direkt
+        nach der laufenden Ansage. Wer nichts dafuer hat, merkt nichts."""
+        self._react_req = (event, seconds, after_talk, time.monotonic())
+
+    def hold_state(self, event: str | None) -> None:
+        """Zustand halten (z. B. ``"pause"``), bis er mit None wieder geloest wird."""
+        self._state_ev = event
+
+    def has_season(self, name: str) -> bool:
+        """Hat das Paket ein Kostuem fuer diese Saison?"""
+        if self._ready:
+            return name in self.pack.seasons
+        self.info()                              # noch nicht geladen: nur ins Manifest schauen
+        return name in (self._manifest.get("seasons") or {})
+
+    def set_season(self, name: str | None, until: float | None = None) -> None:
+        """Saison von Hand (z. B. ``"geburtstag"``) bis `until` (Unix-Zeit); None = wieder nach Datum."""
+        self._season_manual = (name, until or float("inf")) if name else None
+        self._cal_at = -1e9
+
     def reset(self) -> None:
         self.beat.reset()
         self._talk_until = 0.0
@@ -691,6 +869,10 @@ class BaerDJ:
         self._f_big = _font(max(12, H // 22))
         self._f_small = _font(max(9, H // 34))
         self._f_note = _font(max(12, H // 14), bold=False)
+        if self.pack.cover is not None:
+            c = self.pack.cover.copy()
+            c.thumbnail((int(H * 0.24), int(H * 0.24)))
+            self._fallback_cover = c
         self._ready = True
 
     # --------------------------------------------------------------- Bild
@@ -709,7 +891,8 @@ class BaerDJ:
 
     def _bear(self, now: float, pos: float, talking: bool) -> Image.Image:
         pack, d = self.pack, self.director
-        name = d.clip
+        alias = pack.seasons[self.season]["clips"] if self.season in pack.seasons else {}
+        name = alias.get(d.clip, d.clip)                     # Saison: Kostuem statt Grundpose
         if talking and name in pack.talking and self._voice(now) > MOUTH_OPEN:
             name += "_open"
         rel = pos - d.start
@@ -722,7 +905,7 @@ class BaerDJ:
             img = pack.frame_at(name, rel)
         fade = (now - d.changed_at) / XFADE
         if d.prev is not None and 0 <= fade < 1:
-            old = pack.frame_at(d.prev[0], pos - d.prev[1])
+            old = pack.frame_at(alias.get(d.prev[0], d.prev[0]), pos - d.prev[1])
             if old.size == img.size:
                 img = Image.blend(old, img, fade * fade * (3 - 2 * fade))
         return img
@@ -735,6 +918,8 @@ class BaerDJ:
         talking = self.talking(now)
         calm = 72.0 if (talking or not st["audible"]) else None
         pos = self.clock.advance(now, st, calm)
+        self._calendar(now)
+        self._apply_requests(now)
         self.director.update(pos, now, st, talking, self._talk_kind)
         # weich nachgefuehrt statt flackernd
         a = 1 - math.exp(-dt / 0.08)
@@ -746,8 +931,18 @@ class BaerDJ:
         k = int(pos)
         hue = HUES[(k // 4) % 4]
 
-        img = self._bg[min(7, int(bass * 7.99))].copy()
+        level = min(7, int(bass * 7.99))
+        mood = self._stage_mood(now, st.get("section", "groove"))
+        img = self._bg_level(mood, level)
+        fk = (now - self._mood_at) / self._mood_fade
+        if 0 <= fk < 1 and self._mood_prev != mood:         # Buehne wechselt: weich ueberblenden
+            img = Image.blend(self._bg_level(self._mood_prev, level), img, fk * fk * (3 - 2 * fk))
+        else:
+            img = img.copy()
         stage = getattr(self.pack, "stage", None)
+        if st["drop_at"] is not None and st["drop_at"] != self._last_drop:
+            self._last_drop = st["drop_at"]
+            self._confetti(now)
         if stage is not None and stage["eq"]:
             self._draw_eq(img, stage["eq"], st["bands"])
         glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -765,19 +960,31 @@ class BaerDJ:
             self._draw_audience(img, pos, loud, now)
 
         desk = getattr(self.pack, "desk", None)
-        if desk is not None:                                 # 3D-Pult unter dem Baeren
+        bob = getattr(self.pack, "bob", False)
+        if desk is not None and not bob:                     # 3D-Pult unter dem Baeren
             self._draw_desk(img, desk, pos, bass, loud, pulse)
         self._draw_particles(img, now, hue)                  # hinter dem Baeren, nie im Gesicht
         spr = self._bear(now, pos, talking)
-        if self.pack.static:                                 # einzelne Posen: Wippen per Code
+        if self.pack.static or bob:                          # einzelne Posen: Wippen per Code
             amp = 0.25 + 0.75 * loud
             sy = 1 - 0.05 * pulse * amp + 0.02 * amp
+            h0 = spr.height
             spr = spr.resize((max(1, int(spr.width * (2 - sy))), max(1, int(spr.height * sy))),
                              Image.BILINEAR)
             dy = -H * 0.03 * amp * math.sin(math.pi * ph) ** 2
-            img.paste(spr, ((W - spr.width) // 2, int(H * 0.80 - spr.height + dy)), spr)
+            bottom = H * 0.80 if self.pack.static else self.pack.top_y + h0
+            img.paste(spr, ((W - spr.width) // 2, int(bottom - spr.height + dy)), spr)
         else:
             img.paste(spr, ((W - spr.width) // 2, self.pack.top_y), spr)
+        if desk is not None and bob:                         # Posen stehen hinter dem Pult
+            self._draw_desk(img, desk, pos, bass, loud, pulse)
+        front = stage["front"] if stage is not None else {}
+        if front and st["audible"]:                          # Publikum vorne: Haende hoch beim Drop/Hype
+            d_at = st["drop_at"]
+            up = (d_at is not None and now - d_at < 6.0) or self.pack.kind.get(self.director.clip) == "hype"
+            key = "up" if up and "up" in front else "down" if "down" in front else next(iter(front))
+            (fx, fy), fimg = front[key]
+            img.paste(fimg, (fx, fy + int(H * 0.008 * pulse * (0.3 + 0.7 * loud))), fimg)
 
         dr = ImageDraw.Draw(img, "RGBA")
         if desk is None:
@@ -796,8 +1003,8 @@ class BaerDJ:
             if flash > 3:
                 dr.rectangle([0, 0, W, H], fill=(255, 255, 255, flash))
 
-        if self._cover is not None:                          # Titelbild klein oben rechts
-            c = self._cover
+        c = self._cover if self._cover is not None else self._fallback_cover
+        if c is not None:                                    # Titelbild klein oben rechts
             x, y = W - c.width - int(W * .03), int(H * .04)
             r = max(3, H // 90)
             dr.rounded_rectangle([x - 4, y - 2, x + c.width + 6, y + c.height + 6], radius=r, fill=(0, 0, 0, 110))
@@ -859,26 +1066,167 @@ class BaerDJ:
         k = max(0.0, min(1.0, (now - self._talk_from) / 0.25, (self._talk_until + 0.3 - now) / 0.3))
         return k * k * (3 - 2 * k)
 
+    # ------------------------------------------------------------ Zustaende
+    def _calendar(self, now: float) -> None:
+        """Jede halbe Minute: Nacht? Welche Saison (von Hand oder nach Datum)?"""
+        if now - self._cal_at < 30.0:
+            return
+        self._cal_at = now
+        t = datetime.now(self.tz) if self.tz is not None else datetime.now()
+        self.night = NIGHT_HOURS[0] <= t.hour < NIGHT_HOURS[1]
+        self.season = self._pick_season(self.pack.seasons, t)
+
+    def _pick_season(self, seasons: dict, t: datetime) -> str | None:
+        """Von Hand > nach Datum > Nacht-Outfit (0–6 Uhr) – nur Saisons, fuer die es ein Kostuem gibt."""
+        man = self._season_manual
+        if man is not None and time.time() >= man[1]:
+            self._season_manual = man = None
+        name = man[0] if man is not None else season_for(t.date())
+        if name not in seasons and NIGHT_HOURS[0] <= t.hour < NIGHT_HOURS[1]:
+            name = "nacht"
+        return name if name in seasons else None
+
+    def info(self) -> dict:
+        """Fuers Dashboard: Saison, Nacht und ausloesbare Reaktionen – auch bevor das Paket geladen ist
+        (dann nur aus dem Manifest)."""
+        if self._ready:
+            return {"season": self.season, "night": self.night, "events": sorted(self.pack.events)}
+        if self._manifest is None:
+            try:
+                with open(self.assets / "manifest.json") as fh:
+                    self._manifest = json.load(fh)
+            except (OSError, ValueError):
+                self._manifest = {}
+        m = self._manifest
+        t = datetime.now(self.tz) if self.tz is not None else datetime.now()
+        return {"season": self._pick_season(m.get("seasons") or {}, t),
+                "night": NIGHT_HOURS[0] <= t.hour < NIGHT_HOURS[1], "events": sorted(m.get("events") or {})}
+
+    def _apply_requests(self, now: float) -> None:
+        """Wuensche aus dem Bot (anderer Thread) an die Regie geben."""
+        req = self._react_req
+        if req is not None and req[3] != self._react_done:
+            self._react_done = req[3]
+            event, seconds, after_talk, at = req
+            clip = self.pack.events.get(event)
+            if clip is not None and time.monotonic() - at < REACT_STALE:
+                start = max(now, self._talk_until + 0.3) if after_talk else now
+                self.director.react_hold = (clip, start, start + seconds)
+                self._burst(event, start)
+        self.director.state_clip = self.pack.events.get(self._state_ev) if self._state_ev else None
+        self.director.night = self.night
+
+    def _stage_mood(self, now: float, section: str) -> str:
+        """Welche Buehne? Saison vor Songteil; Songteile erst, wenn sie eine Weile anliegen."""
+        stage = getattr(self.pack, "stage", None)
+        variants = stage["variants"] if stage is not None else {}
+        if not variants:
+            return ""
+        season = self.pack.seasons.get(self.season or "", {}).get("stage")
+        mood = MOOD_OF.get(section, "")
+        want = season or (mood if mood in variants else "")
+        if want == self._mood:
+            self._mood_cand = (want, now)
+            return want
+        if self._mood_cand[0] != want:
+            self._mood_cand = (want, now)
+        drop = want == "drop"
+        stale = self._mood not in ("", *MOOD_OF.values())           # Saison-Buehne, Saison ist vorbei
+        if season or drop or stale or (now - self._mood_cand[1] >= MOOD_HOLD and now - self._mood_at >= MOOD_MIN):
+            self._mood_prev, self._mood, self._mood_at = self._mood, want, now
+            self._mood_fade = 0.3 if drop else MOOD_FADE
+        return self._mood
+
+    def _bg_level(self, variant: str, i: int) -> Image.Image:
+        """Hintergrund in Helligkeit `i` (0..7); Varianten werden erst bei Bedarf dekodiert."""
+        if not variant:
+            return self._bg[i]
+        entry = self._bg_cache.get(variant)
+        if entry is None:
+            entry = self._bg_cache[variant] = [self.pack.stage_canvas(variant), [None] * 8]
+            while len(self._bg_cache) > BG_VARIANTS:
+                self._bg_cache.popitem(last=False)
+        else:
+            self._bg_cache.move_to_end(variant)
+        img = entry[1][i]
+        if img is None:
+            from PIL import ImageEnhance
+            img = entry[1][i] = ImageEnhance.Brightness(entry[0]).enhance(0.8 + 0.05 * i)
+        return img
+
+    # ------------------------------------------------------------ Partikel
+    def _spawn(self, t0: float, x: float, y: float, vx: float, vy: float, what: str, hue,
+               life: float = 1.6, gravity: float = 40.0) -> None:
+        """what: Name eines Sprites aus dem Paket oder ein Zeichen (♪ …)."""
+        self._particles.append([x, y, vx, vy, what, hue, t0, life, self.pack.sprites.get(what), gravity])
+
+    def _burst(self, event: str, t0: float) -> None:
+        name, n = REACT_SPRITES.get(event, ("", 0))
+        if name not in self.pack.sprites:
+            return
+        W, H, r = self.w, self.h, self._rng
+        for i in range(n):
+            self._spawn(t0 + i * 0.15, W / 2 + r.uniform(-W * .12, W * .12), H * r.uniform(.12, .28),
+                        r.uniform(-40, 40), r.uniform(-120, -60), name, (255, 255, 255), life=1.4)
+
+    def _confetti(self, now: float) -> None:
+        names = [n for n in CONFETTI if n in self.pack.sprites]
+        if not names:
+            return
+        W, H, r = self.w, self.h, self._rng
+        for _ in range(16):
+            self._spawn(now + r.uniform(0, 0.4), r.uniform(W * .08, W * .92), r.uniform(-H * .08, H * .05),
+                        r.uniform(-30, 30), r.uniform(60, 160), r.choice(names), (255, 255, 255),
+                        life=2.2, gravity=120.0)
+
+    def _faded(self, p: list, fade: float) -> Image.Image:
+        """Sprite mit Deckkraft `fade` (in 8 Stufen gemerkt)."""
+        q = min(7, int(fade * 8))
+        if q == 7:
+            return p[8]
+        key = (p[4], q)
+        img = self._fade_cache.get(key)
+        if img is None:
+            img = p[8].copy()
+            img.putalpha(img.getchannel("A").point(lambda a, f=(q + 0.5) / 8: int(a * f)))
+            self._fade_cache[key] = img
+        return img
+
     def _draw_particles(self, img: Image.Image, now: float, hue: tuple) -> None:
         """Noten/Herzen bei Hype-Moves: steigen links und rechts neben dem Baeren auf
-        und treiben nach aussen; gezeichnet vor dem Baeren-Sprite, also dahinter."""
+        und treiben nach aussen; gezeichnet vor dem Baeren-Sprite, also dahinter.
+        Dazu Konfetti beim Drop, Zzz in der Pause und kleine Bilder zu Reaktionen."""
         W, H = img.size
-        if self.pack.kind.get(self.director.clip) == "hype" and self._rng.random() < 0.35:
-            side = self._rng.choice((-1, 1))
-            self._particles.append([W / 2 + side * self._rng.uniform(W * .24, W * .34),
-                                    H * self._rng.uniform(.30, .50),
-                                    side * self._rng.uniform(15, 60), self._rng.uniform(-150, -80),
-                                    self._rng.choice("♪♫♥★"), hue, now])
-        dr = ImageDraw.Draw(img, "RGBA")
+        sprites, r = self.pack.sprites, self._rng
+        if self.pack.kind.get(self.director.clip) == "hype" and r.random() < 0.35:
+            side = r.choice((-1, 1))
+            hype = [n for n in HYPE_SPRITES if n in sprites]
+            self._spawn(now, W / 2 + side * r.uniform(W * .24, W * .34), H * r.uniform(.30, .50),
+                        side * r.uniform(15, 60), r.uniform(-150, -80),
+                        r.choice(hype) if hype else r.choice("♪♫♥★"), hue)
+        if self._state_ev == "pause" and "zzz_wolke" in sprites and now >= self._sprite_due:
+            self._sprite_due = now + 1.4
+            self._spawn(now, W * r.uniform(.55, .6), H * .2, r.uniform(15, 30), -45, "zzz_wolke", hue,
+                        life=2.4, gravity=0.0)
+        dr = None
         alive = []
         for p in self._particles:
             age = now - p[6]
-            if 0 <= age < 1.6:
-                alive.append(p)
-                px = p[0] + p[2] * age * H / 720
-                py = p[1] + (p[3] * age + 40 * age * age) * H / 720
-                dr.text((px, py), p[4], font=self._f_note, fill=p[5] + (int(255 * (1 - age / 1.6)),))
-        self._particles = alive[-60:]
+            if age >= p[7]:
+                continue
+            alive.append(p)
+            if age < 0:                                  # kommt erst noch (gestaffelt)
+                continue
+            px = p[0] + p[2] * age * H / 720
+            py = p[1] + (p[3] * age + p[9] * age * age) * H / 720
+            fade = 1 - age / p[7]
+            if p[8] is not None:
+                spr = self._faded(p, fade)
+                img.paste(spr, (int(px - spr.width / 2), int(py - spr.height / 2)), spr)
+            else:
+                dr = dr or ImageDraw.Draw(img, "RGBA")
+                dr.text((px, py), p[4], font=self._f_note, fill=p[5] + (int(255 * fade),))
+        self._particles = alive[-80:]
 
     def _draw_bubble(self, img, now: float, headline: str, title: str, artist: str, hue) -> None:
         """Sprechblase: dunkle Glas-Karte mit Neon-Rand, ploppt auf, Spitze zeigt auf den Baeren."""

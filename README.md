@@ -80,11 +80,13 @@ unabhängig vom Ordnernamen.)
 | `!playlist play <name> [shuffle]` · `enqueue <name>` | abspielen (ersetzt Queue) / hinten anhängen |
 | `!blick [mich\|Name]` | DJ schaut **jetzt** auf alle Kameras/Bildschirme (oder nur deine / die einer Person) und sagt was dazu |
 | `!blick an\|aus\|status` | Kamera-Sprüche nur für dich ab-/anschalten |
+| `!geburtstag <Name>` · `aus` | DJ feiert mit: Geburtstags-Outfit/-Bühne (falls im Paket) und ein Ständchen; `!geburtstag` zeigt den Stand |
+| `!sticker [Name]` | Sticker schicken (ohne Name: alle zeigen), geht in jedem Raum |
 | `!help` | Kommandoliste |
 
 **Wer darf steuern?** Nur Leute, die selbst im Call sind (Element Call oder
-klassischer Call). `!help`, `!status`, `!queue` und `!playlist list|show`
-gehen für alle im Raum. Abschaltbar mit
+klassischer Call). `!help`, `!status`, `!queue`, `!playlist list|show`, `!sticker`
+und `!geburtstag` (nur nachsehen) gehen für alle im Raum. Abschaltbar mit
 `CALL_ONLY_CONTROL=false`; `ALLOWED_USERS` gilt zusätzlich.
 
 **Auto-Verlassen:** Ist der Song zu Ende und die Warteschlange leer, verlässt
@@ -101,12 +103,18 @@ persönlichen Link. Einmal öffnen, danach bleibst du eingeloggt (90 Tage,
 verlängert sich bei jeder Nutzung). Ein neues `!dashboard` macht den alten Link
 ungültig, angemeldete Geräte bleiben drin.
 
-Im Dashboard: Wiedergabe steuern (Play/Pause, Spulen, ±10 s, Lautstärke, Loop,
-Video, Autoplay), Call beitreten/verlassen/neu verbinden, Warteschlange sortieren
-(ziehen), Suche mit Trefferliste („jetzt“, „als Nächstes“, „hinten anstellen“),
-Mediathek (eigene Dateien), Datei vom Gerät abspielen, Playlists, Favoriten,
-Statistik und die Fade-Regler (Crossfade-Länge, Einblenden, sanft stoppen,
-sofort überblenden).
+Im Dashboard:
+
+- **Player:** Play/Pause, vor/zurück, ±10 s, Lautstärke und vier Schalter
+  (Schleife, Autoplay, Video, Stopp mit Wahl „sanft ausblenden“ oder „sofort“),
+  dazu Call beitreten/verlassen/neu verbinden.
+- **Warteschlange:** sortieren (ziehen), mischen, leeren.
+- **Suche, Mediathek, Meins:** Trefferliste („jetzt“, „als Nächstes“, „hinten
+  anstellen“), eigene Dateien, Datei vom Gerät, Playlists, Favoriten, Statistik.
+- **DJ:** Bär reagieren lassen (Winken, Daumen hoch, Lachen …), Geburtstags-Party
+  starten/beenden, Sticker schicken, Blick auslösen und für sich an-/ausschalten.
+  Karten ohne Inhalt (kein Bildpaket, keine Sticker, Blick aus) bleiben ausgeblendet.
+- **Übergänge:** Crossfade-Länge, Einblenden, sanft stoppen, sofort überblenden.
 
 Das Dashboard läuft im Bot auf `WEB_PORT` (Standard 8095). Für den Zugriff von
 außen einen Reverse-Proxy oder Cloudflare-Tunnel davor setzen und `PUBLIC_URL`
@@ -162,6 +170,9 @@ Die LED-Wand hinter dem Bären zeigt einen Equalizer aus dem laufenden Audio.
 | `ZURUF_ENABLED` | `true` | Zurufe mitten im Song („Lndr, du bist geil!“, „Hände hoch!“, nach Drops) |
 | `ZURUF_EVERY` | `75` | Abstand der Zurufe im Schnitt (Sekunden, zufällig ±40 %) |
 | `BAER_ASSETS` | eingebaut | Ordner mit eigenem Bär-Paket (z. B. `/data/baer-qwen`) |
+| `AVATAR_FILE` | eingebautes Logo | eigenes Profilbild des Bots (PNG/JPEG, z. B. `/data/avatar.png`) |
+| `STICKER_DIR` | – | Ordner mit Sticker-PNGs für `!sticker` (Dateiname = Name, ideal 512 × 512) |
+| `BIRTHDAY_HOURS` | `12` | so lange läuft eine `!geburtstag`-Party |
 
 **Eigener Bär (3D):** Eingebaut ist ein einfacher Bär aus Einzelbildern. Ein
 richtig animiertes Paket entsteht mit Blender (z. B. auf einem Mac). Der Plüsch-Bär
@@ -219,6 +230,35 @@ LED-Front, Kanten, Pegel und Jogwheels live im Takt zwischen beiden Bildern.
 Den Ordner nach `data/` legen (lesbar für UID 10000) und
 `BAER_ASSETS=/data/baer-paket` setzen. Ein kaputtes Paket fällt auf den
 eingebauten Bären zurück.
+
+**Posen-Paket aus Standbildern:** Statt Blender-Loops gehen auch freigestellte Einzelbilder
+(RGBA, alle gleich groß, z. B. aus einem Bildmodell). Sie landen auf Bühne und Pult eines
+3D-Pakets, stehen hinter dem Pult und wippen per Code im Takt (`"bob": true` im Manifest).
+Die erste Pose legt fest, wo Kopf und Füße sitzen; `--groesse` skaliert den Bären.
+
+```sh
+python tools/posen_paket.py --vorlage data/baer-paket --out data/baer-posen \
+    groove:neutral=neutral.png groove:mix=mixen.png groove:sway=links.png,rechts.png \
+    hype:cheer=jubeln.png talk:talk=sprechen-zu.png+sprechen-offen.png \
+    shout:shout=rufen-zu.png+rufen-offen.png special:coffee=kaffee.png react:winken=winken.png
+```
+
+`a.png,b.png` ergibt einen Loop über 4 Beats, `+offen.png` das Bild mit offenem Mund
+(Lippen-Sync beim Reden; außerhalb des Munds pixelgleich). Clips der Sorte `react` wählt der
+Bär nie von selbst. Im Manifest lassen sich dann ergänzen (alles optional):
+
+| Schlüssel | Wirkung |
+|---|---|
+| `events` | Ereignis → Clip: `hallo`/`tschuess` (jemand kommt in den Call / geht), `skip`, `lauter`, `leiser`, `favorit`, `plattenkiste` (`!play`), `ratlos` (Fehler), `blick`/`blick_lachen` (Blick), `pause` (hält, solange pausiert) |
+| `moods` | Zusatz-Clips für `idle` (keine Musik), `calm` (ruhige Stellen), `night` (0–6 Uhr) |
+| `seasons` | Kostüm je Saison: `{"weihnachten": {"clips": {"mix": "xmas_mix", …}, "stage": "weihnachten"}}`. Nach Datum: Weihnachten 1.–26.12., Silvester 31.12.–1.1., Halloween 25.–31.10., Sommer 21.6.–31.8.; `geburtstag` von Hand, `nacht` 0–6 Uhr (wenn sonst nichts ansteht) |
+| `stage.variants` | weitere Bühnenbilder auf derselben Leinwand: `calm`, `build`, `drop` (wechseln mit dem Songteil, weich überblendet) und die Saison-Bühnen |
+| `stage.front` | Publikum im Vordergrund, `down`/`up` (Hände hoch bei Drop und Hype) |
+| `sprites` | Bilder für Partikel: `note`, `herz`, `stern`, `funke`, `konfetti_*` (Drop), `zzz_wolke` (Pause), `fragezeichen`, `ausrufezeichen` |
+| `cover` | Ersatz-Titelbild für Titel ohne eigenes |
+
+Die Bühne wird so skaliert, dass der Bär das Bild füllt: sichtbar ist nur der mittlere Teil
+(bei 1680 × 960 etwa x 160–1520, y 140–900). Deko am Rand fällt weg.
 
 ## KI im Call: Blick (optional)
 

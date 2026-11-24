@@ -89,6 +89,8 @@ class Dashboard:
         r.add_post("/api/upload", self.upload_play)
         r.add_get("/api/local", self.local)
         r.add_post("/api/local", self.local_play)
+        r.add_get("/api/sticker/{name}", self.sticker_image)
+        r.add_get("/api/dj/avatar", self.dj_avatar)
 
     # --------------------------------------------------------------- Lifecycle
     async def start(self) -> None:
@@ -223,6 +225,28 @@ class Dashboard:
         data = await request.json()
         await self.bot.web_local_play(user, str(data.get("op", "")), str(data.get("key", ""))[:100])
         return web.json_response(self.bot.web_state(user))
+
+    async def sticker_image(self, request: web.Request) -> web.StreamResponse:
+        """Sticker-Bild fuer die Auswahl im Dashboard (nur eingeloggt)."""
+        self._user(request)
+        path = self.bot._sticker_files().get(request.match_info["name"].lower())
+        if not path:
+            raise web.HTTPNotFound(text="Diesen Sticker gibt es nicht.")
+        return self._image(path)
+
+    async def dj_avatar(self, request: web.Request) -> web.StreamResponse:
+        """Profilbild des DJs (AVATAR_FILE oder das eingebaute Logo)."""
+        self._user(request)
+        path = self.bot.cfg.avatar_file or os.path.join(STATIC_DIR, "avatar.png")
+        if not os.path.isfile(path):
+            raise web.HTTPNotFound(text="Kein Profilbild.")
+        return self._image(path)
+
+    @staticmethod
+    def _image(path: str) -> web.StreamResponse:
+        resp = web.FileResponse(path)
+        resp.headers["Cache-Control"] = "private, max-age=3600"
+        return resp
 
     async def upload_play(self, request: web.Request) -> web.StreamResponse:
         """Eine Audio-/Videodatei (multipart, Feld `file`) hochladen und sofort abspielen."""

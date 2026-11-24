@@ -1,4 +1,5 @@
 """Dashboard: Login/Sitzungen, API-Schutz, Warteschlangen-Aktionen, Ausblenden."""
+import os
 import asyncio
 import sqlite3
 import threading
@@ -383,3 +384,49 @@ def test_local_library_lists_and_plays_files_without_247(tmp_path):
     assert done[1][0] == "all" and done[1][2] is True and len(done[1][1]) == 2
     with pytest.raises(MediaError):
         asyncio.run(bot.web_local_play("@u:x", "now", "radio:gibtsnicht"))
+
+
+def test_dashboard_serves_stickers_and_dj_avatar_only_after_login(tmp_path):
+    from aiohttp.test_utils import TestClient, TestServer
+    from PIL import Image
+
+    from musikbot.web import Dashboard
+
+    Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(tmp_path / "herz.png")
+    Image.new("RGB", (8, 8)).save(tmp_path / "avatar.png")
+
+    async def go():
+        bot = StubBot()
+        bot.cfg.avatar_file = str(tmp_path / "avatar.png")
+        bot._sticker_files = lambda: {"herz": str(tmp_path / "herz.png")}
+        client = TestClient(TestServer(Dashboard(bot).app))
+        await client.start_server()
+        try:
+            assert (await client.get("/api/sticker/herz")).status == 401
+            assert (await client.get("/api/dj/avatar")).status == 401
+            link = bot.webauth.issue_link_token("@lndr:m.x")
+            await client.post("/api/link", json={"token": link}, headers={"X-Musikbot": "1"})
+            r = await client.get("/api/sticker/Herz")
+            assert r.status == 200 and r.content_type == "image/png"
+            assert r.headers["Cache-Control"] == "private, max-age=3600"
+            assert (await client.get("/api/sticker/gibtsnicht")).status == 404
+            assert (await client.get("/api/sticker/..%2Fherz")).status == 404
+            r = await client.get("/api/dj/avatar")
+            assert r.status == 200 and r.content_type == "image/png"
+        finally:
+            await client.close()
+
+    _run(go())
+
+
+def test_every_element_the_dashboard_script_uses_exists():
+    """app.js holt Elemente per $("#id") – fehlt eins in index.html, bricht die ganze Seite."""
+    import re
+
+    from musikbot.web import STATIC_DIR
+    js = open(os.path.join(STATIC_DIR, "app.js"), encoding="utf-8").read()
+    html = open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8").read()
+    used = set(re.findall(r'\$\("#([\w-]+)"\)', js))
+    assert used and not used - set(re.findall(r'id="([\w-]+)"', html))
+    for tab in ("queue", "dj", "fades"):
+        assert f'data-tab="{tab}"' in html and f'id="tab-{tab}"' in html
